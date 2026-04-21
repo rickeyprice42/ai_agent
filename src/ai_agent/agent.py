@@ -46,7 +46,27 @@ class Agent:
 
             if response.tool_calls:
                 for tool_call in response.tool_calls:
-                    tool_result = self.tools.execute(tool_call.name, tool_call.arguments)
+                    if not self.tools.has(tool_call.name):
+                        tool_result = (
+                            f"Инструмент '{tool_call.name}' не найден. "
+                            "Используй только инструменты из предоставленного списка."
+                        )
+                        self.memory.append_message(
+                            Message(role="tool", content=tool_result, name=tool_call.name)
+                        )
+                        continue
+
+                    arguments, validation_error = self.tools.validate_arguments(
+                        tool_call.name,
+                        tool_call.arguments,
+                    )
+                    if validation_error:
+                        self.memory.append_message(
+                            Message(role="tool", content=validation_error, name=tool_call.name)
+                        )
+                        continue
+
+                    tool_result = self.tools.execute(tool_call.name, arguments)
                     self.memory.append_message(
                         Message(role="tool", content=tool_result, name=tool_call.name)
                     )

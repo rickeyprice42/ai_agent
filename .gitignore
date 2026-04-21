@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 data/
+frontend/node_modules/
+frontend/dist/
+src-tauri/target/
+.pytest_cache/

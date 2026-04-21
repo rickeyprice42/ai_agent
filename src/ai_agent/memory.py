@@ -63,3 +63,9 @@ class MemoryStore:
             )
             for item in items
         ]
+
+    def snapshot(self) -> MemoryState:
+        return MemoryState(
+            notes=list(self.state.notes),
+            history=list(self.state.history),
+        )
