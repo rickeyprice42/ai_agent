@@ -18,7 +18,7 @@ if str(SRC) not in sys.path:
 from backend.routes import router
 
 
-app = FastAPI(title="Personal AI Agent API", version="0.1.0")
+app = FastAPI(title="Avelin API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,

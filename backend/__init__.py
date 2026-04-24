@@ -1,1 +1,1 @@
-"""Backend package for the Personal AI Agent web app."""
+"""Backend package for the Avelin web app."""

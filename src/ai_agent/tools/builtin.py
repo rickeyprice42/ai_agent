@@ -10,7 +10,7 @@ def register_builtin_tools(registry: ToolRegistry, memory: MemoryStore) -> None:
     registry.register(
         Tool(
             name="get_time",
-            description="Показывает текущее локальное время и дату.",
+            description="Показывает текущие локальные дату и время.",
             schema={"type": "object", "properties": {}},
             handler=lambda _: datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )

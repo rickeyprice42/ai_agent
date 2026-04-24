@@ -1,20 +1,76 @@
 :root {
   color-scheme: light;
-  font-family: "Segoe UI", "Trebuchet MS", sans-serif;
-  --surface: rgba(255, 250, 242, 0.74);
-  --surface-strong: rgba(255, 251, 245, 0.92);
-  --surface-glass: rgba(255, 245, 232, 0.68);
-  --line: rgba(93, 72, 48, 0.15);
-  --text: #2e2418;
-  --muted: #75634f;
-  --accent: #d06a3b;
-  --accent-strong: #a94d23;
-  --accent-cool: #5b7faa;
-  --user: #e9ddca;
-  --assistant: #fff7ed;
-  --tool: #efe7ff;
-  --danger: #b6483d;
-  --shadow: 0 20px 60px rgba(77, 51, 24, 0.15);
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  --bg: #f5f5f2;
+  --surface: #ffffff;
+  --surface-soft: #f0f0ed;
+  --surface-strong: #ffffff;
+  --line: #d7d7d2;
+  --line-strong: #111111;
+  --text: #111111;
+  --muted: #666660;
+  --inverse: #ffffff;
+  --user: #111111;
+  --assistant: #ffffff;
+  --tool: #eeeeea;
+  --danger: #9a1d1d;
+  --shadow: 0 18px 44px rgba(0, 0, 0, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #080808;
+    --surface: #111111;
+    --surface-soft: #191919;
+    --surface-strong: #050505;
+    --line: #2d2d2d;
+    --line-strong: #ffffff;
+    --text: #f7f7f2;
+    --muted: #aaa9a2;
+    --inverse: #080808;
+    --user: #f7f7f2;
+    --assistant: #151515;
+    --tool: #202020;
+    --danger: #ff8f8f;
+    --shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+  }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f5f2;
+  --surface: #ffffff;
+  --surface-soft: #f0f0ed;
+  --surface-strong: #ffffff;
+  --line: #d7d7d2;
+  --line-strong: #111111;
+  --text: #111111;
+  --muted: #666660;
+  --inverse: #ffffff;
+  --user: #111111;
+  --assistant: #ffffff;
+  --tool: #eeeeea;
+  --danger: #9a1d1d;
+  --shadow: 0 18px 44px rgba(0, 0, 0, 0.08);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #080808;
+  --surface: #111111;
+  --surface-soft: #191919;
+  --surface-strong: #050505;
+  --line: #2d2d2d;
+  --line-strong: #ffffff;
+  --text: #f7f7f2;
+  --muted: #aaa9a2;
+  --inverse: #080808;
+  --user: #f7f7f2;
+  --assistant: #151515;
+  --tool: #202020;
+  --danger: #ff8f8f;
+  --shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
 }
 
 * {
@@ -26,10 +82,7 @@ body {
   min-width: 320px;
   min-height: 100vh;
   color: var(--text);
-  background:
-    radial-gradient(circle at top left, rgba(236, 172, 118, 0.45), transparent 24rem),
-    radial-gradient(circle at right, rgba(123, 151, 193, 0.28), transparent 28rem),
-    linear-gradient(135deg, #efe5d5 0%, #f8f4ed 45%, #ece3d2 100%);
+  background: var(--bg);
 }
 
 button,
@@ -47,7 +100,7 @@ button {
 
 .shell {
   display: grid;
-  grid-template-columns: 340px minmax(0, 1fr);
+  grid-template-columns: 332px minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -55,10 +108,9 @@ button {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  padding: 1.5rem;
+  padding: 1.25rem;
   border-right: 1px solid var(--line);
-  background: rgba(255, 248, 238, 0.72);
-  backdrop-filter: blur(14px);
+  background: var(--surface-soft);
 }
 
 .brand-card,
@@ -74,26 +126,34 @@ button {
 .brand-card {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 1rem 1.1rem;
-  border-radius: 24px;
+  gap: 0.9rem;
+  padding: 1rem;
+  border-radius: 8px;
 }
 
 .brand-mark {
   display: grid;
+  flex: 0 0 auto;
   place-items: center;
   width: 56px;
   height: 56px;
-  border-radius: 18px;
-  font-weight: 700;
-  color: white;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
+.brand-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .eyebrow {
   margin: 0 0 0.3rem;
-  font-size: 0.72rem;
-  letter-spacing: 0.14em;
+  font-size: 0.73rem;
+  font-weight: 700;
   text-transform: uppercase;
   color: var(--muted);
 }
@@ -104,9 +164,13 @@ button {
   margin: 0;
 }
 
+.brand-card h1 {
+  font-size: 1.55rem;
+}
+
 .panel {
   padding: 1rem;
-  border-radius: 20px;
+  border-radius: 8px;
 }
 
 .panel-compact {
@@ -121,17 +185,52 @@ button {
   margin-bottom: 0.9rem;
 }
 
+.panel-heading-compact {
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.panel-heading-compact .eyebrow {
+  margin-bottom: 0;
+}
+
+.theme-switcher {
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 142px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
+.theme-option {
+  min-width: 0;
+  padding: 0.42rem 0.35rem;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.theme-option-active {
+  color: var(--inverse);
+  background: var(--text);
+}
+
 .status-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.8rem;
+  gap: 0.7rem;
 }
 
 .status-pill,
 .status-box,
 .header-tag {
-  border: 1px solid rgba(86, 66, 43, 0.08);
-  background: rgba(255, 255, 255, 0.56);
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
 }
 
 .status-pill {
@@ -139,24 +238,29 @@ button {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  padding: 0.8rem 0.9rem;
-  border-radius: 16px;
+  padding: 0.75rem 0.85rem;
+  border-radius: 8px;
 }
 
 .status-dot {
   width: 10px;
   height: 10px;
+  border: 1px solid var(--line-strong);
   border-radius: 999px;
-  background: linear-gradient(135deg, #79a76d, #4e8250);
-  box-shadow: 0 0 0 6px rgba(121, 167, 109, 0.12);
+  background: var(--line-strong);
 }
 
 .status-box {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
-  padding: 0.85rem 0.9rem;
-  border-radius: 16px;
+  min-width: 0;
+  padding: 0.8rem 0.85rem;
+  border-radius: 8px;
+}
+
+.status-box strong {
+  overflow-wrap: anywhere;
 }
 
 .status-label {
@@ -184,14 +288,15 @@ button {
   grid-template-columns: auto 1fr;
   gap: 0.7rem;
   align-items: start;
-  padding: 0.9rem;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.55);
-  border: 1px solid rgba(90, 70, 45, 0.08);
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
 }
 
 .note p {
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .note-index {
@@ -200,9 +305,9 @@ button {
   justify-content: center;
   min-width: 2rem;
   padding: 0.2rem 0.45rem;
+  border: 1px solid var(--line-strong);
   border-radius: 999px;
-  background: rgba(91, 127, 170, 0.12);
-  color: var(--accent-cool);
+  color: var(--text);
   font-size: 0.75rem;
   font-weight: 700;
 }
@@ -211,7 +316,8 @@ button {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  padding: 1.5rem;
+  min-width: 0;
+  padding: 1.25rem;
 }
 
 .hero {
@@ -220,82 +326,67 @@ button {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  min-height: 220px;
-  padding: 1.5rem 1.75rem;
-  border-radius: 28px;
+  min-height: 210px;
+  padding: 1.45rem 1.55rem;
+  border-radius: 8px;
 }
 
 .hero-copy {
-  max-width: 42rem;
+  max-width: 48rem;
+}
+
+.hero h2 {
+  max-width: 44rem;
+  font-size: clamp(1.7rem, 3vw, 3rem);
+  line-height: 1.05;
 }
 
 .hero-text {
-  max-width: 34rem;
-  margin: 0.8rem 0 0;
+  max-width: 36rem;
+  margin: 0.9rem 0 0;
   color: var(--muted);
   line-height: 1.55;
 }
 
-.hero-orbit {
-  position: relative;
+.hero-signet {
   display: grid;
+  flex: 0 0 auto;
   place-items: center;
-  width: 220px;
-  height: 220px;
+  width: 152px;
+  aspect-ratio: 1;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--inverse);
 }
 
-.hero-ring {
-  position: absolute;
-  border-radius: 999px;
-  border: 1px solid rgba(208, 106, 59, 0.24);
-}
-
-.hero-ring-large {
-  width: 200px;
-  height: 200px;
-  animation: float 10s linear infinite;
-}
-
-.hero-ring-small {
-  width: 128px;
-  height: 128px;
-  border-color: rgba(91, 127, 170, 0.3);
-  animation: floatReverse 8s linear infinite;
-}
-
-.hero-core {
-  display: grid;
-  place-items: center;
-  width: 72px;
-  height: 72px;
-  border-radius: 999px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
-  color: white;
-  font-weight: 700;
-  box-shadow: 0 18px 36px rgba(208, 106, 59, 0.24);
+.hero-signet span {
+  font-size: 5rem;
+  font-weight: 800;
+  line-height: 1;
 }
 
 .quick-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.8rem;
-  padding: 1rem;
-  border-radius: 24px;
+  gap: 0.65rem;
+  padding: 0.9rem;
+  border-radius: 8px;
 }
 
 .action-chip,
 .ghost-button,
 .composer button {
-  transition: transform 160ms ease, opacity 160ms ease, background 160ms ease;
+  transition: transform 160ms ease, opacity 160ms ease, background 160ms ease, color 160ms ease;
 }
 
 .action-chip,
 .ghost-button {
-  padding: 0.72rem 0.9rem;
-  border-radius: 999px;
+  padding: 0.68rem 0.82rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
   color: var(--text);
-  background: rgba(255, 255, 255, 0.62);
-  border: 1px solid rgba(86, 66, 43, 0.08);
+  background: var(--surface-strong);
   cursor: pointer;
 }
 
@@ -307,11 +398,11 @@ button {
 
 .chat-card {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-height: 0;
-  flex: 1;
-  border-radius: 28px;
   overflow: hidden;
+  border-radius: 8px;
 }
 
 .chat-header {
@@ -319,20 +410,25 @@ button {
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
-  padding: 1.1rem 1.3rem;
+  padding: 1rem 1.15rem;
   border-bottom: 1px solid var(--line);
+}
+
+.chat-header p {
+  margin: 0.25rem 0 0;
 }
 
 .header-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.55rem;
+  gap: 0.5rem;
 }
 
 .header-tag {
-  padding: 0.5rem 0.8rem;
+  padding: 0.48rem 0.72rem;
   border-radius: 999px;
   color: var(--text);
+  white-space: nowrap;
 }
 
 .header-tag-muted {
@@ -342,31 +438,38 @@ button {
 .messages {
   display: flex;
   flex-direction: column;
-  gap: 0.9rem;
-  padding: 1.25rem;
+  gap: 0.85rem;
   min-height: 360px;
   max-height: 58vh;
   overflow-y: auto;
-  background:
-    linear-gradient(to bottom, rgba(255, 253, 248, 0.45), rgba(250, 242, 233, 0.2)),
-    transparent;
+  padding: 1.1rem;
+  background: var(--surface-strong);
 }
 
 .message {
-  max-width: 78%;
-  padding: 0.95rem 1rem;
-  border-radius: 22px;
-  animation: rise 220ms ease;
+  max-width: min(78%, 780px);
+  padding: 0.9rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  animation: rise 180ms ease;
 }
 
 .message p {
   margin: 0.25rem 0 0;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .message-user {
   align-self: flex-end;
+  color: var(--inverse);
   background: var(--user);
+  border-color: var(--line-strong);
+}
+
+.message-user .message-role {
+  color: color-mix(in srgb, var(--inverse) 70%, transparent);
 }
 
 .message-assistant {
@@ -385,9 +488,19 @@ button {
 
 .message-role {
   font-size: 0.72rem;
-  letter-spacing: 0.06em;
+  font-weight: 700;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+.type-cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 0.12rem;
+  border-right: 2px solid currentColor;
+  vertical-align: -0.15em;
+  animation: blink 0.8s steps(2, start) infinite;
 }
 
 .typing-dots {
@@ -400,7 +513,7 @@ button {
   width: 0.55rem;
   height: 0.55rem;
   border-radius: 999px;
-  background: rgba(89, 71, 44, 0.45);
+  background: var(--text);
   animation: bounce 1s infinite ease-in-out;
 }
 
@@ -419,39 +532,39 @@ button {
   padding: 1.5rem;
   text-align: center;
   border: 1px dashed var(--line);
-  border-radius: 22px;
+  border-radius: 8px;
   color: var(--muted);
 }
 
 .empty-state p {
   margin: 0 0 0.45rem;
   color: var(--text);
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .composer {
   display: flex;
   flex-direction: column;
   gap: 0.8rem;
-  padding: 1.1rem 1.2rem 1.25rem;
+  padding: 1rem 1.1rem 1.1rem;
   border-top: 1px solid var(--line);
-  background: var(--surface-glass);
+  background: var(--surface-soft);
 }
 
 .composer textarea {
   width: 100%;
-  resize: vertical;
   min-height: 88px;
-  padding: 0.95rem 1rem;
-  border-radius: 18px;
+  padding: 0.9rem 0.95rem;
+  resize: vertical;
   border: 1px solid var(--line);
+  border-radius: 8px;
   background: var(--surface-strong);
   color: var(--text);
 }
 
 .composer textarea:focus {
-  outline: 2px solid rgba(208, 106, 59, 0.22);
-  border-color: rgba(208, 106, 59, 0.28);
+  outline: 2px solid var(--line-strong);
+  outline-offset: 2px;
 }
 
 .composer-row {
@@ -464,15 +577,21 @@ button {
 .composer-actions {
   display: flex;
   align-items: center;
-  gap: 0.7rem;
+  gap: 0.65rem;
 }
 
 .composer button {
-  border-radius: 999px;
-  padding: 0.8rem 1.2rem;
-  color: white;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  padding: 0.78rem 1.08rem;
+  border-radius: 8px;
+  color: var(--inverse);
+  background: var(--text);
   cursor: pointer;
+}
+
+.composer button.ghost-button {
+  color: var(--text);
+  background: var(--surface-strong);
+  border: 1px solid var(--line);
 }
 
 .composer button:disabled,
@@ -482,14 +601,10 @@ button {
   transform: none;
 }
 
-.ghost-button {
-  color: var(--text);
-}
-
 @keyframes rise {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
@@ -502,7 +617,7 @@ button {
   80%,
   100% {
     transform: translateY(0);
-    opacity: 0.45;
+    opacity: 0.4;
   }
   40% {
     transform: translateY(-4px);
@@ -510,21 +625,14 @@ button {
   }
 }
 
-@keyframes float {
-  from {
-    transform: rotate(0deg);
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
   }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes floatReverse {
-  from {
-    transform: rotate(360deg);
-  }
-  to {
-    transform: rotate(0deg);
+  50%,
+  100% {
+    opacity: 0;
   }
 }
 
@@ -539,26 +647,24 @@ button {
   }
 }
 
-@media (max-width: 960px) {
+@media (max-width: 760px) {
+  .sidebar,
+  .workspace {
+    padding: 0.8rem;
+  }
+
   .hero {
     flex-direction: column;
     align-items: flex-start;
     gap: 1rem;
   }
 
-  .hero-orbit {
-    width: 160px;
-    height: 160px;
+  .hero-signet {
+    width: 92px;
   }
 
-  .hero-ring-large {
-    width: 146px;
-    height: 146px;
-  }
-
-  .hero-ring-small {
-    width: 96px;
-    height: 96px;
+  .hero-signet span {
+    font-size: 3.2rem;
   }
 
   .chat-header,
@@ -577,5 +683,9 @@ button {
 
   .composer-actions {
     justify-content: space-between;
+  }
+
+  .composer-actions button {
+    flex: 1;
   }
 }

@@ -34,7 +34,7 @@ class Settings:
         memory_path = (root_dir / memory_raw).resolve()
 
         return cls(
-            agent_name=os.getenv("AGENT_NAME", "Nova"),
+            agent_name=os.getenv("AGENT_NAME", "Avelin"),
             model_provider=os.getenv("MODEL_PROVIDER", "mock"),
             model_name=os.getenv("MODEL_NAME", "mock-local"),
             ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
