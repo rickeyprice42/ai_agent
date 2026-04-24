@@ -1,29 +1,25 @@
-# Personal AI Agent
+# Avelin
 
-Личный AI-агент с веб-интерфейсом, API-слоем и архитектурой, которую позже можно упаковать в десктоп через Tauri.
+Личный AI-агент с веб-интерфейсом, FastAPI backend и отдельным ядром агента в
+`src/ai_agent/`. Проект подготовлен так, чтобы позже его можно было упаковать в
+desktop-приложение через Tauri.
 
 ## Структура
 
 ```text
 AI_agent/
-├─ backend/
-├─ frontend/
-├─ src/
-│  └─ ai_agent/
-├─ src-tauri/
-├─ main.py
+├─ backend/        FastAPI API: /api/health, /api/bootstrap, /api/chat
+├─ frontend/       React/Vite интерфейс
+├─ src/ai_agent/   ядро агента, LLM-провайдеры, память и инструменты
+├─ src-tauri/      будущий Tauri-слой, сейчас только заглушка
+├─ docs/           проектная документация, roadmap и логотипы
+├─ main.py         CLI-запуск агента
 ├─ requirements.txt
 └─ .env.example
 ```
 
-## Что уже есть
-
-- CLI-режим агента для локальной отладки.
-- Память на JSON.
-- Инструменты и базовый tool calling.
-- `mock` и `ollama` провайдеры.
-- FastAPI API для веб-клиента.
-- React/Vite каркас интерфейса.
+Старый экспериментальный каталог `Nova AI-Agent/` удален. Актуальная рабочая
+поверхность проекта: `frontend/`, `backend/`, `src/ai_agent/`, `docs/`.
 
 ## Backend
 
@@ -38,8 +34,6 @@ API поднимается на `http://127.0.0.1:8000`.
 
 ## Frontend
 
-Для фронтенда нужен установленный Node.js.
-
 ```powershell
 cd frontend
 npm install
@@ -48,9 +42,13 @@ npm run dev
 
 Vite dev server ожидается на `http://127.0.0.1:5173`.
 
-## Почему это удобно для Tauri
+Для production-проверки:
 
-- фронтенд уже отделен от backend;
-- папка `src-tauri/` зарезервирована под будущую десктопную упаковку;
-- UI будет переиспользован без переписывания логики чата;
-- backend можно оставить HTTP-слоем или позже встроить глубже в Tauri.
+```powershell
+cd frontend
+npm run build
+```
+
+## Roadmap
+
+Основной план работ лежит в [docs/roadmap.txt](docs/roadmap.txt).
