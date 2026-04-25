@@ -14,3 +14,10 @@
 
 Когда дойдем до Tauri-этапа, эту папку можно переинициализировать командой
 `npx tauri init` и настроить на сборку `frontend/dist`.
+
+Текущее окружение уже подготовлено для следующего шага:
+
+- Rust `1.95.0` (`stable-x86_64-pc-windows-msvc`);
+- Visual Studio Build Tools 2022/MSVC;
+- Microsoft Edge WebView2 Runtime;
+- Tauri CLI `2.10.1` через `frontend`: `npm run tauri`.
