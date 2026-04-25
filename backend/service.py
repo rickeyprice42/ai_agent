@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from urllib import error, request
+import json
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,25 +14,121 @@ if str(SRC) not in sys.path:
 
 from ai_agent.agent import Agent
 from ai_agent.config import Settings
+from ai_agent.database import AvelinDatabase
+
+
+AVAILABLE_MODELS = [
+    {
+        "provider": "mock",
+        "label": "Mock",
+        "description": "Локальный безопасный режим без внешней модели.",
+        "models": ["mock-local"],
+    },
+    {
+        "provider": "ollama",
+        "label": "Ollama",
+        "description": "Локальная LLM через Ollama API.",
+        "models": [],
+    },
+]
 
 
 class AgentService:
     def __init__(self) -> None:
         self.root_dir = ROOT
         self.settings = Settings.load(self.root_dir)
-        self.agent = Agent(self.settings)
+        self.database = AvelinDatabase(self.settings.database_file)
+        self._agents: dict[str, Agent] = {}
 
-    def chat(self, message: str) -> str:
-        return self.agent.respond(message)
+    def agent_for_user(self, user_id: str) -> Agent:
+        if user_id not in self._agents:
+            self._agents[user_id] = Agent(self.settings_for_user(user_id), user_id=user_id)
+        return self._agents[user_id]
 
-    def bootstrap(self) -> dict:
-        memory = self.agent.memory.snapshot()
+    def settings_for_user(self, user_id: str) -> Settings:
+        model_settings = self.database.get_model_settings(user_id)
+        return replace(
+            self.settings,
+            model_provider=model_settings["provider"],
+            model_name=model_settings["model_name"],
+            ollama_url=model_settings.get("ollama_url") or self.settings.ollama_url,
+        )
+
+    def available_models(self) -> list[dict]:
+        models = [dict(item) for item in AVAILABLE_MODELS]
+        ollama_models = self.installed_ollama_models()
+        for item in models:
+            if item["provider"] == "ollama":
+                item["models"] = ollama_models
+                if not ollama_models:
+                    item["description"] = (
+                        "Ollama API доступна, но установленные модели не найдены. "
+                        "Установи модель командой `ollama pull <model>`."
+                    )
+        return models
+
+    def installed_ollama_models(self) -> list[str]:
+        url = f"{self.settings.ollama_url.rstrip('/')}/api/tags"
+        try:
+            with request.urlopen(url, timeout=2) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, error.URLError, json.JSONDecodeError):
+            return []
+
+        models = payload.get("models", [])
+        if not isinstance(models, list):
+            return []
+
+        names: list[str] = []
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("model") or "").strip()
+            if name:
+                names.append(name)
+        return names
+
+    def model_settings(self, user_id: str) -> dict[str, str]:
+        return self.database.get_model_settings(user_id)
+
+    def update_model_settings(
+        self,
+        user_id: str,
+        provider: str,
+        model_name: str,
+        ollama_url: str | None = None,
+    ) -> dict[str, str]:
+        allowed = {item["provider"]: item["models"] for item in self.available_models()}
+        if provider not in allowed:
+            raise ValueError("Неподдерживаемый provider.")
+        if provider == "ollama" and not allowed[provider]:
+            raise ValueError("Ollama доступна, но установленные модели не найдены.")
+        if model_name not in allowed[provider]:
+            raise ValueError("Модель не найдена для выбранного provider.")
+
+        settings = self.database.set_model_settings(
+            user_id=user_id,
+            provider=provider,
+            model_name=model_name,
+            ollama_url=ollama_url,
+        )
+        self._agents.pop(user_id, None)
+        return settings
+
+    def chat(self, message: str, user_id: str) -> str:
+        return self.agent_for_user(user_id).respond(message)
+
+    def bootstrap(self, user_id: str) -> dict:
+        memory = self.agent_for_user(user_id).memory.snapshot()
+        user = self.database.get_user(user_id)
+        model_settings = self.database.get_model_settings(user_id)
         return {
             "agent_name": self.settings.agent_name,
-            "provider": self.settings.model_provider,
-            "model": self.settings.model_name,
+            "provider": model_settings["provider"],
+            "model": model_settings["model_name"],
             "notes": memory.notes,
             "history": memory.history,
+            "user": user,
         }
 
 

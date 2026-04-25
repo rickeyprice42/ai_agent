@@ -12,9 +12,13 @@ from ai_agent.types import Message
 
 
 class Agent:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, user_id: str = "local-user") -> None:
         self.settings = settings
-        self.memory = MemoryStore(settings.memory_file)
+        self.memory = MemoryStore(
+            database_path=settings.database_file,
+            legacy_json_path=settings.memory_file,
+            user_id=user_id,
+        )
         self.tools = ToolRegistry()
         register_builtin_tools(self.tools, self.memory)
         self.provider = self._build_provider()

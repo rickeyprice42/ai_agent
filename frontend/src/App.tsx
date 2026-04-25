@@ -1,9 +1,19 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import { fetchBootstrap, sendMessage } from "./api";
-import type { BootstrapPayload, ChatMessage } from "./types";
+import {
+  fetchBootstrap,
+  fetchMe,
+  fetchModelProviders,
+  login as authLogin,
+  logout as authLogout,
+  register as authRegister,
+  sendMessage,
+  updateModelSettings
+} from "./api";
+import type { BootstrapPayload, ChatMessage, ModelProviderOption, UserProfile } from "./types";
 
 const DRAFT_KEY = "avelin-draft";
 const THEME_KEY = "avelin-theme-mode";
+const AUTH_TOKEN_KEY = "avelin-auth-token";
 
 type ThemeMode = "auto" | "light" | "dark";
 type ResolvedTheme = "light" | "dark";
@@ -13,7 +23,14 @@ const EMPTY_BOOTSTRAP: BootstrapPayload = {
   provider: "mock",
   model: "mock-local",
   notes: [],
-  history: []
+  history: [],
+  user: {
+    id: "",
+    email: "",
+    username: "",
+    display_name: "",
+    auth_provider: "password"
+  }
 };
 
 const QUICK_ACTIONS = [
@@ -84,6 +101,20 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
   const [animatedMessageKey, setAnimatedMessageKey] = useState<string | null>(null);
+  const [authToken, setAuthToken] = useState(() => window.localStorage.getItem(AUTH_TOKEN_KEY) ?? "");
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authLoginValue, setAuthLoginValue] = useState("");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authUsername, setAuthUsername] = useState("");
+  const [authDisplayName, setAuthDisplayName] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
+  const [modelProviders, setModelProviders] = useState<ModelProviderOption[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState(EMPTY_BOOTSTRAP.provider);
+  const [selectedModel, setSelectedModel] = useState(EMPTY_BOOTSTRAP.model);
+  const [isModelSaving, setIsModelSaving] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readStoredThemeMode());
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveTheme(readStoredThemeMode()));
 
@@ -116,8 +147,27 @@ export default function App() {
   }, [messages, isSending, animatedMessageKey]);
 
   useEffect(() => {
-    void refreshBootstrap(true);
-  }, []);
+    if (!authToken) {
+      setIsLoading(false);
+      return;
+    }
+
+    window.localStorage.setItem(AUTH_TOKEN_KEY, authToken);
+    void fetchMe(authToken)
+      .then((user) => {
+        setCurrentUser(user);
+        void fetchModelProviders(authToken)
+          .then(setModelProviders)
+          .catch(() => setModelProviders([]));
+        return refreshBootstrap(true, false, authToken);
+      })
+      .catch(() => {
+        window.localStorage.removeItem(AUTH_TOKEN_KEY);
+        setAuthToken("");
+        setCurrentUser(null);
+        setIsLoading(false);
+      });
+  }, [authToken]);
 
   useEffect(() => {
     function applyTheme() {
@@ -137,7 +187,11 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [themeMode]);
 
-  async function refreshBootstrap(initial = false, animateLatestAssistant = false) {
+  async function refreshBootstrap(initial = false, animateLatestAssistant = false, token = authToken) {
+    if (!token) {
+      return;
+    }
+
     if (initial) {
       setIsLoading(true);
     } else {
@@ -145,9 +199,12 @@ export default function App() {
     }
 
     try {
-      const data = await fetchBootstrap();
+      const data = await fetchBootstrap(token);
       setBootstrap(data);
       setMessages(data.history);
+      setCurrentUser(data.user);
+      setSelectedProvider(data.provider);
+      setSelectedModel(data.model);
       setError(null);
 
       if (animateLatestAssistant) {
@@ -171,7 +228,7 @@ export default function App() {
 
   async function submitMessage(message: string) {
     const normalized = message.trim();
-    if (!normalized || isSending) {
+    if (!normalized || isSending || !authToken) {
       return;
     }
 
@@ -183,7 +240,7 @@ export default function App() {
     setAnimatedMessageKey(null);
 
     try {
-      await sendMessage(normalized);
+      await sendMessage(normalized, authToken);
       await refreshBootstrap(false, true);
       window.localStorage.removeItem(DRAFT_KEY);
       textareaRef.current?.focus();
@@ -212,11 +269,152 @@ export default function App() {
     await refreshBootstrap();
   }
 
+  async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsAuthSubmitting(true);
+    setAuthError(null);
+
+    try {
+      const payload =
+        authMode === "login"
+          ? await authLogin(authLoginValue.trim(), authPassword)
+          : await authRegister(
+              authEmail.trim(),
+              authUsername.trim(),
+              authPassword,
+              authDisplayName.trim() || authUsername.trim()
+            );
+      window.localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
+      setAuthToken(payload.token);
+      setCurrentUser(payload.user);
+      void fetchModelProviders(payload.token)
+        .then(setModelProviders)
+        .catch(() => setModelProviders([]));
+      setAuthPassword("");
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : "Не удалось выполнить вход.");
+    } finally {
+      setIsAuthSubmitting(false);
+    }
+  }
+
+  async function handleLogout() {
+    if (authToken) {
+      await authLogout(authToken);
+    }
+    window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    setAuthToken("");
+    setCurrentUser(null);
+    setBootstrap(EMPTY_BOOTSTRAP);
+    setMessages([]);
+    setInput("");
+    setModelProviders([]);
+  }
+
+  async function handleSaveModelSettings() {
+    if (!authToken) return;
+    setIsModelSaving(true);
+    setError(null);
+    try {
+      const settings = await updateModelSettings(authToken, {
+        provider: selectedProvider,
+        model_name: selectedModel,
+        ollama_url: ""
+      });
+      setSelectedProvider(settings.provider);
+      setSelectedModel(settings.model_name);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось обновить модель.");
+    } finally {
+      setIsModelSaving(false);
+    }
+  }
+
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void submitMessage(input);
     }
+  }
+
+  const selectedProviderOption = modelProviders.find((item) => item.provider === selectedProvider);
+  const selectedProviderModels = selectedProviderOption?.models ?? [selectedModel];
+
+  if (!authToken || !currentUser) {
+    return (
+      <main className="auth-page">
+        <section className="auth-hero">
+          <div className="brand-mark auth-logo">
+            <img src={resolvedTheme === "dark" ? "/brand/avelin-dark.png" : "/brand/avelin-light.png"} alt="Avelin" />
+          </div>
+          <p className="eyebrow">Avelin</p>
+          <h1>Личный AI-агент с памятью, заметками и будущей desktop-сборкой</h1>
+          <p className="hero-text">
+            Создай аккаунт, чтобы отделить свою историю, заметки и настройки модели. Дальше подключим Google,
+            ВКонтакте и выбор AI-модели прямо из интерфейса.
+          </p>
+          <div className="auth-features">
+            <span>Чат и память</span>
+            <span>SQLite-хранилище</span>
+            <span>Темы и Tauri-ready</span>
+          </div>
+        </section>
+
+        <section className="auth-card">
+          <div className="auth-tabs">
+            <button className={authMode === "login" ? "theme-option theme-option-active" : "theme-option"} onClick={() => setAuthMode("login")} type="button">
+              Вход
+            </button>
+            <button className={authMode === "register" ? "theme-option theme-option-active" : "theme-option"} onClick={() => setAuthMode("register")} type="button">
+              Регистрация
+            </button>
+          </div>
+
+          <form className="auth-form" onSubmit={handleAuthSubmit}>
+            {authMode === "register" ? (
+              <>
+                <label>
+                  Имя
+                  <input value={authDisplayName} onChange={(event) => setAuthDisplayName(event.target.value)} required minLength={2} />
+                </label>
+                <label>
+                  Email
+                  <input value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} required type="email" />
+                </label>
+                <label>
+                  Логин
+                  <input value={authUsername} onChange={(event) => setAuthUsername(event.target.value)} required minLength={2} />
+                </label>
+              </>
+            ) : (
+              <label>
+                Email или логин
+                <input value={authLoginValue} onChange={(event) => setAuthLoginValue(event.target.value)} required minLength={2} />
+              </label>
+            )}
+            <label>
+              Пароль
+              <input value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} required minLength={8} type="password" />
+            </label>
+
+            <button disabled={isAuthSubmitting} type="submit">
+              {isAuthSubmitting ? "Подключаем..." : authMode === "login" ? "Войти" : "Создать аккаунт"}
+            </button>
+            {authError ? <p className="muted muted-error">{authError}</p> : null}
+          </form>
+
+          <div className="oauth-row">
+            <button className="ghost-button" type="button" onClick={() => setAuthError("Google OAuth подготовлен на backend и будет включен после настройки client id.")}>
+              Google
+            </button>
+            <button className="ghost-button" type="button" onClick={() => setAuthError("ВКонтакте OAuth подготовлен на backend и будет включен после настройки приложения VK.")}>
+              ВКонтакте
+            </button>
+          </div>
+        </section>
+      </main>
+    );
   }
 
   return (
@@ -260,6 +458,71 @@ export default function App() {
             <div className="status-box">
               <span className="status-label">Заметки</span>
               <strong>{bootstrap.notes.length}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section className="panel panel-compact">
+          <div className="panel-heading panel-heading-compact">
+            <div>
+              <p className="eyebrow">Модель</p>
+              <h3>AI-режим</h3>
+            </div>
+            <button className="ghost-button" onClick={() => void handleSaveModelSettings()} disabled={isModelSaving} type="button">
+              {isModelSaving ? "Сохраняю..." : "Сохранить"}
+            </button>
+          </div>
+          <div className="model-controls">
+            <label>
+              Provider
+              <select
+                value={selectedProvider}
+                onChange={(event) => {
+                  const nextProvider = event.target.value;
+                  const nextOption = modelProviders.find((item) => item.provider === nextProvider);
+                  setSelectedProvider(nextProvider);
+                  setSelectedModel(nextOption?.models[0] ?? "");
+                }}
+              >
+                {modelProviders.map((provider) => (
+                  <option key={provider.provider} value={provider.provider}>
+                    {provider.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Модель
+              <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}>
+                {selectedProviderModels.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="muted">{selectedProviderOption?.description ?? "Выбери provider и модель."}</p>
+          </div>
+        </section>
+
+        <section className="panel panel-compact">
+          <div className="panel-heading panel-heading-compact">
+            <div>
+              <p className="eyebrow">Профиль</p>
+              <h3>{currentUser.display_name}</h3>
+            </div>
+            <button className="ghost-button" onClick={() => void handleLogout()} type="button">
+              Выйти
+            </button>
+          </div>
+          <div className="status-grid">
+            <div className="status-box">
+              <span className="status-label">Логин</span>
+              <strong>{currentUser.username || "—"}</strong>
+            </div>
+            <div className="status-box">
+              <span className="status-label">Вход</span>
+              <strong>{currentUser.auth_provider}</strong>
             </div>
           </div>
         </section>

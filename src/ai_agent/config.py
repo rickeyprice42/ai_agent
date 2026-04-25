@@ -23,6 +23,7 @@ class Settings:
     model_provider: str
     model_name: str
     ollama_url: str
+    database_file: Path
     memory_file: Path
     system_prompt: str
 
@@ -32,12 +33,15 @@ class Settings:
 
         memory_raw = os.getenv("MEMORY_FILE", "data/memory.json")
         memory_path = (root_dir / memory_raw).resolve()
+        database_raw = os.getenv("DATABASE_FILE", "data/avelin.sqlite3")
+        database_path = (root_dir / database_raw).resolve()
 
         return cls(
             agent_name=os.getenv("AGENT_NAME", "Avelin"),
             model_provider=os.getenv("MODEL_PROVIDER", "mock"),
             model_name=os.getenv("MODEL_NAME", "mock-local"),
             ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+            database_file=database_path,
             memory_file=memory_path,
             system_prompt=os.getenv(
                 "SYSTEM_PROMPT",

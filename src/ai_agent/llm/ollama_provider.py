@@ -42,6 +42,22 @@ class OllamaProvider:
         try:
             with request.urlopen(http_request, timeout=60) as response:
                 raw_data = response.read().decode("utf-8")
+        except error.HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="replace").strip()
+            if exc.code == 404:
+                text = (
+                    f"Модель Ollama '{self.model}' не найдена. "
+                    f"Выбери установленную модель в настройках или установи её командой `ollama pull {self.model}`."
+                )
+                if details:
+                    text = f"{text} Детали: {details}"
+                return ModelResponse(text=text)
+            return ModelResponse(
+                text=(
+                    "Ollama вернула ошибку при генерации ответа. "
+                    f"Адрес: {self.url}. HTTP {exc.code}. Детали: {details or exc.reason}"
+                )
+            )
         except error.URLError as exc:
             return ModelResponse(
                 text=(

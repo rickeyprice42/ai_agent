@@ -12,4 +12,31 @@ export type BootstrapPayload = {
   model: string;
   notes: string[];
   history: ChatMessage[];
+  user: UserProfile;
+};
+
+export type UserProfile = {
+  id: string;
+  email: string;
+  username: string;
+  display_name: string;
+  auth_provider: string;
+};
+
+export type AuthPayload = {
+  token: string;
+  user: UserProfile;
+};
+
+export type ModelProviderOption = {
+  provider: string;
+  label: string;
+  description: string;
+  models: string[];
+};
+
+export type ModelSettings = {
+  provider: string;
+  model_name: string;
+  ollama_url: string;
 };

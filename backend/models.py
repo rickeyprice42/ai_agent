@@ -11,6 +11,57 @@ class ChatResponse(BaseModel):
     reply: str
 
 
+class UserProfile(BaseModel):
+    id: str
+    email: str = ""
+    username: str = ""
+    display_name: str
+    auth_provider: str = "password"
+
+
+class AuthRequest(BaseModel):
+    login: str = Field(..., min_length=2, max_length=120)
+    password: str = Field(..., min_length=8, max_length=256)
+
+
+class RegisterRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=160)
+    username: str = Field(..., min_length=2, max_length=80)
+    password: str = Field(..., min_length=8, max_length=256)
+    display_name: str = Field(..., min_length=2, max_length=120)
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserProfile
+
+
+class OAuthProviderResponse(BaseModel):
+    provider: str
+    enabled: bool
+    auth_url: str | None = None
+    message: str
+
+
+class ModelProviderOption(BaseModel):
+    provider: str
+    label: str
+    description: str
+    models: list[str]
+
+
+class ModelSettings(BaseModel):
+    provider: str
+    model_name: str
+    ollama_url: str = ""
+
+
+class ModelSettingsRequest(BaseModel):
+    provider: str = Field(..., min_length=2, max_length=40)
+    model_name: str = Field(..., min_length=2, max_length=120)
+    ollama_url: str | None = Field(default=None, max_length=300)
+
+
 class HistoryItem(BaseModel):
     role: str
     content: str
@@ -23,3 +74,4 @@ class BootstrapResponse(BaseModel):
     model: str
     notes: list[str]
     history: list[HistoryItem]
+    user: UserProfile

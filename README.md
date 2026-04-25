@@ -32,6 +32,11 @@ python -m uvicorn backend.main:app --reload
 
 API поднимается на `http://127.0.0.1:8000`.
 
+Данные агента хранятся в SQLite-файле `data/avelin.sqlite3` (`DATABASE_FILE` в `.env`).
+При первом запуске новая БД создаёт таблицы `users`, `sessions`, `auth_accounts`,
+`chat_threads`, `messages`, `notes`, `model_settings` и импортирует старую память из
+`data/memory.json`, если БД ещё пустая.
+
 Логи backend пишутся в `.logs/backend.log` и дублируются в консоль. В логах видны метод,
 путь, HTTP-статус и длительность каждого запроса; необработанные ошибки сохраняются с
 traceback.
@@ -39,8 +44,18 @@ traceback.
 Быстрая проверка API:
 
 ```powershell
-python -c "from fastapi.testclient import TestClient; from backend.main import app; c=TestClient(app); print(c.get('/api/health').json()); print(c.get('/api/bootstrap').status_code); print(c.post('/api/chat', json={'message':'hello'}).json())"
+python -c "from fastapi.testclient import TestClient; from backend.main import app; from uuid import uuid4; c=TestClient(app); suffix=uuid4().hex[:8]; r=c.post('/api/auth/register', json={'email':f'smoke-{suffix}@example.com','username':f'smoke-{suffix}','password':'password123','display_name':'Smoke User'}); token=r.json()['token']; h={'Authorization':'Bearer '+token}; print(c.get('/api/health').json()); print(c.get('/api/bootstrap', headers=h).status_code); print(c.post('/api/chat', headers=h, json={'message':'hello'}).status_code)"
 ```
+
+Основные chat-маршруты требуют Bearer-токен. Auth API:
+
+- `POST /api/auth/register` - email, username, password, display_name.
+- `POST /api/auth/login` - login и password.
+- `GET /api/auth/me` - текущий профиль по Bearer-токену.
+- `POST /api/auth/logout` - удаление текущей сессии.
+- `GET /api/auth/oauth/google` и `/api/auth/oauth/vk` - подготовленные OAuth-контракты.
+- `GET /api/models` - список доступных provider-ов и моделей.
+- `GET /api/model-settings` и `PUT /api/model-settings` - чтение и смена активной модели пользователя.
 
 ## Frontend
 
