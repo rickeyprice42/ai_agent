@@ -87,6 +87,16 @@ class TaskItem(BaseModel):
     steps: list[TaskStepItem] = Field(default_factory=list)
 
 
+class ActionLogItem(BaseModel):
+    id: str
+    user_id: str
+    tool_name: str
+    status: str
+    arguments: dict = Field(default_factory=dict)
+    result: str
+    created_at: str
+
+
 class BootstrapResponse(BaseModel):
     agent_name: str
     provider: str
@@ -94,4 +104,5 @@ class BootstrapResponse(BaseModel):
     notes: list[str]
     history: list[HistoryItem]
     tasks: list[TaskItem]
+    action_logs: list[ActionLogItem]
     user: UserProfile

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from uuid import uuid4
+import json
 import sqlite3
 
 
@@ -453,6 +454,63 @@ class AvelinDatabase:
             )
         return self.get_task(task_id)
 
+    def add_action_log(
+        self,
+        user_id: str,
+        tool_name: str,
+        status: str,
+        arguments: dict,
+        result: str,
+    ) -> None:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO action_logs (id, user_id, tool_name, status, arguments_json, result)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid4()),
+                    user_id,
+                    tool_name,
+                    status,
+                    json.dumps(arguments, ensure_ascii=False),
+                    result,
+                ),
+            )
+
+    def list_action_logs(self, user_id: str, limit: int = 20) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, user_id, tool_name, status, arguments_json, result, created_at
+                FROM action_logs
+                WHERE user_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+
+        logs: list[dict] = []
+        for row in rows:
+            try:
+                arguments = json.loads(str(row["arguments_json"] or "{}"))
+            except json.JSONDecodeError:
+                arguments = {}
+            logs.append(
+                {
+                    "id": str(row["id"]),
+                    "user_id": str(row["user_id"]),
+                    "tool_name": str(row["tool_name"]),
+                    "status": str(row["status"]),
+                    "arguments": arguments if isinstance(arguments, dict) else {},
+                    "result": str(row["result"] or ""),
+                    "created_at": str(row["created_at"]),
+                }
+            )
+        return logs
+
     def get_model_settings(self, user_id: str = DEFAULT_USER_ID) -> dict[str, str]:
         self.ensure_user_defaults(user_id)
         with self.connect() as connection:
@@ -571,6 +629,16 @@ CREATE TABLE IF NOT EXISTS task_steps (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS action_logs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tool_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    arguments_json TEXT NOT NULL DEFAULT '{}',
+    result TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS model_settings (
     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     provider TEXT NOT NULL DEFAULT 'mock',
@@ -592,4 +660,5 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_notes_user_id ON notes(user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_task_steps_task_id ON task_steps(task_id);
+CREATE INDEX IF NOT EXISTS idx_action_logs_user_id ON action_logs(user_id);
 """

@@ -3,12 +3,20 @@ from __future__ import annotations
 from datetime import datetime
 
 from ai_agent.memory import MemoryStore
+from ai_agent.planner import Planner
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import Tool, ToolRegistry
+from ai_agent.tools.files import FileSandbox
 from ai_agent.types import Task
 
 
-def register_builtin_tools(registry: ToolRegistry, memory: MemoryStore, tasks: TaskManager) -> None:
+def register_builtin_tools(
+    registry: ToolRegistry,
+    memory: MemoryStore,
+    tasks: TaskManager,
+    planner: Planner,
+    files: FileSandbox,
+) -> None:
     registry.register(
         Tool(
             name="get_time",
@@ -44,6 +52,58 @@ def register_builtin_tools(registry: ToolRegistry, memory: MemoryStore, tasks: T
 
     registry.register(
         Tool(
+            name="read_file",
+            description=(
+                "Читает текстовый файл из безопасной рабочей папки инструментов. "
+                "Принимает только относительный путь внутри этой папки."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Относительный путь к файлу внутри рабочей папки инструментов",
+                    },
+                },
+                "required": ["path"],
+            },
+            handler=lambda args: files.read_file(str(args.get("path", ""))),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="write_file",
+            description=(
+                "Записывает текстовый файл в безопасную рабочую папку инструментов. "
+                "Принимает только относительный путь внутри этой папки. "
+                "По умолчанию не перезаписывает существующие файлы."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Относительный путь к файлу внутри рабочей папки инструментов",
+                    },
+                    "content": {"type": "string", "description": "Текст, который нужно записать"},
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "Можно ли перезаписать файл, если он уже существует",
+                    },
+                },
+                "required": ["path", "content"],
+            },
+            handler=lambda args: files.write_file(
+                relative_path=str(args.get("path", "")),
+                content=str(args.get("content", "")),
+                overwrite=bool(args.get("overwrite", False)),
+            ),
+        )
+    )
+
+    registry.register(
+        Tool(
             name="create_task",
             description="Создает внутреннюю задачу Avelin с приоритетом и необязательными шагами.",
             schema={
@@ -67,6 +127,25 @@ def register_builtin_tools(registry: ToolRegistry, memory: MemoryStore, tasks: T
 
     registry.register(
         Tool(
+            name="plan_task",
+            description="Планирует задачу: разбивает цель на шаги и сохраняет ее в очереди задач.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "description": "Цель или описание задачи"},
+                    "priority": {
+                        "type": "integer",
+                        "description": "Приоритет от 1 до 5, где 1 самый высокий",
+                    },
+                },
+                "required": ["goal"],
+            },
+            handler=lambda args: _plan_task(planner, tasks, args),
+        )
+    )
+
+    registry.register(
+        Tool(
             name="list_tasks",
             description="Показывает текущую очередь задач пользователя.",
             schema={
@@ -76,6 +155,18 @@ def register_builtin_tools(registry: ToolRegistry, memory: MemoryStore, tasks: T
                 },
             },
             handler=lambda args: _format_tasks(tasks.list_tasks(limit=int(args.get("limit", 20)))),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="start_next_task",
+            description=(
+                "Запускает следующую задачу из очереди: переводит задачу в executing "
+                "и первый pending-шаг в running."
+            ),
+            schema={"type": "object", "properties": {}},
+            handler=lambda _: _start_next_task(tasks),
         )
     )
 
@@ -170,6 +261,36 @@ def _create_task(tasks: TaskManager, args: dict) -> str:
         steps=steps,
     )
     return _format_task(task)
+
+
+def _plan_task(planner: Planner, tasks: TaskManager, args: dict) -> str:
+    plan = planner.create_plan(
+        goal=str(args.get("goal", "")),
+        priority=int(args.get("priority", 3)),
+    )
+    task = tasks.create_task(
+        description=plan.goal,
+        priority=plan.priority,
+        steps=plan.steps,
+    )
+    task = tasks.update_task(task.id, "planned")
+    return f"План создан и добавлен в очередь.\n{_format_task(task)}"
+
+
+def _start_next_task(tasks: TaskManager) -> str:
+    task = tasks.start_next_task()
+    if task is None:
+        return "В очереди нет задач, которые можно запустить."
+
+    running_steps = [step for step in task.steps if step.status == "running"]
+    if running_steps:
+        current_step = running_steps[0]
+        return (
+            "Задача запущена.\n"
+            f"{_format_task(task)}\n"
+            f"Текущий шаг: {current_step.description}"
+        )
+    return f"Задача запущена.\n{_format_task(task)}"
 
 
 def _format_tasks(items: list[Task]) -> str:

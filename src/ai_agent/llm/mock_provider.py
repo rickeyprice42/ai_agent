@@ -43,6 +43,62 @@ class MockProvider:
         ):
             return ModelResponse(tool_calls=[ToolCall(name="get_time")])
 
+        read_file_match = None
+        for candidate in normalized:
+            read_file_match = re.search(
+                r"(?:прочитай|открой|покажи)\s+файл[:\s]+(.+)",
+                candidate,
+                re.IGNORECASE,
+            )
+            if read_file_match:
+                break
+        if read_file_match:
+            path = read_file_match.group(1).strip().strip("'\"`")
+            return ModelResponse(tool_calls=[ToolCall(name="read_file", arguments={"path": path})])
+
+        write_file_match = None
+        for candidate in normalized:
+            write_file_match = re.search(
+                r"(?:запиши|создай)\s+файл[:\s]+(.+?)\s+(?:с текстом|текст|content)[:\s]+(.+)",
+                candidate,
+                re.IGNORECASE,
+            )
+            if write_file_match:
+                break
+        if write_file_match:
+            path = write_file_match.group(1).strip().strip("'\"`")
+            content = write_file_match.group(2).strip().strip("'\"`")
+            return ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="write_file",
+                        arguments={"path": path, "content": content, "overwrite": False},
+                    )
+                ]
+            )
+
+        plan_match = None
+        for candidate in normalized:
+            plan_match = re.search(
+                r"(?:спланируй|составь план|запланируй|разбей на шаги)[:\s]+(.+)",
+                candidate,
+                re.IGNORECASE,
+            )
+            if plan_match:
+                break
+        if plan_match:
+            return ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="plan_task",
+                        arguments={
+                            "goal": plan_match.group(1).strip(),
+                            "priority": 3,
+                        },
+                    )
+                ]
+            )
+
         task_match = None
         for candidate in normalized:
             task_match = re.search(
@@ -72,6 +128,13 @@ class MockProvider:
             for phrase in ("покажи задачи", "список задач", "очередь задач", "какие задачи")
         ):
             return ModelResponse(tool_calls=[ToolCall(name="list_tasks", arguments={"limit": 20})])
+
+        if any(
+            phrase in candidate
+            for candidate in normalized
+            for phrase in ("запусти следующую задачу", "начни следующую задачу", "выполняй следующую задачу")
+        ):
+            return ModelResponse(tool_calls=[ToolCall(name="start_next_task")])
 
         if messages[-1].role == "tool":
             return ModelResponse(text=f"Готово. {last_message}")

@@ -42,3 +42,14 @@ class Task:
     priority: int = 3
     result: str | None = None
     steps: list[TaskStep] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ActionLog:
+    id: str
+    user_id: str
+    tool_name: str
+    status: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+    result: str = ""
+    created_at: str = ""

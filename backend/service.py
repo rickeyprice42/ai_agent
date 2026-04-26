@@ -130,6 +130,7 @@ class AgentService:
             "notes": memory.notes,
             "history": memory.history,
             "tasks": [_task_to_payload(task) for task in agent.tasks.list_tasks()],
+            "action_logs": [_action_log_to_payload(log) for log in agent.action_log.recent(limit=20)],
             "user": user,
         }
 
@@ -156,4 +157,16 @@ def _task_to_payload(task) -> dict:
             }
             for step in task.steps
         ],
+    }
+
+
+def _action_log_to_payload(log) -> dict:
+    return {
+        "id": log.id,
+        "user_id": log.user_id,
+        "tool_name": log.tool_name,
+        "status": log.status,
+        "arguments": log.arguments,
+        "result": log.result,
+        "created_at": log.created_at,
     }

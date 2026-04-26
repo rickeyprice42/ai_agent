@@ -35,6 +35,29 @@ class TaskManager:
         limit = max(1, min(int(limit), 100))
         return [_task_from_row(item) for item in self.database.list_tasks(self.user_id, limit=limit)]
 
+    def active_task(self) -> Task | None:
+        for task in self.list_tasks(limit=50):
+            if task.status == "executing":
+                return task
+        return self.next_runnable_task()
+
+    def next_runnable_task(self) -> Task | None:
+        for task in self.list_tasks(limit=50):
+            if task.status in {"created", "planned"}:
+                return task
+        return None
+
+    def start_next_task(self) -> Task | None:
+        task = self.next_runnable_task()
+        if task is None:
+            return None
+
+        started = self.update_task(task.id, "executing")
+        for step in started.steps:
+            if step.status == "pending":
+                return self.update_step(step.id, "running")
+        return started
+
     def add_step(self, task_id: str, description: str) -> Task:
         description = description.strip()
         if not description:
