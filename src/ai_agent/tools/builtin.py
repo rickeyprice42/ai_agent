@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 
 from ai_agent.memory import MemoryStore
+from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import Tool, ToolRegistry
+from ai_agent.types import Task
 
 
-def register_builtin_tools(registry: ToolRegistry, memory: MemoryStore) -> None:
+def register_builtin_tools(registry: ToolRegistry, memory: MemoryStore, tasks: TaskManager) -> None:
     registry.register(
         Tool(
             name="get_time",
@@ -40,6 +42,116 @@ def register_builtin_tools(registry: ToolRegistry, memory: MemoryStore) -> None:
         )
     )
 
+    registry.register(
+        Tool(
+            name="create_task",
+            description="Создает внутреннюю задачу Avelin с приоритетом и необязательными шагами.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Что нужно сделать"},
+                    "priority": {
+                        "type": "integer",
+                        "description": "Приоритет от 1 до 5, где 1 самый высокий",
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "Начальный список шагов выполнения",
+                    },
+                },
+                "required": ["description"],
+            },
+            handler=lambda args: _create_task(tasks, args),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="list_tasks",
+            description="Показывает текущую очередь задач пользователя.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Сколько задач показать"},
+                },
+            },
+            handler=lambda args: _format_tasks(tasks.list_tasks(limit=int(args.get("limit", 20)))),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="add_task_step",
+            description="Добавляет шаг к существующей задаче.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "ID задачи"},
+                    "description": {"type": "string", "description": "Описание шага"},
+                },
+                "required": ["task_id", "description"],
+            },
+            handler=lambda args: _format_task(
+                tasks.add_step(
+                    task_id=str(args.get("task_id", "")),
+                    description=str(args.get("description", "")),
+                )
+            ),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="update_task",
+            description="Меняет статус задачи и сохраняет результат, если он есть.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "ID задачи"},
+                    "status": {
+                        "type": "string",
+                        "description": "created, planned, executing, completed или failed",
+                    },
+                    "result": {"type": "string", "description": "Итог или причина ошибки"},
+                },
+                "required": ["task_id", "status"],
+            },
+            handler=lambda args: _format_task(
+                tasks.update_task(
+                    task_id=str(args.get("task_id", "")),
+                    status=str(args.get("status", "")),
+                    result=str(args.get("result", "")),
+                )
+            ),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="update_task_step",
+            description="Меняет статус шага задачи и сохраняет наблюдение или результат.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "step_id": {"type": "string", "description": "ID шага"},
+                    "status": {
+                        "type": "string",
+                        "description": "pending, running, completed, failed или skipped",
+                    },
+                    "result": {"type": "string", "description": "Результат шага"},
+                },
+                "required": ["step_id", "status"],
+            },
+            handler=lambda args: _format_task(
+                tasks.update_step(
+                    step_id=str(args.get("step_id", "")),
+                    status=str(args.get("status", "")),
+                    result=str(args.get("result", "")),
+                )
+            ),
+        )
+    )
+
 
 def _format_notes(memory: MemoryStore) -> str:
     notes = memory.list_notes()
@@ -47,3 +159,37 @@ def _format_notes(memory: MemoryStore) -> str:
         return "В памяти пока ничего нет."
     formatted = "\n".join(f"{index}. {note}" for index, note in enumerate(notes, start=1))
     return f"Вот что я помню:\n{formatted}"
+
+
+def _create_task(tasks: TaskManager, args: dict) -> str:
+    raw_steps = args.get("steps", [])
+    steps = [str(step) for step in raw_steps if str(step).strip()] if isinstance(raw_steps, list) else []
+    task = tasks.create_task(
+        description=str(args.get("description", "")),
+        priority=int(args.get("priority", 3)),
+        steps=steps,
+    )
+    return _format_task(task)
+
+
+def _format_tasks(items: list[Task]) -> str:
+    if not items:
+        return "В очереди задач пока пусто."
+    return "\n\n".join(_format_task(task) for task in items)
+
+
+def _format_task(task: Task) -> str:
+    lines = [
+        f"Задача {task.id}",
+        f"Статус: {task.status}",
+        f"Приоритет: {task.priority}",
+        f"Описание: {task.description}",
+    ]
+    if task.result:
+        lines.append(f"Результат: {task.result}")
+    if task.steps:
+        lines.append("Шаги:")
+        for step in task.steps:
+            result = f" -> {step.result}" if step.result else ""
+            lines.append(f"{step.position}. [{step.status}] {step.description} (step_id: {step.id}){result}")
+    return "\n".join(lines)

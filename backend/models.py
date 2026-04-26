@@ -68,10 +68,30 @@ class HistoryItem(BaseModel):
     name: str | None = None
 
 
+class TaskStepItem(BaseModel):
+    id: str
+    task_id: str
+    description: str
+    status: str
+    position: int
+    result: str | None = None
+
+
+class TaskItem(BaseModel):
+    id: str
+    user_id: str
+    description: str
+    status: str
+    priority: int
+    result: str | None = None
+    steps: list[TaskStepItem] = Field(default_factory=list)
+
+
 class BootstrapResponse(BaseModel):
     agent_name: str
     provider: str
     model: str
     notes: list[str]
     history: list[HistoryItem]
+    tasks: list[TaskItem]
     user: UserProfile

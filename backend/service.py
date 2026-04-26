@@ -119,7 +119,8 @@ class AgentService:
         return self.agent_for_user(user_id).respond(message)
 
     def bootstrap(self, user_id: str) -> dict:
-        memory = self.agent_for_user(user_id).memory.snapshot()
+        agent = self.agent_for_user(user_id)
+        memory = agent.memory.snapshot()
         user = self.database.get_user(user_id)
         model_settings = self.database.get_model_settings(user_id)
         return {
@@ -128,8 +129,31 @@ class AgentService:
             "model": model_settings["model_name"],
             "notes": memory.notes,
             "history": memory.history,
+            "tasks": [_task_to_payload(task) for task in agent.tasks.list_tasks()],
             "user": user,
         }
 
 
 agent_service = AgentService()
+
+
+def _task_to_payload(task) -> dict:
+    return {
+        "id": task.id,
+        "user_id": task.user_id,
+        "description": task.description,
+        "status": task.status,
+        "priority": task.priority,
+        "result": task.result,
+        "steps": [
+            {
+                "id": step.id,
+                "task_id": step.task_id,
+                "description": step.description,
+                "status": step.status,
+                "position": step.position,
+                "result": step.result,
+            }
+            for step in task.steps
+        ],
+    }

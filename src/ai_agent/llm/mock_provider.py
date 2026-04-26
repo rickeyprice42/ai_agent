@@ -43,6 +43,36 @@ class MockProvider:
         ):
             return ModelResponse(tool_calls=[ToolCall(name="get_time")])
 
+        task_match = None
+        for candidate in normalized:
+            task_match = re.search(
+                r"(?:создай|добавь|заведи)\s+(?:задачу|таск)[:\s]+(.+)",
+                candidate,
+                re.IGNORECASE,
+            )
+            if task_match:
+                break
+        if task_match:
+            return ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="create_task",
+                        arguments={
+                            "description": task_match.group(1).strip(),
+                            "priority": 3,
+                            "steps": [],
+                        },
+                    )
+                ]
+            )
+
+        if any(
+            phrase in candidate
+            for candidate in normalized
+            for phrase in ("покажи задачи", "список задач", "очередь задач", "какие задачи")
+        ):
+            return ModelResponse(tool_calls=[ToolCall(name="list_tasks", arguments={"limit": 20})])
+
         if messages[-1].role == "tool":
             return ModelResponse(text=f"Готово. {last_message}")
 

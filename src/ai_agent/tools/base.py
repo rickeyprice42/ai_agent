@@ -67,7 +67,10 @@ class ToolRegistry:
         return normalized, None
 
     def execute(self, name: str, arguments: dict[str, Any]) -> str:
-        return self.get(name).handler(arguments)
+        try:
+            return self.get(name).handler(arguments)
+        except ValueError as exc:
+            return f"Инструмент '{name}' не смог выполнить действие: {exc}"
 
 
 def _coerce_value(expected_type: str | None, value: Any, key: str) -> tuple[Any, str | None]:

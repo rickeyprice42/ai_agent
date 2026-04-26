@@ -199,6 +199,13 @@ class AvelinDatabase:
     def _ensure_user_defaults(self, connection: sqlite3.Connection, user_id: str) -> None:
         connection.execute(
             """
+            INSERT OR IGNORE INTO users (id, display_name)
+            VALUES (?, ?)
+            """,
+            (user_id, "Local user"),
+        )
+        connection.execute(
+            """
             INSERT OR IGNORE INTO chat_threads (id, user_id, title)
             VALUES (?, ?, ?)
             """,
@@ -266,6 +273,185 @@ class AvelinDatabase:
                 {"role": str(row["role"]), "content": str(row["content"]), "name": row["name"]}
                 for row in rows
             ]
+
+    def create_task(
+        self,
+        user_id: str,
+        description: str,
+        priority: int = 3,
+        steps: list[str] | None = None,
+    ) -> dict:
+        self.ensure_user_defaults(user_id)
+        task_id = str(uuid4())
+        normalized_steps = [step.strip() for step in steps or [] if step.strip()]
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO tasks (id, user_id, description, priority)
+                VALUES (?, ?, ?, ?)
+                """,
+                (task_id, user_id, description, priority),
+            )
+            for position, step in enumerate(normalized_steps, start=1):
+                connection.execute(
+                    """
+                    INSERT INTO task_steps (id, task_id, position, description)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (str(uuid4()), task_id, position, step),
+                )
+        return self.get_task(task_id) or {
+            "id": task_id,
+            "user_id": user_id,
+            "description": description,
+            "status": "created",
+            "priority": priority,
+            "result": None,
+            "steps": [],
+        }
+
+    def get_task(self, task_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, user_id, description, status, priority, result
+                FROM tasks
+                WHERE id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": str(row["id"]),
+                "user_id": str(row["user_id"]),
+                "description": str(row["description"]),
+                "status": str(row["status"]),
+                "priority": int(row["priority"]),
+                "result": row["result"],
+                "steps": self.list_task_steps(str(row["id"])),
+            }
+
+    def list_tasks(self, user_id: str, limit: int = 20) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, user_id, description, status, priority, result
+                FROM tasks
+                WHERE user_id = ?
+                ORDER BY
+                    CASE status
+                        WHEN 'executing' THEN 1
+                        WHEN 'planned' THEN 2
+                        WHEN 'created' THEN 3
+                        WHEN 'failed' THEN 4
+                        WHEN 'completed' THEN 5
+                        ELSE 6
+                    END,
+                    priority ASC,
+                    created_at ASC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+
+        tasks: list[dict] = []
+        for row in rows:
+            tasks.append(
+                {
+                    "id": str(row["id"]),
+                    "user_id": str(row["user_id"]),
+                    "description": str(row["description"]),
+                    "status": str(row["status"]),
+                    "priority": int(row["priority"]),
+                    "result": row["result"],
+                    "steps": self.list_task_steps(str(row["id"])),
+                }
+            )
+        return tasks
+
+    def update_task_status(self, task_id: str, status: str, result: str | None = None) -> dict | None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = ?, result = COALESCE(?, result), updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (status, result, task_id),
+            )
+        return self.get_task(task_id)
+
+    def list_task_steps(self, task_id: str) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, task_id, description, status, position, result
+                FROM task_steps
+                WHERE task_id = ?
+                ORDER BY position ASC, created_at ASC
+                """,
+                (task_id,),
+            ).fetchall()
+            return [
+                {
+                    "id": str(row["id"]),
+                    "task_id": str(row["task_id"]),
+                    "description": str(row["description"]),
+                    "status": str(row["status"]),
+                    "position": int(row["position"]),
+                    "result": row["result"],
+                }
+                for row in rows
+            ]
+
+    def add_task_step(self, task_id: str, description: str) -> dict | None:
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        position = len(task["steps"]) + 1
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO task_steps (id, task_id, position, description)
+                VALUES (?, ?, ?, ?)
+                """,
+                (str(uuid4()), task_id, position, description),
+            )
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = CASE WHEN status = 'created' THEN 'planned' ELSE status END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (task_id,),
+            )
+        return self.get_task(task_id)
+
+    def update_task_step_status(
+        self,
+        step_id: str,
+        status: str,
+        result: str | None = None,
+    ) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT task_id FROM task_steps WHERE id = ?",
+                (step_id,),
+            ).fetchone()
+            if not row:
+                return None
+            task_id = str(row["task_id"])
+            connection.execute(
+                """
+                UPDATE task_steps
+                SET status = ?, result = COALESCE(?, result), updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (status, result, step_id),
+            )
+        return self.get_task(task_id)
 
     def get_model_settings(self, user_id: str = DEFAULT_USER_ID) -> dict[str, str]:
         self.ensure_user_defaults(user_id)
@@ -363,6 +549,28 @@ CREATE TABLE IF NOT EXISTS notes (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'created',
+    priority INTEGER NOT NULL DEFAULT 3,
+    result TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS task_steps (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    result TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS model_settings (
     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     provider TEXT NOT NULL DEFAULT 'mock',
@@ -382,4 +590,6 @@ CREATE INDEX IF NOT EXISTS idx_auth_accounts_user_id ON auth_accounts(user_id);
 CREATE INDEX IF NOT EXISTS idx_chat_threads_user_id ON chat_threads(user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_notes_user_id ON notes(user_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_task_steps_task_id ON task_steps(task_id);
 """

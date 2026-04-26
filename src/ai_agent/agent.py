@@ -6,6 +6,7 @@ from ai_agent.config import Settings
 from ai_agent.llm.mock_provider import MockProvider
 from ai_agent.llm.ollama_provider import OllamaProvider
 from ai_agent.memory import MemoryStore
+from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import ToolRegistry
 from ai_agent.tools.builtin import register_builtin_tools
 from ai_agent.types import Message
@@ -19,8 +20,9 @@ class Agent:
             legacy_json_path=settings.memory_file,
             user_id=user_id,
         )
+        self.tasks = TaskManager(self.memory.database, user_id=user_id)
         self.tools = ToolRegistry()
-        register_builtin_tools(self.tools, self.memory)
+        register_builtin_tools(self.tools, self.memory, self.tasks)
         self.provider = self._build_provider()
 
     def _build_provider(self):
