@@ -11,6 +11,7 @@ from backend.models import (
     BootstrapResponse,
     ChatRequest,
     ChatResponse,
+    ExecuteStepResponse,
     ModelProviderOption,
     ModelSettings,
     ModelSettingsRequest,
@@ -143,3 +144,8 @@ def bootstrap(user: dict[str, str] = Depends(current_user)) -> BootstrapResponse
 @router.post("/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest, user: dict[str, str] = Depends(current_user)) -> ChatResponse:
     return ChatResponse(reply=agent_service.chat(payload.message, user["id"]))
+
+
+@router.post("/tasks/execute-next", response_model=ExecuteStepResponse)
+def execute_next_step(user: dict[str, str] = Depends(current_user)) -> ExecuteStepResponse:
+    return ExecuteStepResponse(result=agent_service.execute_next_step(user["id"]))

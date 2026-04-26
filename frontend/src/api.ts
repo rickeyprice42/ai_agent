@@ -42,6 +42,17 @@ export async function sendMessage(message: string, token: string): Promise<{ rep
   return response.json();
 }
 
+export async function executeNextStep(token: string): Promise<{ result: string }> {
+  const response = await fetch("/api/tasks/execute-next", {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось выполнить следующий шаг.");
+  }
+  return response.json();
+}
+
 export async function login(loginValue: string, password: string): Promise<AuthPayload> {
   const response = await fetch("/api/auth/login", {
     method: "POST",

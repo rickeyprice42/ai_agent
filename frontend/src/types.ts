@@ -12,7 +12,38 @@ export type BootstrapPayload = {
   model: string;
   notes: string[];
   history: ChatMessage[];
+  tasks: TaskItem[];
+  action_logs: ActionLogItem[];
   user: UserProfile;
+};
+
+export type TaskStepItem = {
+  id: string;
+  task_id: string;
+  description: string;
+  status: string;
+  position: number;
+  result?: string | null;
+};
+
+export type TaskItem = {
+  id: string;
+  user_id: string;
+  description: string;
+  status: string;
+  priority: number;
+  result?: string | null;
+  steps: TaskStepItem[];
+};
+
+export type ActionLogItem = {
+  id: string;
+  user_id: string;
+  tool_name: string;
+  status: string;
+  arguments: Record<string, unknown>;
+  result: string;
+  created_at: string;
 };
 
 export type UserProfile = {

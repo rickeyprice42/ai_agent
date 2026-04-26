@@ -425,6 +425,73 @@ button {
   gap: 0.7rem;
 }
 
+.task-list,
+.action-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.task-item,
+.action-log-item {
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.task-item-head,
+.action-log-item div {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.task-item strong,
+.action-log-item strong {
+  overflow-wrap: anywhere;
+}
+
+.task-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.65rem;
+}
+
+.task-steps p,
+.action-log-item p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.state-badge {
+  flex: 0 0 auto;
+  padding: 0.22rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-strong);
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.state-completed {
+  color: var(--inverse);
+  background: var(--text);
+}
+
+.state-failed,
+.state-validation_error,
+.state-not_found {
+  color: var(--danger);
+}
+
 .note {
   display: grid;
   grid-template-columns: auto 1fr;

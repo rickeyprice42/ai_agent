@@ -22,6 +22,9 @@ def render_tool_contract(system_prompt: str, tools: list[dict]) -> str:
             "name": "write_file",
             "arguments": {"path": "notes/example.txt", "content": "Текст заметки", "overwrite": False},
         },
+        {"type": "tool_call", "name": "run_shell", "arguments": {"command": "dir"}},
+        {"type": "tool_call", "name": "http_request", "arguments": {"url": "https://example.com", "method": "GET"}},
+        {"type": "tool_call", "name": "execute_next_step", "arguments": {}},
     ]
 
     sections = [
@@ -33,6 +36,9 @@ def render_tool_contract(system_prompt: str, tools: list[dict]) -> str:
         "If the user asks you to plan, organize, queue, or execute work, prefer task/planner tools.",
         "Use file tools only with relative paths provided by the user or by trusted task context.",
         "Do not overwrite files unless the user explicitly asked to replace an existing file.",
+        "Use run_shell only for allowed verification commands; never invent destructive or network shell commands.",
+        "Use http_request only for simple GET/HEAD reads of user-provided public http/https URLs.",
+        "When the user asks to continue or execute queued work, prefer execute_next_step.",
         "If the latest conversation entry is a tool result, answer with type=message and summarize the result for the user.",
         "If no tool is needed, answer with type=message.",
         f"System prompt: {system_prompt}",

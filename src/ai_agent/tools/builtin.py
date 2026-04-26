@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from ai_agent.executor import ExecutionEngine
 from ai_agent.memory import MemoryStore
 from ai_agent.planner import Planner
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import Tool, ToolRegistry
 from ai_agent.tools.files import FileSandbox
+from ai_agent.tools.http import HttpSandbox
+from ai_agent.tools.shell import ShellSandbox
 from ai_agent.types import Task
 
 
@@ -16,6 +19,9 @@ def register_builtin_tools(
     tasks: TaskManager,
     planner: Planner,
     files: FileSandbox,
+    shell: ShellSandbox,
+    http: HttpSandbox,
+    executor: ExecutionEngine,
 ) -> None:
     registry.register(
         Tool(
@@ -99,6 +105,67 @@ def register_builtin_tools(
                 content=str(args.get("content", "")),
                 overwrite=bool(args.get("overwrite", False)),
             ),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="run_shell",
+            description=(
+                "Запускает ограниченную shell-команду внутри безопасной рабочей папки инструментов. "
+                "Разрешены только команды из allowlist: python -m compileall, python -m pytest, "
+                "npm test, npm run build, git status --short, dir, ls."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Команда из allowlist, без shell-операторов и перенаправлений",
+                    },
+                },
+                "required": ["command"],
+            },
+            handler=lambda args: shell.run(str(args.get("command", ""))),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="http_request",
+            description=(
+                "Выполняет безопасный HTTP-запрос. Разрешены только GET и HEAD, "
+                "только http/https URL, с таймаутом, лимитом ответа и блокировкой локальных сетей по умолчанию."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "HTTP или HTTPS URL"},
+                    "method": {"type": "string", "description": "GET или HEAD"},
+                    "headers": {
+                        "type": "object",
+                        "description": "Необязательные HTTP headers без Authorization/Cookie",
+                    },
+                },
+                "required": ["url"],
+            },
+            handler=lambda args: http.request(
+                url=str(args.get("url", "")),
+                method=str(args.get("method", "GET")),
+                headers=args.get("headers") if isinstance(args.get("headers"), dict) else None,
+            ),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="execute_next_step",
+            description=(
+                "Выполняет следующий running-шаг активной задачи или запускает следующую задачу из очереди. "
+                "Сам выбирает безопасный инструмент для известных типов шагов, пишет action log и обновляет статусы."
+            ),
+            schema={"type": "object", "properties": {}},
+            handler=lambda _: executor.execute_next_step(),
         )
     )
 

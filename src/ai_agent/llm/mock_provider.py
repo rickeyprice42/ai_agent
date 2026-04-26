@@ -19,6 +19,9 @@ class MockProvider:
         last_message = messages[-1].content.strip()
         normalized = _normalized_variants(last_message)
 
+        if messages[-1].role == "tool":
+            return ModelResponse(text=f"Готово. {last_message}")
+
         remember_match = None
         for candidate in normalized:
             remember_match = re.search(r"запомни[:\s]+(.+)", candidate, re.IGNORECASE)
@@ -76,6 +79,32 @@ class MockProvider:
                     )
                 ]
             )
+
+        shell_match = None
+        for candidate in normalized:
+            shell_match = re.search(
+                r"(?:запусти|выполни|проверь)\s+(?:команду|shell)[:\s]+(.+)",
+                candidate,
+                re.IGNORECASE,
+            )
+            if shell_match:
+                break
+        if shell_match:
+            command = shell_match.group(1).strip().strip("'\"`")
+            return ModelResponse(tool_calls=[ToolCall(name="run_shell", arguments={"command": command})])
+
+        http_match = None
+        for candidate in normalized:
+            http_match = re.search(
+                r"(?:сделай|выполни|отправь)\s+(?:http\s+)?(?:запрос|get)[:\s]+(.+)",
+                candidate,
+                re.IGNORECASE,
+            )
+            if http_match:
+                break
+        if http_match:
+            url = http_match.group(1).strip().strip("'\"`")
+            return ModelResponse(tool_calls=[ToolCall(name="http_request", arguments={"url": url, "method": "GET"})])
 
         plan_match = None
         for candidate in normalized:
@@ -136,8 +165,17 @@ class MockProvider:
         ):
             return ModelResponse(tool_calls=[ToolCall(name="start_next_task")])
 
-        if messages[-1].role == "tool":
-            return ModelResponse(text=f"Готово. {last_message}")
+        if any(
+            phrase in candidate
+            for candidate in normalized
+            for phrase in (
+                "выполни следующий шаг",
+                "продолжи выполнение",
+                "продолжай задачу",
+                "execute next step",
+            )
+        ):
+            return ModelResponse(tool_calls=[ToolCall(name="execute_next_step")])
 
         return ModelResponse(
             text=(

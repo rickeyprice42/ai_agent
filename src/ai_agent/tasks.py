@@ -58,6 +58,57 @@ class TaskManager:
                 return self.update_step(step.id, "running")
         return started
 
+    def ensure_running_task(self) -> Task | None:
+        active = self.active_task()
+        if active is None:
+            return None
+        if active.status == "executing":
+            running_step = self.running_step(active)
+            if running_step is not None:
+                return active
+            for step in active.steps:
+                if step.status == "pending":
+                    return self.update_step(step.id, "running")
+            return active
+        return self.start_next_task()
+
+    def running_step(self, task: Task | None = None) -> TaskStep | None:
+        current_task = task or self.active_task()
+        if current_task is None:
+            return None
+        for step in current_task.steps:
+            if step.status == "running":
+                return step
+        return None
+
+    def complete_running_step(self, result: str) -> Task:
+        task = self.ensure_running_task()
+        if task is None:
+            raise ValueError("Нет активной задачи для выполнения.")
+
+        step = self.running_step(task)
+        if step is None:
+            return self.update_task(task.id, "completed", result or "Задача завершена без шагов.")
+
+        updated = self.update_step(step.id, "completed", result)
+        for next_step in updated.steps:
+            if next_step.status == "pending":
+                return self.update_step(next_step.id, "running")
+
+        return self.update_task(updated.id, "completed", "Все шаги выполнены.")
+
+    def fail_running_step(self, result: str) -> Task:
+        task = self.ensure_running_task()
+        if task is None:
+            raise ValueError("Нет активной задачи для выполнения.")
+
+        step = self.running_step(task)
+        if step is None:
+            return self.update_task(task.id, "failed", result or "Задача завершилась ошибкой.")
+
+        updated = self.update_step(step.id, "failed", result)
+        return self.update_task(updated.id, "failed", result)
+
     def add_step(self, task_id: str, description: str) -> Task:
         description = description.strip()
         if not description:

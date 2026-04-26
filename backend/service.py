@@ -118,6 +118,9 @@ class AgentService:
     def chat(self, message: str, user_id: str) -> str:
         return self.agent_for_user(user_id).respond(message)
 
+    def execute_next_step(self, user_id: str) -> str:
+        return self.agent_for_user(user_id).executor.execute_next_step()
+
     def bootstrap(self, user_id: str) -> dict:
         agent = self.agent_for_user(user_id)
         memory = agent.memory.snapshot()

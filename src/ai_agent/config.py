@@ -28,6 +28,10 @@ class Settings:
     tool_workspace_dir: Path
     max_file_read_chars: int
     max_file_write_chars: int
+    shell_timeout_seconds: int
+    http_timeout_seconds: int
+    max_http_response_chars: int
+    allow_private_http: bool
     system_prompt: str
 
     @classmethod
@@ -51,6 +55,10 @@ class Settings:
             tool_workspace_dir=workspace_path,
             max_file_read_chars=_read_int_env("MAX_FILE_READ_CHARS", default=20000, minimum=1000),
             max_file_write_chars=_read_int_env("MAX_FILE_WRITE_CHARS", default=20000, minimum=1000),
+            shell_timeout_seconds=_read_int_env("SHELL_TIMEOUT_SECONDS", default=30, minimum=1),
+            http_timeout_seconds=_read_int_env("HTTP_TIMEOUT_SECONDS", default=15, minimum=1),
+            max_http_response_chars=_read_int_env("MAX_HTTP_RESPONSE_CHARS", default=20000, minimum=1000),
+            allow_private_http=_read_bool_env("ALLOW_PRIVATE_HTTP", default=False),
             system_prompt=os.getenv(
                 "SYSTEM_PROMPT",
                 (
@@ -72,3 +80,10 @@ def _read_int_env(name: str, default: int, minimum: int) -> int:
     except ValueError:
         return default
     return max(value, minimum)
+
+
+def _read_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}

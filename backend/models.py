@@ -11,6 +11,10 @@ class ChatResponse(BaseModel):
     reply: str
 
 
+class ExecuteStepResponse(BaseModel):
+    result: str
+
+
 class UserProfile(BaseModel):
     id: str
     email: str = ""

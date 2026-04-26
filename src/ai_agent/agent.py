@@ -5,6 +5,8 @@ from pathlib import Path
 from ai_agent.action_log import ActionLogStore
 from ai_agent.config import Settings
 from ai_agent.context import ContextBuilder
+from ai_agent.executor import ExecutionEngine
+from ai_agent.executor import _tool_status
 from ai_agent.llm.mock_provider import MockProvider
 from ai_agent.llm.ollama_provider import OllamaProvider
 from ai_agent.memory import MemoryStore
@@ -13,6 +15,8 @@ from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import ToolRegistry
 from ai_agent.tools.builtin import register_builtin_tools
 from ai_agent.tools.files import FileSandbox
+from ai_agent.tools.http import HttpSandbox
+from ai_agent.tools.shell import ShellSandbox
 from ai_agent.types import Message
 
 
@@ -33,8 +37,27 @@ class Agent:
             max_read_chars=settings.max_file_read_chars,
             max_write_chars=settings.max_file_write_chars,
         )
+        self.shell = ShellSandbox(
+            workspace_dir=settings.tool_workspace_dir,
+            timeout_seconds=settings.shell_timeout_seconds,
+        )
+        self.http = HttpSandbox(
+            timeout_seconds=settings.http_timeout_seconds,
+            max_response_chars=settings.max_http_response_chars,
+            allow_private_networks=settings.allow_private_http,
+        )
         self.tools = ToolRegistry()
-        register_builtin_tools(self.tools, self.memory, self.tasks, self.planner, self.files)
+        self.executor = ExecutionEngine(self.tasks, self.tools, self.action_log)
+        register_builtin_tools(
+            self.tools,
+            self.memory,
+            self.tasks,
+            self.planner,
+            self.files,
+            self.shell,
+            self.http,
+            self.executor,
+        )
         self.provider = self._build_provider()
 
     def _build_provider(self):
@@ -142,9 +165,3 @@ class AgentApp:
 
             answer = self.agent.respond(user_text)
             print(f"{self.settings.agent_name}> {answer}")
-
-
-def _tool_status(tool_result: str) -> str:
-    if "не смог выполнить действие" in tool_result:
-        return "failed"
-    return "completed"

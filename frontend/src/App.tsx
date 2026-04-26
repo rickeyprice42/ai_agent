@@ -1,5 +1,6 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  executeNextStep,
   fetchBootstrap,
   fetchMe,
   fetchModelProviders,
@@ -24,6 +25,8 @@ const EMPTY_BOOTSTRAP: BootstrapPayload = {
   model: "mock-local",
   notes: [],
   history: [],
+  tasks: [],
+  action_logs: [],
   user: {
     id: "",
     email: "",
@@ -98,6 +101,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [isExecutingStep, setIsExecutingStep] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
   const [animatedMessageKey, setAnimatedMessageKey] = useState<string | null>(null);
@@ -267,6 +271,22 @@ export default function App() {
   async function handleRefresh() {
     setAnimatedMessageKey(null);
     await refreshBootstrap();
+  }
+
+  async function handleExecuteNextStep() {
+    if (!authToken || isExecutingStep) return;
+    setIsExecutingStep(true);
+    setError(null);
+    setAnimatedMessageKey(null);
+
+    try {
+      await executeNextStep(authToken);
+      await refreshBootstrap(false, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось выполнить следующий шаг.");
+    } finally {
+      setIsExecutingStep(false);
+    }
   }
 
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
@@ -546,6 +566,63 @@ export default function App() {
                 <article className="note" key={`${note}-${index}`}>
                   <span className="note-index">{String(index + 1).padStart(2, "0")}</span>
                   <p>{note}</p>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Execution</p>
+              <h3>Очередь задач</h3>
+            </div>
+            <button className="ghost-button" onClick={() => void handleExecuteNextStep()} disabled={isExecutingStep} type="button">
+              {isExecutingStep ? "Выполняю..." : "Выполнить шаг"}
+            </button>
+          </div>
+          <div className="task-list">
+            {bootstrap.tasks.length === 0 ? (
+              <p className="muted">Очередь задач пуста.</p>
+            ) : (
+              bootstrap.tasks.slice(0, 4).map((task) => (
+                <article className="task-item" key={task.id}>
+                  <div className="task-item-head">
+                    <strong>{task.description}</strong>
+                    <span className={`state-badge state-${task.status}`}>{task.status}</span>
+                  </div>
+                  <div className="task-steps">
+                    {task.steps.slice(0, 4).map((step) => (
+                      <p key={step.id}>
+                        <span>{step.position}.</span> [{step.status}] {step.description}
+                      </p>
+                    ))}
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Audit</p>
+              <h3>Журнал действий</h3>
+            </div>
+          </div>
+          <div className="action-log-list">
+            {bootstrap.action_logs.length === 0 ? (
+              <p className="muted">Действий пока нет.</p>
+            ) : (
+              bootstrap.action_logs.slice(0, 6).map((log) => (
+                <article className="action-log-item" key={log.id}>
+                  <div>
+                    <strong>{log.tool_name}</strong>
+                    <span className={`state-badge state-${log.status}`}>{log.status}</span>
+                  </div>
+                  <p>{log.result}</p>
                 </article>
               ))
             )}
