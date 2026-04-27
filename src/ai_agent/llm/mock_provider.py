@@ -59,6 +59,86 @@ class MockProvider:
             path = read_file_match.group(1).strip().strip("'\"`")
             return ModelResponse(tool_calls=[ToolCall(name="read_file", arguments={"path": path})])
 
+        if any(
+            phrase in candidate
+            for candidate in normalized
+            for phrase in (
+                "покажи файлы",
+                "список файлов",
+                "какие файлы",
+                "какие документы",
+                "что ты создал",
+                "файлы агента",
+            )
+        ):
+            return ModelResponse(tool_calls=[ToolCall(name="list_workspace_files", arguments={"limit": 20})])
+
+        if any(
+            phrase in candidate
+            for candidate in normalized
+            for phrase in (
+                "открой рабочую папку",
+                "открой папку агента",
+                "открой папку инструментов",
+                "покажи рабочую папку",
+            )
+        ):
+            return ModelResponse(tool_calls=[ToolCall(name="open_workspace_folder", arguments={"path": ""})])
+
+        docx_match = None
+        for candidate in normalized:
+            docx_match = re.search(
+                r"(?:создай|сделай|подготовь)\s+(?:docx\s+)?(?:документ|файл)[:\s]+(.+?\.docx)"
+                r"(?:\s+(?:с заголовком|заголовок|title)[:\s]+(.+?))?"
+                r"(?:\s+(?:с текстом|текст|content)[:\s]+(.+))?$",
+                candidate,
+                re.IGNORECASE,
+            )
+            if docx_match:
+                break
+        if docx_match:
+            path = docx_match.group(1).strip().strip("'\"`")
+            title = (docx_match.group(2) or "").strip().strip("'\"`")
+            content = (docx_match.group(3) or "").strip().strip("'\"`")
+            paragraphs = [part.strip() for part in re.split(r"(?:\r?\n|;\s*)", content) if part.strip()]
+            return ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="create_docx",
+                        arguments={
+                            "path": path,
+                            "title": title,
+                            "paragraphs": paragraphs,
+                            "bullets": [],
+                            "overwrite": False,
+                        },
+                    )
+                ]
+            )
+
+        append_docx_match = None
+        for candidate in normalized:
+            append_docx_match = re.search(
+                r"(?:допиши|добавь|вставь)\s+(?:в\s+)?(?:документ|docx|файл)\s+(.+?\.docx)"
+                r"\s+(?:текст|с текстом|content)[:\s]+(.+)$",
+                candidate,
+                re.IGNORECASE,
+            )
+            if append_docx_match:
+                break
+        if append_docx_match:
+            path = append_docx_match.group(1).strip().strip("'\"`")
+            content = append_docx_match.group(2).strip().strip("'\"`")
+            paragraphs = [part.strip() for part in re.split(r"(?:\r?\n|;\s*)", content) if part.strip()]
+            return ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="append_docx",
+                        arguments={"path": path, "paragraphs": paragraphs, "bullets": []},
+                    )
+                ]
+            )
+
         write_file_match = None
         for candidate in normalized:
             write_file_match = re.search(

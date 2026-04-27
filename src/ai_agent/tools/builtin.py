@@ -7,6 +7,7 @@ from ai_agent.memory import MemoryStore
 from ai_agent.planner import Planner
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import Tool, ToolRegistry
+from ai_agent.tools.documents import DocumentSandbox
 from ai_agent.tools.files import FileSandbox
 from ai_agent.tools.http import HttpSandbox
 from ai_agent.tools.shell import ShellSandbox
@@ -19,6 +20,7 @@ def register_builtin_tools(
     tasks: TaskManager,
     planner: Planner,
     files: FileSandbox,
+    documents: DocumentSandbox,
     shell: ShellSandbox,
     http: HttpSandbox,
     executor: ExecutionEngine,
@@ -79,6 +81,41 @@ def register_builtin_tools(
 
     registry.register(
         Tool(
+            name="list_workspace_files",
+            description=(
+                "Показывает последние файлы, созданные или доступные внутри безопасной рабочей папки инструментов."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Сколько файлов показать, от 1 до 100"},
+                },
+            },
+            handler=lambda args: files.format_file_list(limit=int(args.get("limit", 30))),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="open_workspace_folder",
+            description=(
+                "Открывает безопасную рабочую папку инструментов или вложенную папку внутри нее в проводнике ОС."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Необязательный относительный путь к вложенной папке внутри рабочей папки",
+                    },
+                },
+            },
+            handler=lambda args: files.open_folder(str(args.get("path", ""))),
+        )
+    )
+
+    registry.register(
+        Tool(
             name="write_file",
             description=(
                 "Записывает текстовый файл в безопасную рабочую папку инструментов. "
@@ -104,6 +141,88 @@ def register_builtin_tools(
                 relative_path=str(args.get("path", "")),
                 content=str(args.get("content", "")),
                 overwrite=bool(args.get("overwrite", False)),
+            ),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="create_docx",
+            description=(
+                "Создает совместимый .docx документ внутри безопасной рабочей папки инструментов. "
+                "Поддерживает заголовок, абзацы, простой список и inline-разметку **жирный** / *курсив*. "
+                "По умолчанию не перезаписывает существующие документы."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Относительный путь к .docx документу внутри рабочей папки инструментов",
+                    },
+                    "title": {"type": "string", "description": "Заголовок документа"},
+                    "paragraphs": {
+                        "type": "array",
+                        "description": "Абзацы документа. Можно использовать **жирный** и *курсив*.",
+                    },
+                    "bullets": {
+                        "type": "array",
+                        "description": "Пункты простого списка",
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "Можно ли заменить существующий .docx документ",
+                    },
+                },
+                "required": ["path"],
+            },
+            handler=lambda args: documents.create_docx(
+                relative_path=str(args.get("path", "")),
+                title=str(args.get("title", "")),
+                paragraphs=[str(item) for item in args.get("paragraphs", [])]
+                if isinstance(args.get("paragraphs"), list)
+                else [],
+                bullets=[str(item) for item in args.get("bullets", [])]
+                if isinstance(args.get("bullets"), list)
+                else [],
+                overwrite=bool(args.get("overwrite", False)),
+            ),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="append_docx",
+            description=(
+                "Добавляет текст в существующий .docx документ внутри безопасной рабочей папки инструментов. "
+                "Поддерживает новые абзацы, простой список и inline-разметку **жирный** / *курсив*."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Относительный путь к существующему .docx документу",
+                    },
+                    "paragraphs": {
+                        "type": "array",
+                        "description": "Новые абзацы. Можно использовать **жирный** и *курсив*.",
+                    },
+                    "bullets": {
+                        "type": "array",
+                        "description": "Новые пункты простого списка",
+                    },
+                },
+                "required": ["path"],
+            },
+            handler=lambda args: documents.append_docx(
+                relative_path=str(args.get("path", "")),
+                paragraphs=[str(item) for item in args.get("paragraphs", [])]
+                if isinstance(args.get("paragraphs"), list)
+                else [],
+                bullets=[str(item) for item in args.get("bullets", [])]
+                if isinstance(args.get("bullets"), list)
+                else [],
             ),
         )
     )

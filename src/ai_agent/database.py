@@ -353,11 +353,12 @@ class AvelinDatabase:
                 ORDER BY
                     CASE status
                         WHEN 'executing' THEN 1
-                        WHEN 'planned' THEN 2
-                        WHEN 'created' THEN 3
-                        WHEN 'failed' THEN 4
-                        WHEN 'completed' THEN 5
-                        ELSE 6
+                        WHEN 'blocked' THEN 2
+                        WHEN 'planned' THEN 3
+                        WHEN 'created' THEN 4
+                        WHEN 'failed' THEN 5
+                        WHEN 'completed' THEN 6
+                        ELSE 7
                     END,
                     priority ASC,
                     created_at ASC

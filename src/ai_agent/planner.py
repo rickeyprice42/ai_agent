@@ -25,6 +25,14 @@ class Planner:
                 priority=_normalize_priority(priority),
             )
 
+        specialized_steps = _specialized_steps(normalized_goal)
+        if specialized_steps:
+            return Plan(
+                goal=normalized_goal,
+                steps=specialized_steps,
+                priority=_normalize_priority(priority),
+            )
+
         return Plan(
             goal=normalized_goal,
             steps=_default_steps(normalized_goal),
@@ -110,6 +118,79 @@ def _default_steps(goal: str) -> list[str]:
         "Выполнить первый безопасный шаг",
         "Проверить результат и зафиксировать итог",
     ]
+
+
+def _specialized_steps(goal: str) -> list[str]:
+    docx_steps = _docx_steps(goal)
+    if docx_steps:
+        return docx_steps
+    return []
+
+
+def _docx_steps(goal: str) -> list[str]:
+    if ".docx" not in goal.lower() and not re.search(r"\b(?:документ|word|docx)\b", goal, flags=re.IGNORECASE):
+        return []
+
+    path = _extract_docx_path(goal) or _slug_docx_path(goal)
+    title = _extract_title(goal) or PathLikeTitle.from_path(path).title
+    content = _extract_content(goal) or _docx_summary_content(goal)
+
+    return [
+        f"создай документ {path} с заголовком: {title} с текстом: {content}",
+        "покажи файлы",
+    ]
+
+
+def _extract_docx_path(text: str) -> str | None:
+    match = re.search(r"([A-Za-zА-Яа-я0-9_./\\-]+\.docx)", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip().replace("\\", "/").strip("'\"`")
+
+
+def _extract_title(text: str) -> str | None:
+    match = re.search(
+        r"(?:с заголовком|заголовок|title)\s*[:=]\s*(.+?)(?:\s+(?:с текстом|текст|content)\s*[:=]|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.group(1).strip(" .'\"`")
+
+
+def _extract_content(text: str) -> str | None:
+    match = re.search(r"(?:с текстом|текст|content)\s*[:=]\s*(.+)$", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip(" .'\"`")
+
+
+def _docx_summary_content(goal: str) -> str:
+    cleaned = re.sub(r"\s+", " ", goal).strip(" .")
+    return f"Черновик документа по задаче: {cleaned}"
+
+
+def _slug_docx_path(goal: str) -> str:
+    words = re.findall(r"[A-Za-zА-Яа-я0-9]+", goal.lower())
+    meaningful_words = [
+        word
+        for word in words
+        if word not in {"создай", "сделай", "подготовь", "документ", "word", "docx", "файл"}
+    ]
+    slug = "-".join(meaningful_words[:4]) or "document"
+    return f"documents/{slug}.docx"
+
+
+@dataclass(slots=True)
+class PathLikeTitle:
+    title: str
+
+    @classmethod
+    def from_path(cls, path: str) -> "PathLikeTitle":
+        stem = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        title = stem.replace("_", " ").replace("-", " ").strip().capitalize()
+        return cls(title=title or "Документ")
 
 
 def _deduplicate_steps(steps: list[str]) -> list[str]:

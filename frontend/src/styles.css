@@ -426,14 +426,16 @@ button {
 }
 
 .task-list,
-.action-log-list {
+.action-log-list,
+.workspace-file-list {
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
 }
 
 .task-item,
-.action-log-item {
+.action-log-item,
+.workspace-file {
   padding: 0.85rem;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -449,7 +451,27 @@ button {
 }
 
 .task-item strong,
-.action-log-item strong {
+.action-log-item strong,
+.workspace-file strong {
+  overflow-wrap: anywhere;
+}
+
+.workspace-file {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.workspace-file div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.workspace-file span,
+.workspace-file p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
   overflow-wrap: anywhere;
 }
 
@@ -458,6 +480,13 @@ button {
   flex-direction: column;
   gap: 0.35rem;
   margin-top: 0.65rem;
+}
+
+.task-step-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
 }
 
 .task-steps p,
@@ -495,6 +524,22 @@ button {
 .state-blocked {
   color: var(--text);
   border-style: dashed;
+}
+
+.mini-button {
+  min-height: 1.8rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.mini-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .note {

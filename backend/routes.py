@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from backend.auth import hash_password, hash_token, issue_session_token, verify_password
 from backend.models import (
+    ApproveStepResponse,
     AuthRequest,
     AuthResponse,
     BootstrapResponse,
@@ -15,6 +16,7 @@ from backend.models import (
     ModelProviderOption,
     ModelSettings,
     ModelSettingsRequest,
+    OpenWorkspaceResponse,
     OAuthProviderResponse,
     RegisterRequest,
     UserProfile,
@@ -149,3 +151,24 @@ def chat(payload: ChatRequest, user: dict[str, str] = Depends(current_user)) -> 
 @router.post("/tasks/execute-next", response_model=ExecuteStepResponse)
 def execute_next_step(user: dict[str, str] = Depends(current_user)) -> ExecuteStepResponse:
     return ExecuteStepResponse(result=agent_service.execute_next_step(user["id"]))
+
+
+@router.post("/tasks/steps/{step_id}/approve", response_model=ApproveStepResponse)
+def approve_blocked_step(
+    step_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ApproveStepResponse:
+    try:
+        result = agent_service.approve_blocked_step(user["id"], step_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ApproveStepResponse(result=result)
+
+
+@router.post("/workspace/open", response_model=OpenWorkspaceResponse)
+def open_workspace_folder(user: dict[str, str] = Depends(current_user)) -> OpenWorkspaceResponse:
+    try:
+        result = agent_service.open_workspace_folder(user["id"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return OpenWorkspaceResponse(result=result)

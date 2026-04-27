@@ -15,6 +15,14 @@ class ExecuteStepResponse(BaseModel):
     result: str
 
 
+class ApproveStepResponse(BaseModel):
+    result: str
+
+
+class OpenWorkspaceResponse(BaseModel):
+    result: str
+
+
 class UserProfile(BaseModel):
     id: str
     email: str = ""
@@ -101,6 +109,14 @@ class ActionLogItem(BaseModel):
     created_at: str
 
 
+class WorkspaceFileItem(BaseModel):
+    path: str
+    name: str
+    extension: str
+    size_bytes: int
+    modified_at: str
+
+
 class BootstrapResponse(BaseModel):
     agent_name: str
     provider: str
@@ -109,4 +125,5 @@ class BootstrapResponse(BaseModel):
     history: list[HistoryItem]
     tasks: list[TaskItem]
     action_logs: list[ActionLogItem]
+    workspace_files: list[WorkspaceFileItem]
     user: UserProfile

@@ -53,3 +53,12 @@ class ActionLog:
     arguments: dict[str, Any] = field(default_factory=dict)
     result: str = ""
     created_at: str = ""
+
+
+@dataclass(slots=True)
+class WorkspaceFile:
+    path: str
+    name: str
+    extension: str
+    size_bytes: int
+    modified_at: str

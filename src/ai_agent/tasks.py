@@ -109,6 +109,30 @@ class TaskManager:
         updated = self.update_step(step.id, "failed", result)
         return self.update_task(updated.id, "failed", result)
 
+    def approve_blocked_step(self, step_id: str) -> Task:
+        normalized_step_id = step_id.strip()
+        if not normalized_step_id:
+            raise ValueError("ID шага не должен быть пустым.")
+
+        blocked_task = None
+        blocked_step = None
+        for task in self.list_tasks(limit=100):
+            for step in task.steps:
+                if step.id == normalized_step_id:
+                    blocked_task = task
+                    blocked_step = step
+                    break
+            if blocked_step is not None:
+                break
+
+        if blocked_task is None or blocked_step is None:
+            raise ValueError("Шаг задачи не найден.")
+        if blocked_task.status != "blocked" or blocked_step.status != "blocked":
+            raise ValueError("Подтверждать можно только шаги из заблокированной задачи.")
+
+        task = self.update_step(normalized_step_id, "running", "Шаг подтвержден пользователем.")
+        return self.update_task(task.id, "executing")
+
     def block_running_step(self, result: str) -> Task:
         task = self.ensure_running_task()
         if task is None:

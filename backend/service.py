@@ -133,6 +133,12 @@ class AgentService:
     def execute_next_step(self, user_id: str) -> str:
         return self.agent_for_user(user_id).executor.execute_next_step()
 
+    def approve_blocked_step(self, user_id: str, step_id: str) -> str:
+        return self.agent_for_user(user_id).executor.approve_blocked_step(step_id)
+
+    def open_workspace_folder(self, user_id: str) -> str:
+        return self.agent_for_user(user_id).files.open_folder()
+
     def bootstrap(self, user_id: str) -> dict:
         agent = self.agent_for_user(user_id)
         memory = agent.memory.snapshot()
@@ -146,6 +152,7 @@ class AgentService:
             "history": memory.history,
             "tasks": [_task_to_payload(task) for task in agent.tasks.list_tasks()],
             "action_logs": [_action_log_to_payload(log) for log in agent.action_log.recent(limit=20)],
+            "workspace_files": [_workspace_file_to_payload(file) for file in agent.files.list_files(limit=20)],
             "user": user,
         }
 
@@ -184,4 +191,14 @@ def _action_log_to_payload(log) -> dict:
         "arguments": log.arguments,
         "result": log.result,
         "created_at": log.created_at,
+    }
+
+
+def _workspace_file_to_payload(file) -> dict:
+    return {
+        "path": file.path,
+        "name": file.name,
+        "extension": file.extension,
+        "size_bytes": file.size_bytes,
+        "modified_at": file.modified_at,
     }

@@ -14,6 +14,7 @@ export type BootstrapPayload = {
   history: ChatMessage[];
   tasks: TaskItem[];
   action_logs: ActionLogItem[];
+  workspace_files: WorkspaceFileItem[];
   user: UserProfile;
 };
 
@@ -44,6 +45,14 @@ export type ActionLogItem = {
   arguments: Record<string, unknown>;
   result: string;
   created_at: string;
+};
+
+export type WorkspaceFileItem = {
+  path: string;
+  name: string;
+  extension: string;
+  size_bytes: number;
+  modified_at: string;
 };
 
 export type UserProfile = {

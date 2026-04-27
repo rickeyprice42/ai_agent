@@ -14,6 +14,7 @@ from ai_agent.planner import Planner
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import ToolRegistry
 from ai_agent.tools.builtin import register_builtin_tools
+from ai_agent.tools.documents import DocumentSandbox
 from ai_agent.tools.files import FileSandbox
 from ai_agent.tools.http import HttpSandbox
 from ai_agent.tools.shell import ShellSandbox
@@ -37,6 +38,10 @@ class Agent:
             max_read_chars=settings.max_file_read_chars,
             max_write_chars=settings.max_file_write_chars,
         )
+        self.documents = DocumentSandbox(
+            workspace_dir=settings.tool_workspace_dir,
+            max_text_chars=settings.max_file_write_chars,
+        )
         self.shell = ShellSandbox(
             workspace_dir=settings.tool_workspace_dir,
             timeout_seconds=settings.shell_timeout_seconds,
@@ -54,6 +59,7 @@ class Agent:
             self.tasks,
             self.planner,
             self.files,
+            self.documents,
             self.shell,
             self.http,
             self.executor,

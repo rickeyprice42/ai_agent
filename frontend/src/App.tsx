@@ -1,11 +1,13 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  approveBlockedStep,
   executeNextStep,
   fetchBootstrap,
   fetchMe,
   fetchModelProviders,
   login as authLogin,
   logout as authLogout,
+  openWorkspaceFolder,
   register as authRegister,
   sendMessage,
   updateModelSettings
@@ -27,6 +29,7 @@ const EMPTY_BOOTSTRAP: BootstrapPayload = {
   history: [],
   tasks: [],
   action_logs: [],
+  workspace_files: [],
   user: {
     id: "",
     email: "",
@@ -47,6 +50,23 @@ function formatRoleLabel(message: ChatMessage, agentName: string): string {
   if (message.role === "user") return "Ты";
   if (message.role === "assistant") return agentName;
   return message.name ?? "Инструмент";
+}
+
+function formatFileSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatFileTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return value;
+  return new Date(timestamp).toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 function TypewriterText({ text }: { text: string }) {
@@ -102,6 +122,8 @@ export default function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isExecutingStep, setIsExecutingStep] = useState(false);
+  const [approvingStepId, setApprovingStepId] = useState<string | null>(null);
+  const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
   const [animatedMessageKey, setAnimatedMessageKey] = useState<string | null>(null);
@@ -286,6 +308,36 @@ export default function App() {
       setError(err instanceof Error ? err.message : "Не удалось выполнить следующий шаг.");
     } finally {
       setIsExecutingStep(false);
+    }
+  }
+
+  async function handleApproveBlockedStep(stepId: string) {
+    if (!authToken || approvingStepId) return;
+    setApprovingStepId(stepId);
+    setError(null);
+    setAnimatedMessageKey(null);
+
+    try {
+      await approveBlockedStep(stepId, authToken);
+      await refreshBootstrap(false, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось подтвердить шаг.");
+    } finally {
+      setApprovingStepId(null);
+    }
+  }
+
+  async function handleOpenWorkspaceFolder() {
+    if (!authToken || isOpeningWorkspace) return;
+    setIsOpeningWorkspace(true);
+    setError(null);
+
+    try {
+      await openWorkspaceFolder(authToken);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось открыть рабочую папку.");
+    } finally {
+      setIsOpeningWorkspace(false);
     }
   }
 
@@ -594,11 +646,52 @@ export default function App() {
                   </div>
                   <div className="task-steps">
                     {task.steps.slice(0, 4).map((step) => (
-                      <p key={step.id}>
-                        <span>{step.position}.</span> [{step.status}] {step.description}
-                      </p>
+                      <div className="task-step-row" key={step.id}>
+                        <p>
+                          <span>{step.position}.</span> [{step.status}] {step.description}
+                        </p>
+                        {task.status === "blocked" && step.status === "blocked" ? (
+                          <button
+                            className="mini-button"
+                            disabled={approvingStepId === step.id}
+                            onClick={() => void handleApproveBlockedStep(step.id)}
+                            type="button"
+                          >
+                            {approvingStepId === step.id ? "Разрешаю..." : "Разрешить"}
+                          </button>
+                        ) : null}
+                      </div>
                     ))}
                   </div>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Files</p>
+              <h3>Файлы агента</h3>
+            </div>
+            <button className="ghost-button" disabled={isOpeningWorkspace} onClick={() => void handleOpenWorkspaceFolder()} type="button">
+              {isOpeningWorkspace ? "Открываю..." : "Открыть"}
+            </button>
+          </div>
+          <div className="workspace-file-list">
+            {bootstrap.workspace_files.length === 0 ? (
+              <p className="muted">Рабочая папка пока пуста.</p>
+            ) : (
+              bootstrap.workspace_files.slice(0, 6).map((file) => (
+                <article className="workspace-file" key={file.path}>
+                  <div>
+                    <strong>{file.name}</strong>
+                    <span>{file.path}</span>
+                  </div>
+                  <p>
+                    {formatFileSize(file.size_bytes)} · {formatFileTime(file.modified_at)}
+                  </p>
                 </article>
               ))
             )}

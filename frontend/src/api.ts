@@ -53,6 +53,28 @@ export async function executeNextStep(token: string): Promise<{ result: string }
   return response.json();
 }
 
+export async function approveBlockedStep(stepId: string, token: string): Promise<{ result: string }> {
+  const response = await fetch(`/api/tasks/steps/${encodeURIComponent(stepId)}/approve`, {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось подтвердить заблокированный шаг.");
+  }
+  return response.json();
+}
+
+export async function openWorkspaceFolder(token: string): Promise<{ result: string }> {
+  const response = await fetch("/api/workspace/open", {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось открыть рабочую папку.");
+  }
+  return response.json();
+}
+
 export async function login(loginValue: string, password: string): Promise<AuthPayload> {
   const response = await fetch("/api/auth/login", {
     method: "POST",
