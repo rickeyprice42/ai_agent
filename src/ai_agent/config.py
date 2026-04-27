@@ -23,6 +23,9 @@ class Settings:
     model_provider: str
     model_name: str
     ollama_url: str
+    ollama_cloud_url: str
+    ollama_api_key: str
+    ollama_cloud_model: str
     database_file: Path
     memory_file: Path
     tool_workspace_dir: Path
@@ -50,6 +53,9 @@ class Settings:
             model_provider=os.getenv("MODEL_PROVIDER", "mock"),
             model_name=os.getenv("MODEL_NAME", "mock-local"),
             ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+            ollama_cloud_url=os.getenv("OLLAMA_CLOUD_URL", "https://ollama.com"),
+            ollama_api_key=os.getenv("OLLAMA_API_KEY", ""),
+            ollama_cloud_model=os.getenv("OLLAMA_CLOUD_MODEL", "qwen3.5:397b-cloud"),
             database_file=database_path,
             memory_file=memory_path,
             tool_workspace_dir=workspace_path,

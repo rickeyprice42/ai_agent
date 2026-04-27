@@ -68,9 +68,15 @@ class Agent:
                 model=self.settings.model_name,
                 base_url=self.settings.ollama_url,
             )
+        if self.settings.model_provider == "ollama_cloud":
+            return OllamaProvider(
+                model=self.settings.model_name,
+                base_url=self.settings.ollama_cloud_url,
+                api_key=self.settings.ollama_api_key,
+            )
         raise ValueError(
             f"Неизвестный провайдер: {self.settings.model_provider}. "
-            "Поддерживаются только 'mock' и 'ollama'."
+            "Поддерживаются только 'mock', 'ollama' и 'ollama_cloud'."
         )
 
     def respond(self, user_text: str) -> str:

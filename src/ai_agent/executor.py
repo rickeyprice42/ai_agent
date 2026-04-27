@@ -38,9 +38,23 @@ class ExecutionEngine:
             return _format_task_state("Задача завершена без отдельных шагов.", completed)
 
         decision = decide_step_action(step)
+        safety_block = _safety_block_reason(step, decision)
+        if safety_block:
+            self.action_log.record(
+                decision.tool_name or "execution_safety",
+                "blocked",
+                decision.arguments,
+                safety_block,
+            )
+            updated = self.tasks.block_running_step(safety_block)
+            return _format_task_state(safety_block, updated)
+
         if decision.tool_name is None:
-            result = f"Шаг обработан без инструмента: {decision.reason or step.description}"
-            updated = self.tasks.complete_running_step(result)
+            result = (
+                "Шаг остановлен: executor не смог выбрать безопасное действие.\n"
+                f"Причина: {decision.reason or step.description}"
+            )
+            updated = self.tasks.block_running_step(result)
             return _format_task_state(result, updated)
 
         if not self.tools.has(decision.tool_name):
@@ -96,7 +110,7 @@ def decide_step_action(step: TaskStep) -> ExecutionDecision:
         method = "HEAD" if "head" in lowered else "GET"
         return ExecutionDecision("http_request", {"url": url, "method": method}, "http request requested")
 
-    return ExecutionDecision(None, reason="нет подходящего безопасного инструмента; шаг отмечен как выполненный")
+    return ExecutionDecision(None, reason="нет подходящего безопасного инструмента для этого шага")
 
 
 def _extract_file_path(text: str, verbs: tuple[str, ...]) -> str | None:
@@ -139,7 +153,35 @@ def _extract_url(text: str) -> str | None:
     return match.group(0).strip()
 
 
+def _safety_block_reason(step: TaskStep, decision: ExecutionDecision) -> str | None:
+    lowered = step.description.lower()
+    risky_words = (
+        "удали",
+        "удалить",
+        "сотри",
+        "стереть",
+        "очисти",
+        "очистить",
+        "delete",
+        "remove",
+        "erase",
+        "rm ",
+    )
+    if any(word in lowered for word in risky_words):
+        return (
+            "Шаг требует подтверждения пользователя: в описании есть потенциально "
+            "разрушительное действие."
+        )
+
+    if decision.tool_name == "write_file" and decision.arguments.get("overwrite") is True:
+        return "Шаг требует подтверждения пользователя: запись файла запрошена с overwrite=true."
+
+    return None
+
+
 def _tool_status(tool_result: str) -> str:
+    if "требует подтверждения пользователя" in tool_result:
+        return "blocked"
     if "не смог выполнить действие" in tool_result:
         return "failed"
     if "Код возврата: -" in tool_result:

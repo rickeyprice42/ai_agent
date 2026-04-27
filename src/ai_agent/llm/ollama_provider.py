@@ -8,9 +8,15 @@ from ai_agent.types import Message, ModelResponse, ToolCall
 
 
 class OllamaProvider:
-    def __init__(self, model: str = "phi3", base_url: str = "http://localhost:11434") -> None:
+    def __init__(
+        self,
+        model: str = "phi3",
+        base_url: str = "http://localhost:11434",
+        api_key: str = "",
+    ) -> None:
         self.model = model
         self.url = f"{base_url.rstrip('/')}/api/generate"
+        self.api_key = api_key
 
     def generate(
         self,
@@ -32,10 +38,14 @@ class OllamaProvider:
             }
         ).encode("utf-8")
 
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
         http_request = request.Request(
             self.url,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
 

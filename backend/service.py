@@ -30,6 +30,12 @@ AVAILABLE_MODELS = [
         "description": "Локальная LLM через Ollama API.",
         "models": [],
     },
+    {
+        "provider": "ollama_cloud",
+        "label": "Ollama Cloud",
+        "description": "Облачная модель через прямой Ollama API и OLLAMA_API_KEY.",
+        "models": [],
+    },
 ]
 
 
@@ -65,6 +71,10 @@ class AgentService:
                         "Ollama API доступна, но установленные модели не найдены. "
                         "Установи модель командой `ollama pull <model>`."
                     )
+            if item["provider"] == "ollama_cloud":
+                item["models"] = [self.settings.ollama_cloud_model]
+                if not self.settings.ollama_api_key:
+                    item["description"] = "Нужен OLLAMA_API_KEY в локальном .env."
         return models
 
     def installed_ollama_models(self) -> list[str]:
@@ -103,6 +113,8 @@ class AgentService:
             raise ValueError("Неподдерживаемый provider.")
         if provider == "ollama" and not allowed[provider]:
             raise ValueError("Ollama доступна, но установленные модели не найдены.")
+        if provider == "ollama_cloud" and not self.settings.ollama_api_key:
+            raise ValueError("Для Ollama Cloud нужен OLLAMA_API_KEY в локальном .env.")
         if model_name not in allowed[provider]:
             raise ValueError("Модель не найдена для выбранного provider.")
 

@@ -4,8 +4,8 @@ from ai_agent.database import AvelinDatabase
 from ai_agent.types import Task, TaskStep
 
 
-TASK_STATUSES = {"created", "planned", "executing", "completed", "failed"}
-STEP_STATUSES = {"pending", "running", "completed", "failed", "skipped"}
+TASK_STATUSES = {"created", "planned", "executing", "completed", "failed", "blocked"}
+STEP_STATUSES = {"pending", "running", "completed", "failed", "skipped", "blocked"}
 
 
 class TaskManager:
@@ -108,6 +108,18 @@ class TaskManager:
 
         updated = self.update_step(step.id, "failed", result)
         return self.update_task(updated.id, "failed", result)
+
+    def block_running_step(self, result: str) -> Task:
+        task = self.ensure_running_task()
+        if task is None:
+            raise ValueError("Нет активной задачи для выполнения.")
+
+        step = self.running_step(task)
+        if step is None:
+            return self.update_task(task.id, "blocked", result or "Задача требует решения пользователя.")
+
+        updated = self.update_step(step.id, "blocked", result)
+        return self.update_task(updated.id, "blocked", result)
 
     def add_step(self, task_id: str, description: str) -> Task:
         description = description.strip()

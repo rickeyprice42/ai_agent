@@ -492,6 +492,11 @@ button {
   color: var(--danger);
 }
 
+.state-blocked {
+  color: var(--text);
+  border-style: dashed;
+}
+
 .note {
   display: grid;
   grid-template-columns: auto 1fr;
