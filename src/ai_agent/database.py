@@ -35,6 +35,9 @@ class AvelinDatabase:
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            self._migrate_chat_threads(connection)
+            self._migrate_project_links(connection)
+            self._ensure_migrated_indexes(connection)
             connection.execute(
                 """
                 INSERT OR IGNORE INTO users (id, display_name)
@@ -56,6 +59,52 @@ class AvelinDatabase:
                 """,
                 (DEFAULT_USER_ID, "mock", "mock-local"),
             )
+
+    def _migrate_project_links(self, connection: sqlite3.Connection) -> None:
+        table_columns = {
+            "notes": {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(notes)").fetchall()
+            },
+            "tasks": {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(tasks)").fetchall()
+            },
+        }
+        if "project_id" not in table_columns["notes"]:
+            connection.execute("ALTER TABLE notes ADD COLUMN project_id TEXT")
+        if "source_thread_id" not in table_columns["notes"]:
+            connection.execute("ALTER TABLE notes ADD COLUMN source_thread_id TEXT")
+        if "project_id" not in table_columns["tasks"]:
+            connection.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT")
+
+    def _migrate_chat_threads(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(chat_threads)").fetchall()
+        }
+        migrations = {
+            "status": "ALTER TABLE chat_threads ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            "archived_at": "ALTER TABLE chat_threads ADD COLUMN archived_at TEXT",
+            "deleted_at": "ALTER TABLE chat_threads ADD COLUMN deleted_at TEXT",
+            "pinned": "ALTER TABLE chat_threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+            "project_id": "ALTER TABLE chat_threads ADD COLUMN project_id TEXT",
+            "memory_enabled": "ALTER TABLE chat_threads ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1",
+            "memory_saved_at": "ALTER TABLE chat_threads ADD COLUMN memory_saved_at TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                connection.execute(statement)
+
+    def _ensure_migrated_indexes(self, connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_threads_project_id ON chat_threads(project_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_threads_status ON chat_threads(status, archived_at, deleted_at);
+            CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
+            CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+            """
+        )
 
     def get_metadata(self, key: str) -> str | None:
         with self.connect() as connection:
@@ -230,12 +279,432 @@ class AvelinDatabase:
             (user_id, "mock", "mock-local"),
         )
 
-    def add_note(self, note: str, user_id: str = DEFAULT_USER_ID) -> None:
+    def list_chat_threads(
+        self,
+        user_id: str,
+        status: str = "active",
+        project_id: str | None = None,
+        unassigned: bool = False,
+    ) -> list[dict]:
+        self.ensure_user_defaults(user_id)
+        if status not in {"active", "archived", "deleted", "all"}:
+            status = "active"
+
+        where = "user_id = ?"
+        params: list[str] = [user_id]
+        if status == "active":
+            where += " AND deleted_at IS NULL AND archived_at IS NULL AND status = 'active'"
+        elif status == "archived":
+            where += " AND deleted_at IS NULL AND (archived_at IS NOT NULL OR status = 'archived')"
+        elif status == "deleted":
+            where += " AND deleted_at IS NOT NULL"
+        if project_id:
+            where += " AND project_id = ?"
+            params.append(project_id)
+        elif unassigned:
+            where += " AND project_id IS NULL"
+
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    chat_threads.id,
+                    chat_threads.user_id,
+                    chat_threads.title,
+                    chat_threads.status,
+                    chat_threads.archived_at,
+                    chat_threads.deleted_at,
+                    chat_threads.pinned,
+                    chat_threads.project_id,
+                    chat_threads.memory_enabled,
+                    chat_threads.memory_saved_at,
+                    chat_threads.created_at,
+                    chat_threads.updated_at,
+                    COUNT(messages.id) AS message_count,
+                    MAX(messages.created_at) AS last_message_at
+                FROM chat_threads
+                LEFT JOIN messages ON messages.thread_id = chat_threads.id
+                WHERE {where}
+                GROUP BY chat_threads.id
+                ORDER BY
+                    chat_threads.pinned DESC,
+                    COALESCE(MAX(messages.created_at), chat_threads.updated_at) DESC,
+                    chat_threads.created_at DESC
+                """,
+                params,
+            ).fetchall()
+        return [self._thread_payload(row) for row in rows]
+
+    def get_chat_thread(self, user_id: str, thread_id: str) -> dict | None:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    chat_threads.id,
+                    chat_threads.user_id,
+                    chat_threads.title,
+                    chat_threads.status,
+                    chat_threads.archived_at,
+                    chat_threads.deleted_at,
+                    chat_threads.pinned,
+                    chat_threads.project_id,
+                    chat_threads.memory_enabled,
+                    chat_threads.memory_saved_at,
+                    chat_threads.created_at,
+                    chat_threads.updated_at,
+                    COUNT(messages.id) AS message_count,
+                    MAX(messages.created_at) AS last_message_at
+                FROM chat_threads
+                LEFT JOIN messages ON messages.thread_id = chat_threads.id
+                WHERE chat_threads.user_id = ? AND chat_threads.id = ?
+                GROUP BY chat_threads.id
+                """,
+                (user_id, thread_id),
+            ).fetchone()
+        return self._thread_payload(row) if row else None
+
+    def create_chat_thread(
+        self,
+        user_id: str,
+        title: str | None = None,
+        project_id: str | None = None,
+    ) -> dict:
+        self.ensure_user_defaults(user_id)
+        if project_id and self.get_project(user_id, project_id) is None:
+            return self.create_chat_thread(user_id, title=title)
+        thread_id = str(uuid4())
+        normalized_title = (title or "New chat").strip() or "New chat"
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO chat_threads (id, user_id, title, project_id)
+                VALUES (?, ?, ?, ?)
+                """,
+                (thread_id, user_id, normalized_title, project_id),
+            )
+        return self.get_chat_thread(user_id, thread_id) or {
+            "id": thread_id,
+            "user_id": user_id,
+            "title": normalized_title,
+            "status": "active",
+            "archived_at": None,
+            "deleted_at": None,
+            "pinned": False,
+            "project_id": None,
+            "memory_enabled": True,
+            "memory_saved_at": None,
+            "created_at": "",
+            "updated_at": "",
+            "message_count": 0,
+            "last_message_at": None,
+        }
+
+    def update_chat_thread(
+        self,
+        user_id: str,
+        thread_id: str,
+        title: str | None = None,
+        pinned: bool | None = None,
+        project_id: str | None = None,
+        clear_project: bool = False,
+        memory_enabled: bool | None = None,
+    ) -> dict | None:
+        if self.get_chat_thread(user_id, thread_id) is None:
+            return None
+        assignments = ["updated_at = CURRENT_TIMESTAMP"]
+        params: list[str | int] = []
+        if title is not None:
+            assignments.append("title = ?")
+            params.append(title.strip() or "Untitled chat")
+        if pinned is not None:
+            assignments.append("pinned = ?")
+            params.append(1 if pinned else 0)
+        if clear_project:
+            assignments.append("project_id = NULL")
+        elif project_id is not None:
+            if self.get_project(user_id, project_id) is None:
+                return None
+            assignments.append("project_id = ?")
+            params.append(project_id)
+        if memory_enabled is not None:
+            assignments.append("memory_enabled = ?")
+            params.append(1 if memory_enabled else 0)
+        params.extend([user_id, thread_id])
+        with self.connect() as connection:
+            connection.execute(
+                f"""
+                UPDATE chat_threads
+                SET {", ".join(assignments)}
+                WHERE user_id = ? AND id = ?
+                """,
+                params,
+            )
+        return self.get_chat_thread(user_id, thread_id)
+
+    def create_project(self, user_id: str, title: str, description: str = "") -> dict:
+        self.ensure_user_defaults(user_id)
+        project_id = str(uuid4())
+        normalized_title = title.strip() or "Untitled project"
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO projects (id, user_id, title, description)
+                VALUES (?, ?, ?, ?)
+                """,
+                (project_id, user_id, normalized_title, description.strip()),
+            )
+        return self.get_project(user_id, project_id) or {
+            "id": project_id,
+            "user_id": user_id,
+            "title": normalized_title,
+            "description": description.strip(),
+            "status": "active",
+            "created_at": "",
+            "updated_at": "",
+            "chat_count": 0,
+        }
+
+    def get_project(self, user_id: str, project_id: str) -> dict | None:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    projects.id,
+                    projects.user_id,
+                    projects.title,
+                    projects.description,
+                    projects.status,
+                    projects.created_at,
+                    projects.updated_at,
+                    COUNT(chat_threads.id) AS chat_count
+                FROM projects
+                LEFT JOIN chat_threads
+                  ON chat_threads.project_id = projects.id
+                 AND chat_threads.deleted_at IS NULL
+                WHERE projects.user_id = ? AND projects.id = ?
+                GROUP BY projects.id
+                """,
+                (user_id, project_id),
+            ).fetchone()
+        return self._project_payload(row) if row else None
+
+    def list_projects(self, user_id: str, status: str = "active") -> list[dict]:
+        self.ensure_user_defaults(user_id)
+        if status not in {"active", "archived", "deleted", "all"}:
+            status = "active"
+        where = "projects.user_id = ?"
+        params = [user_id]
+        if status != "all":
+            where += " AND projects.status = ?"
+            params.append(status)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    projects.id,
+                    projects.user_id,
+                    projects.title,
+                    projects.description,
+                    projects.status,
+                    projects.created_at,
+                    projects.updated_at,
+                    COUNT(chat_threads.id) AS chat_count
+                FROM projects
+                LEFT JOIN chat_threads
+                  ON chat_threads.project_id = projects.id
+                 AND chat_threads.deleted_at IS NULL
+                WHERE {where}
+                GROUP BY projects.id
+                ORDER BY
+                    CASE projects.status
+                        WHEN 'active' THEN 1
+                        WHEN 'archived' THEN 2
+                        WHEN 'deleted' THEN 3
+                        ELSE 4
+                    END,
+                    projects.updated_at DESC,
+                    projects.created_at DESC
+                """,
+                params,
+            ).fetchall()
+        return [self._project_payload(row) for row in rows]
+
+    def update_project(
+        self,
+        user_id: str,
+        project_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        status: str | None = None,
+    ) -> dict | None:
+        if self.get_project(user_id, project_id) is None:
+            return None
+        assignments = ["updated_at = CURRENT_TIMESTAMP"]
+        params: list[str] = []
+        if title is not None:
+            assignments.append("title = ?")
+            params.append(title.strip() or "Untitled project")
+        if description is not None:
+            assignments.append("description = ?")
+            params.append(description.strip())
+        if status is not None:
+            if status not in {"active", "archived", "deleted"}:
+                return None
+            assignments.append("status = ?")
+            params.append(status)
+        params.extend([user_id, project_id])
+        with self.connect() as connection:
+            connection.execute(
+                f"""
+                UPDATE projects
+                SET {", ".join(assignments)}
+                WHERE user_id = ? AND id = ?
+                """,
+                params,
+            )
+        return self.get_project(user_id, project_id)
+
+    def _project_payload(self, row: sqlite3.Row) -> dict:
+        return {
+            "id": str(row["id"]),
+            "user_id": str(row["user_id"]),
+            "title": str(row["title"]),
+            "description": str(row["description"] or ""),
+            "status": str(row["status"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "chat_count": int(row["chat_count"] or 0),
+        }
+
+    def archive_chat_thread(self, user_id: str, thread_id: str, archived: bool = True) -> dict | None:
+        if self.get_chat_thread(user_id, thread_id) is None:
+            return None
+        with self.connect() as connection:
+            if archived:
+                connection.execute(
+                    """
+                    UPDATE chat_threads
+                    SET status = 'archived',
+                        archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ? AND id = ? AND deleted_at IS NULL
+                    """,
+                    (user_id, thread_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE chat_threads
+                    SET status = 'active',
+                        archived_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ? AND id = ? AND deleted_at IS NULL
+                    """,
+                    (user_id, thread_id),
+                )
+        return self.get_chat_thread(user_id, thread_id)
+
+    def soft_delete_chat_thread(self, user_id: str, thread_id: str) -> dict | None:
+        if self.get_chat_thread(user_id, thread_id) is None:
+            return None
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE chat_threads
+                SET status = 'deleted',
+                    deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND id = ?
+                """,
+                (user_id, thread_id),
+            )
+        return self.get_chat_thread(user_id, thread_id)
+
+    def restore_chat_thread(self, user_id: str, thread_id: str) -> dict | None:
+        if self.get_chat_thread(user_id, thread_id) is None:
+            return None
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE chat_threads
+                SET status = 'active',
+                    archived_at = NULL,
+                    deleted_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND id = ?
+                """,
+                (user_id, thread_id),
+            )
+        return self.get_chat_thread(user_id, thread_id)
+
+    def clear_chat_messages(self, user_id: str, thread_id: str) -> int | None:
+        if self.get_chat_thread(user_id, thread_id) is None:
+            return None
+        with self.connect() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) AS count FROM messages WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()["count"]
+            connection.execute("DELETE FROM messages WHERE thread_id = ?", (thread_id,))
+            connection.execute(
+                """
+                UPDATE chat_threads
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND id = ?
+                """,
+                (user_id, thread_id),
+            )
+        return int(count)
+
+    def auto_title_chat_thread(self, user_id: str, thread_id: str) -> dict | None:
+        thread = self.get_chat_thread(user_id, thread_id)
+        if thread is None or thread["title"] not in {"New chat", "Main conversation", "Untitled chat"}:
+            return thread
+        messages = self.list_messages(thread_id)
+        first_user_message = next(
+            (message["content"] for message in messages if message["role"] == "user" and message["content"]),
+            "",
+        )
+        title = _title_from_message(first_user_message)
+        if not title:
+            return thread
+        return self.update_chat_thread(user_id, thread_id, title=title)
+
+    def _thread_payload(self, row: sqlite3.Row) -> dict:
+        return {
+            "id": str(row["id"]),
+            "user_id": str(row["user_id"]),
+            "title": str(row["title"]),
+            "status": str(row["status"]),
+            "archived_at": row["archived_at"],
+            "deleted_at": row["deleted_at"],
+            "pinned": bool(row["pinned"]),
+            "project_id": row["project_id"],
+            "memory_enabled": bool(row["memory_enabled"]),
+            "memory_saved_at": row["memory_saved_at"],
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "message_count": int(row["message_count"] or 0),
+            "last_message_at": row["last_message_at"],
+        }
+
+    def add_note(
+        self,
+        note: str,
+        user_id: str = DEFAULT_USER_ID,
+        project_id: str | None = None,
+        source_thread_id: str | None = None,
+    ) -> None:
         self.ensure_user_defaults(user_id)
         with self.connect() as connection:
             connection.execute(
-                "INSERT INTO notes (id, user_id, content) VALUES (?, ?, ?)",
-                (str(uuid4()), user_id, note),
+                """
+                INSERT INTO notes (id, user_id, content, project_id, source_thread_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (str(uuid4()), user_id, note, project_id, source_thread_id),
             )
 
     def list_notes(self, user_id: str = DEFAULT_USER_ID) -> list[str]:
@@ -251,6 +720,82 @@ class AvelinDatabase:
             ).fetchall()
             return [str(row["content"]) for row in rows]
 
+    def list_note_items(
+        self,
+        user_id: str = DEFAULT_USER_ID,
+        project_id: str | None = None,
+        source_thread_id: str | None = None,
+        include_global: bool = True,
+    ) -> list[dict]:
+        clauses = ["user_id = ?"]
+        params: list[str] = [user_id]
+        scope_clauses: list[str] = []
+        if include_global:
+            scope_clauses.append("(project_id IS NULL AND source_thread_id IS NULL)")
+        if project_id:
+            scope_clauses.append("project_id = ?")
+            params.append(project_id)
+        if source_thread_id:
+            scope_clauses.append("source_thread_id = ?")
+            params.append(source_thread_id)
+        if scope_clauses:
+            clauses.append(f"({' OR '.join(scope_clauses)})")
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, user_id, content, project_id, source_thread_id, created_at
+                FROM notes
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                params,
+            ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "user_id": str(row["user_id"]),
+                "content": str(row["content"]),
+                "project_id": row["project_id"],
+                "source_thread_id": row["source_thread_id"],
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def remember_thread(self, user_id: str, thread_id: str) -> str | None:
+        thread = self.get_chat_thread(user_id, thread_id)
+        if thread is None or thread["deleted_at"] is not None:
+            return None
+        messages = self.list_messages(thread_id)
+        user_messages = [
+            str(message["content"]).strip()
+            for message in messages
+            if message["role"] == "user" and str(message["content"]).strip()
+        ]
+        if not user_messages:
+            return ""
+        title = str(thread["title"] or "Chat")
+        summary = "; ".join(user_messages[-6:])
+        content = f"Chat memory [{title}]: {summary}"
+        self.add_note(
+            content,
+            user_id=user_id,
+            project_id=thread["project_id"],
+            source_thread_id=thread_id,
+        )
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE chat_threads
+                SET memory_saved_at = CURRENT_TIMESTAMP,
+                    memory_enabled = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND id = ?
+                """,
+                (user_id, thread_id),
+            )
+        return content
+
     def add_message(
         self,
         role: str,
@@ -258,8 +803,6 @@ class AvelinDatabase:
         name: str | None = None,
         thread_id: str = DEFAULT_THREAD_ID,
     ) -> None:
-        user_id = thread_id if thread_id != DEFAULT_THREAD_ID else DEFAULT_USER_ID
-        self.ensure_user_defaults(user_id)
         with self.connect() as connection:
             connection.execute(
                 """
@@ -267,6 +810,14 @@ class AvelinDatabase:
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (str(uuid4()), thread_id, role, content, name),
+            )
+            connection.execute(
+                """
+                UPDATE chat_threads
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (thread_id,),
             )
 
     def list_messages(self, thread_id: str = DEFAULT_THREAD_ID) -> list[dict[str, str | None]]:
@@ -325,7 +876,7 @@ class AvelinDatabase:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, user_id, description, status, priority, result
+                SELECT id, user_id, project_id, description, status, priority, result
                 FROM tasks
                 WHERE id = ?
                 """,
@@ -336,6 +887,7 @@ class AvelinDatabase:
             return {
                 "id": str(row["id"]),
                 "user_id": str(row["user_id"]),
+                "project_id": row["project_id"],
                 "description": str(row["description"]),
                 "status": str(row["status"]),
                 "priority": int(row["priority"]),
@@ -347,7 +899,7 @@ class AvelinDatabase:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, user_id, description, status, priority, result
+                SELECT id, user_id, project_id, description, status, priority, result
                 FROM tasks
                 WHERE user_id = ?
                 ORDER BY
@@ -373,6 +925,7 @@ class AvelinDatabase:
                 {
                     "id": str(row["id"]),
                     "user_id": str(row["user_id"]),
+                    "project_id": row["project_id"],
                     "description": str(row["description"]),
                     "status": str(row["status"]),
                     "priority": int(row["priority"]),
@@ -610,6 +1163,23 @@ CREATE TABLE IF NOT EXISTS chat_threads (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title TEXT NOT NULL DEFAULT 'Main conversation',
+    status TEXT NOT NULL DEFAULT 'active',
+    archived_at TEXT,
+    deleted_at TEXT,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    project_id TEXT,
+    memory_enabled INTEGER NOT NULL DEFAULT 1,
+    memory_saved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -627,6 +1197,8 @@ CREATE TABLE IF NOT EXISTS notes (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     content TEXT NOT NULL,
+    project_id TEXT,
+    source_thread_id TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -645,6 +1217,7 @@ CREATE TABLE IF NOT EXISTS memory_index (
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id TEXT,
     description TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'created',
     priority INTEGER NOT NULL DEFAULT 3,
@@ -699,3 +1272,11 @@ CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_task_steps_task_id ON task_steps(task_id);
 CREATE INDEX IF NOT EXISTS idx_action_logs_user_id ON action_logs(user_id);
 """
+
+
+def _title_from_message(content: str) -> str:
+    normalized = " ".join(content.split())
+    if not normalized:
+        return ""
+    title = normalized[:48].rstrip(".,!?;:")
+    return f"{title}..." if len(normalized) > len(title) else title

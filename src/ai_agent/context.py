@@ -43,6 +43,7 @@ class ContextBuilder:
         system_parts = [
             _section("Core system instructions", base_system_prompt.strip()),
             self._conversation_summary_context(),
+            self._project_context(),
             self._memory_context(),
             self._task_context(),
             self._action_context(),
@@ -89,8 +90,28 @@ class ContextBuilder:
             return ""
 
         lines = []
-        lines.extend(f"- [{memory.kind}] {memory.content}" for memory in memories)
+        lines.extend(f"- [{memory.scope}/{memory.kind}] {memory.content}" for memory in memories)
         return _section("Relevant long-term memory", "\n".join(lines))
+
+    def _project_context(self) -> str:
+        thread = self.memory.database.get_chat_thread(self.memory.user_id, self.memory.thread_id)
+        if not thread or not thread.get("project_id"):
+            return ""
+
+        project = self.memory.database.get_project(self.memory.user_id, str(thread["project_id"]))
+        if not project or project["status"] != "active":
+            return ""
+
+        lines = [
+            f"- project_id: {project['id']}",
+            f"- title: {project['title']}",
+        ]
+        if project.get("description"):
+            lines.append(f"- description: {project['description']}")
+        lines.append(
+            "Use this project context only for the current chat. Do not apply it to unrelated chats."
+        )
+        return _section("Current project context", "\n".join(lines))
 
     def _memory_query(self) -> str:
         parts: list[str] = []

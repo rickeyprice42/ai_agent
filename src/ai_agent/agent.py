@@ -23,12 +23,18 @@ from ai_agent.types import Message
 
 
 class Agent:
-    def __init__(self, settings: Settings, user_id: str = "local-user") -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        user_id: str = "local-user",
+        thread_id: str | None = None,
+    ) -> None:
         self.settings = settings
         self.memory = MemoryStore(
             database_path=settings.database_file,
             legacy_json_path=settings.memory_file,
             user_id=user_id,
+            thread_id=thread_id,
         )
         self.planner = Planner()
         self.tasks = TaskManager(self.memory.database, user_id=user_id)

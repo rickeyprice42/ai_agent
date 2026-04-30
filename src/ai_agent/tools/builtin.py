@@ -42,10 +42,26 @@ def register_builtin_tools(
                 "type": "object",
                 "properties": {
                     "note": {"type": "string", "description": "Текст заметки"},
+                    "scope": {
+                        "type": "string",
+                        "description": "global, current_project или current_chat",
+                    },
                 },
                 "required": ["note"],
             },
-            handler=lambda args: memory.add_note(str(args.get("note", ""))),
+            handler=lambda args: memory.add_note(
+                str(args.get("note", "")),
+                scope=str(args.get("scope", "global")),
+            ),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="remember_current_chat",
+            description="Сохраняет краткую память из текущего чата.",
+            schema={"type": "object", "properties": {}},
+            handler=lambda _: memory.remember_current_chat(),
         )
     )
 

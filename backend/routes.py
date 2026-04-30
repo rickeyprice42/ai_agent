@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 from backend.auth import hash_password, hash_token, issue_session_token, verify_password
 from backend.models import (
@@ -10,14 +10,24 @@ from backend.models import (
     AuthRequest,
     AuthResponse,
     BootstrapResponse,
+    ChatThreadActionResponse,
+    ChatThreadCreateRequest,
+    ChatThreadItem,
+    ChatThreadUpdateRequest,
+    ClearChatResponse,
     ChatRequest,
     ChatResponse,
+    ChatMemoryResponse,
     ExecuteStepResponse,
     ModelProviderOption,
     ModelSettings,
     ModelSettingsRequest,
     OpenWorkspaceResponse,
     OAuthProviderResponse,
+    ProjectActionResponse,
+    ProjectCreateRequest,
+    ProjectItem,
+    ProjectUpdateRequest,
     RegisterRequest,
     UserProfile,
 )
@@ -139,13 +149,225 @@ def update_model_settings(
 
 
 @router.get("/bootstrap", response_model=BootstrapResponse)
-def bootstrap(user: dict[str, str] = Depends(current_user)) -> BootstrapResponse:
-    return BootstrapResponse(**agent_service.bootstrap(user["id"]))
+def bootstrap(
+    thread_id: str | None = Query(default=None),
+    user: dict[str, str] = Depends(current_user),
+) -> BootstrapResponse:
+    try:
+        return BootstrapResponse(**agent_service.bootstrap(user["id"], thread_id=thread_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest, user: dict[str, str] = Depends(current_user)) -> ChatResponse:
-    return ChatResponse(reply=agent_service.chat(payload.message, user["id"]))
+    try:
+        result = agent_service.chat(payload.message, user["id"], thread_id=payload.thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ChatResponse(**result)
+
+
+@router.get("/chats", response_model=list[ChatThreadItem])
+def list_chats(
+    status: str = Query(default="active"),
+    project_id: str | None = Query(default=None),
+    unassigned: bool = Query(default=False),
+    user: dict[str, str] = Depends(current_user),
+) -> list[ChatThreadItem]:
+    return [
+        ChatThreadItem(**item)
+        for item in agent_service.list_chat_threads(
+            user["id"],
+            status=status,
+            project_id=project_id,
+            unassigned=unassigned,
+        )
+    ]
+
+
+@router.post("/chats", response_model=ChatThreadActionResponse)
+def create_chat_thread(
+    payload: ChatThreadCreateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ChatThreadActionResponse:
+    try:
+        thread = agent_service.create_chat_thread(
+            user["id"],
+            title=payload.title,
+            project_id=payload.project_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
+
+
+@router.patch("/chats/{thread_id}", response_model=ChatThreadActionResponse)
+def update_chat_thread(
+    thread_id: str,
+    payload: ChatThreadUpdateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ChatThreadActionResponse:
+    try:
+        thread = agent_service.update_chat_thread(
+            user["id"],
+            thread_id,
+            title=payload.title,
+            pinned=payload.pinned,
+            project_id=payload.project_id,
+            clear_project=payload.clear_project,
+            memory_enabled=payload.memory_enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
+
+
+@router.post("/chats/{thread_id}/archive", response_model=ChatThreadActionResponse)
+def archive_chat_thread(
+    thread_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ChatThreadActionResponse:
+    try:
+        thread = agent_service.archive_chat_thread(user["id"], thread_id, archived=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
+
+
+@router.post("/chats/{thread_id}/unarchive", response_model=ChatThreadActionResponse)
+def unarchive_chat_thread(
+    thread_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ChatThreadActionResponse:
+    try:
+        thread = agent_service.archive_chat_thread(user["id"], thread_id, archived=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
+
+
+@router.post("/chats/{thread_id}/restore", response_model=ChatThreadActionResponse)
+def restore_chat_thread(
+    thread_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ChatThreadActionResponse:
+    try:
+        thread = agent_service.restore_chat_thread(user["id"], thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
+
+
+@router.delete("/chats/{thread_id}", response_model=ChatThreadActionResponse)
+def delete_chat_thread(
+    thread_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ChatThreadActionResponse:
+    try:
+        thread = agent_service.delete_chat_thread(user["id"], thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
+
+
+@router.delete("/chats/{thread_id}/messages", response_model=ClearChatResponse)
+def clear_chat_messages(
+    thread_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ClearChatResponse:
+    try:
+        deleted_messages = agent_service.clear_chat(user["id"], thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ClearChatResponse(deleted_messages=deleted_messages)
+
+
+@router.post("/chats/{thread_id}/remember", response_model=ChatMemoryResponse)
+def remember_chat(
+    thread_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ChatMemoryResponse:
+    try:
+        result = agent_service.remember_chat(user["id"], thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ChatMemoryResponse(result=result["result"], thread=ChatThreadItem(**result["thread"]))
+
+
+@router.get("/projects", response_model=list[ProjectItem])
+def list_projects(
+    status: str = Query(default="active"),
+    user: dict[str, str] = Depends(current_user),
+) -> list[ProjectItem]:
+    return [ProjectItem(**item) for item in agent_service.list_projects(user["id"], status=status)]
+
+
+@router.post("/projects", response_model=ProjectActionResponse)
+def create_project(
+    payload: ProjectCreateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ProjectActionResponse:
+    project = agent_service.create_project(
+        user["id"],
+        title=payload.title,
+        description=payload.description,
+    )
+    return ProjectActionResponse(project=ProjectItem(**project))
+
+
+@router.patch("/projects/{project_id}", response_model=ProjectActionResponse)
+def update_project(
+    project_id: str,
+    payload: ProjectUpdateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ProjectActionResponse:
+    try:
+        project = agent_service.update_project(
+            user["id"],
+            project_id,
+            title=payload.title,
+            description=payload.description,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ProjectActionResponse(project=ProjectItem(**project))
+
+
+@router.post("/projects/{project_id}/archive", response_model=ProjectActionResponse)
+def archive_project(
+    project_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ProjectActionResponse:
+    try:
+        project = agent_service.update_project(user["id"], project_id, status="archived")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ProjectActionResponse(project=ProjectItem(**project))
+
+
+@router.post("/projects/{project_id}/restore", response_model=ProjectActionResponse)
+def restore_project(
+    project_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ProjectActionResponse:
+    try:
+        project = agent_service.update_project(user["id"], project_id, status="active")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ProjectActionResponse(project=ProjectItem(**project))
+
+
+@router.delete("/projects/{project_id}", response_model=ProjectActionResponse)
+def delete_project(
+    project_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ProjectActionResponse:
+    try:
+        project = agent_service.update_project(user["id"], project_id, status="deleted")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ProjectActionResponse(project=ProjectItem(**project))
 
 
 @router.post("/tasks/execute-next", response_model=ExecuteStepResponse)

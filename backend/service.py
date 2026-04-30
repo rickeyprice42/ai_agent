@@ -44,12 +44,30 @@ class AgentService:
         self.root_dir = ROOT
         self.settings = Settings.load(self.root_dir)
         self.database = AvelinDatabase(self.settings.database_file)
-        self._agents: dict[str, Agent] = {}
+        self._agents: dict[tuple[str, str], Agent] = {}
 
-    def agent_for_user(self, user_id: str) -> Agent:
-        if user_id not in self._agents:
-            self._agents[user_id] = Agent(self.settings_for_user(user_id), user_id=user_id)
-        return self._agents[user_id]
+    def agent_for_user(self, user_id: str, thread_id: str | None = None) -> Agent:
+        active_thread = self.resolve_thread(user_id, thread_id)
+        key = (user_id, active_thread["id"])
+        if key not in self._agents:
+            self._agents[key] = Agent(
+                self.settings_for_user(user_id),
+                user_id=user_id,
+                thread_id=active_thread["id"],
+            )
+        return self._agents[key]
+
+    def resolve_thread(self, user_id: str, thread_id: str | None = None) -> dict:
+        self.database.ensure_user_defaults(user_id)
+        if thread_id:
+            thread = self.database.get_chat_thread(user_id, thread_id)
+            if thread is None or thread["deleted_at"] is not None:
+                raise ValueError("Чат не найден или удален.")
+            return thread
+        threads = self.database.list_chat_threads(user_id, status="active")
+        if threads:
+            return threads[0]
+        return self.database.create_chat_thread(user_id, title="New chat")
 
     def settings_for_user(self, user_id: str) -> Settings:
         model_settings = self.database.get_model_settings(user_id)
@@ -124,11 +142,14 @@ class AgentService:
             model_name=model_name,
             ollama_url=ollama_url,
         )
-        self._agents.pop(user_id, None)
+        for key in [key for key in self._agents if key[0] == user_id]:
+            self._agents.pop(key, None)
         return settings
 
-    def chat(self, message: str, user_id: str) -> str:
-        return self.agent_for_user(user_id).respond(message)
+    def chat(self, message: str, user_id: str, thread_id: str | None = None) -> dict[str, str]:
+        thread = self.resolve_thread(user_id, thread_id)
+        reply = self.agent_for_user(user_id, thread["id"]).respond(message)
+        return {"reply": reply, "thread_id": thread["id"]}
 
     def execute_next_step(self, user_id: str) -> str:
         return self.agent_for_user(user_id).executor.execute_next_step()
@@ -139,17 +160,141 @@ class AgentService:
     def open_workspace_folder(self, user_id: str) -> str:
         return self.agent_for_user(user_id).files.open_folder()
 
-    def bootstrap(self, user_id: str) -> dict:
-        agent = self.agent_for_user(user_id)
+    def list_chat_threads(
+        self,
+        user_id: str,
+        status: str = "active",
+        project_id: str | None = None,
+        unassigned: bool = False,
+    ) -> list[dict]:
+        return self.database.list_chat_threads(
+            user_id,
+            status=status,
+            project_id=project_id,
+            unassigned=unassigned,
+        )
+
+    def create_chat_thread(
+        self,
+        user_id: str,
+        title: str | None = None,
+        project_id: str | None = None,
+    ) -> dict:
+        if project_id and self.database.get_project(user_id, project_id) is None:
+            raise ValueError("Проект не найден.")
+        return self.database.create_chat_thread(user_id, title=title, project_id=project_id)
+
+    def update_chat_thread(
+        self,
+        user_id: str,
+        thread_id: str,
+        title: str | None = None,
+        pinned: bool | None = None,
+        project_id: str | None = None,
+        clear_project: bool = False,
+        memory_enabled: bool | None = None,
+    ) -> dict:
+        thread = self.database.update_chat_thread(
+            user_id,
+            thread_id,
+            title=title,
+            pinned=pinned,
+            project_id=project_id,
+            clear_project=clear_project,
+            memory_enabled=memory_enabled,
+        )
+        if thread is None:
+            raise ValueError("Чат или проект не найден.")
+        self._agents.pop((user_id, thread_id), None)
+        return thread
+
+    def remember_chat(self, user_id: str, thread_id: str) -> dict:
+        result = self.database.remember_thread(user_id, thread_id)
+        if result is None:
+            raise ValueError("Чат не найден.")
+        thread = self.database.get_chat_thread(user_id, thread_id)
+        if thread is None:
+            raise ValueError("Чат не найден.")
+        self._agents.pop((user_id, thread_id), None)
+        return {
+            "result": result or "В чате пока нет сообщений, которые можно сохранить в память.",
+            "thread": thread,
+        }
+
+    def archive_chat_thread(self, user_id: str, thread_id: str, archived: bool = True) -> dict:
+        thread = self.database.archive_chat_thread(user_id, thread_id, archived=archived)
+        if thread is None:
+            raise ValueError("Чат не найден.")
+        return thread
+
+    def delete_chat_thread(self, user_id: str, thread_id: str) -> dict:
+        thread = self.database.soft_delete_chat_thread(user_id, thread_id)
+        if thread is None:
+            raise ValueError("Чат не найден.")
+        self._agents.pop((user_id, thread_id), None)
+        return thread
+
+    def restore_chat_thread(self, user_id: str, thread_id: str) -> dict:
+        thread = self.database.restore_chat_thread(user_id, thread_id)
+        if thread is None:
+            raise ValueError("Чат не найден.")
+        return thread
+
+    def clear_chat(self, user_id: str, thread_id: str) -> int:
+        deleted = self.database.clear_chat_messages(user_id, thread_id)
+        if deleted is None:
+            raise ValueError("Чат не найден.")
+        self._agents.pop((user_id, thread_id), None)
+        return deleted
+
+    def list_projects(self, user_id: str, status: str = "active") -> list[dict]:
+        return self.database.list_projects(user_id, status=status)
+
+    def create_project(self, user_id: str, title: str, description: str = "") -> dict:
+        return self.database.create_project(user_id, title=title, description=description)
+
+    def update_project(
+        self,
+        user_id: str,
+        project_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        status: str | None = None,
+    ) -> dict:
+        project = self.database.update_project(
+            user_id,
+            project_id,
+            title=title,
+            description=description,
+            status=status,
+        )
+        if project is None:
+            raise ValueError("Проект не найден.")
+        return project
+
+    def bootstrap(self, user_id: str, thread_id: str | None = None) -> dict:
+        active_thread = self.resolve_thread(user_id, thread_id)
+        agent = self.agent_for_user(user_id, active_thread["id"])
         memory = agent.memory.snapshot()
         user = self.database.get_user(user_id)
         model_settings = self.database.get_model_settings(user_id)
+        active_project = None
+        if active_thread.get("project_id"):
+            active_project = self.database.get_project(user_id, str(active_thread["project_id"]))
         return {
             "agent_name": self.settings.agent_name,
             "provider": model_settings["provider"],
             "model": model_settings["model_name"],
             "notes": memory.notes,
             "history": memory.history,
+            "active_thread": active_thread,
+            "chat_threads": self.database.list_chat_threads(user_id, status="active"),
+            "archived_chat_threads": self.database.list_chat_threads(user_id, status="archived"),
+            "deleted_chat_threads": self.database.list_chat_threads(user_id, status="deleted"),
+            "projects": self.database.list_projects(user_id, status="active"),
+            "archived_projects": self.database.list_projects(user_id, status="archived"),
+            "deleted_projects": self.database.list_projects(user_id, status="deleted"),
+            "active_project": active_project,
             "tasks": [_task_to_payload(task) for task in agent.tasks.list_tasks()],
             "action_logs": [_action_log_to_payload(log) for log in agent.action_log.recent(limit=20)],
             "workspace_files": [_workspace_file_to_payload(file) for file in agent.files.list_files(limit=20)],

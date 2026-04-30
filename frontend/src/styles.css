@@ -339,6 +339,141 @@ button {
   gap: 0.7rem;
 }
 
+.chat-workspace-panel,
+.project-panel {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.thread-list,
+.project-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.thread-item,
+.project-item {
+  display: grid;
+  gap: 0.2rem;
+  width: 100%;
+  min-width: 0;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.thread-item-active,
+.project-item-active {
+  border-color: var(--line-strong);
+  background: var(--text);
+  color: var(--inverse);
+}
+
+.thread-item span,
+.thread-item small,
+.project-item span,
+.project-item small {
+  overflow-wrap: anywhere;
+}
+
+.thread-item span,
+.project-item span {
+  font-weight: 800;
+}
+
+.thread-item small,
+.project-item small {
+  color: inherit;
+  opacity: 0.72;
+}
+
+.thread-group-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.project-select {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.project-select select {
+  width: 100%;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--text);
+}
+
+.thread-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.thread-actions .mini-button {
+  width: 100%;
+  min-height: 2.2rem;
+  cursor: pointer;
+}
+
+.thread-actions .mini-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.thread-archive {
+  border-top: 1px solid var(--line);
+  padding-top: 0.75rem;
+}
+
+.thread-archive summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.thread-archive .thread-list {
+  margin-top: 0.55rem;
+}
+
+.memory-rule-box {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.75rem;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.memory-rule-box div:first-child {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.memory-rule-box strong,
+.memory-rule-box span {
+  overflow-wrap: anywhere;
+}
+
+.memory-rule-box span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .status-pill,
 .status-box,
 .header-tag {

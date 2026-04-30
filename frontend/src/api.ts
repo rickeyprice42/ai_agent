@@ -1,4 +1,12 @@
-import type { AuthPayload, BootstrapPayload, ModelProviderOption, ModelSettings, UserProfile } from "./types";
+import type {
+  AuthPayload,
+  BootstrapPayload,
+  ChatThreadItem,
+  ModelProviderOption,
+  ModelSettings,
+  ProjectItem,
+  UserProfile
+} from "./types";
 
 function authHeaders(token: string): HeadersInit {
   return {
@@ -15,8 +23,9 @@ async function parseError(response: Response, fallback: string): Promise<Error> 
   }
 }
 
-export async function fetchBootstrap(token: string): Promise<BootstrapPayload> {
-  const response = await fetch("/api/bootstrap", {
+export async function fetchBootstrap(token: string, threadId?: string | null): Promise<BootstrapPayload> {
+  const query = threadId ? `?thread_id=${encodeURIComponent(threadId)}` : "";
+  const response = await fetch(`/api/bootstrap${query}`, {
     headers: authHeaders(token)
   });
   if (!response.ok) {
@@ -25,20 +34,204 @@ export async function fetchBootstrap(token: string): Promise<BootstrapPayload> {
   return response.json();
 }
 
-export async function sendMessage(message: string, token: string): Promise<{ reply: string }> {
+export async function sendMessage(
+  message: string,
+  token: string,
+  threadId?: string | null
+): Promise<{ reply: string; thread_id: string }> {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...authHeaders(token)
     },
-    body: JSON.stringify({ message })
+    body: JSON.stringify({ message, thread_id: threadId })
   });
 
   if (!response.ok) {
     throw await parseError(response, "Не удалось получить ответ агента.");
   }
 
+  return response.json();
+}
+
+export async function createChatThread(
+  token: string,
+  title?: string,
+  projectId?: string | null
+): Promise<{ thread: ChatThreadItem }> {
+  const response = await fetch("/api/chats", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    },
+    body: JSON.stringify({ title, project_id: projectId })
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось создать чат.");
+  }
+  return response.json();
+}
+
+export async function updateChatThread(
+  token: string,
+  threadId: string,
+  payload: { title?: string; pinned?: boolean; project_id?: string; clear_project?: boolean; memory_enabled?: boolean }
+): Promise<{ thread: ChatThreadItem }> {
+  const response = await fetch(`/api/chats/${encodeURIComponent(threadId)}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось обновить чат.");
+  }
+  return response.json();
+}
+
+export async function assignChatToProject(
+  token: string,
+  threadId: string,
+  projectId: string | null
+): Promise<{ thread: ChatThreadItem }> {
+  return updateChatThread(token, threadId, projectId ? { project_id: projectId } : { clear_project: true });
+}
+
+export async function updateChatMemory(
+  token: string,
+  threadId: string,
+  memoryEnabled: boolean
+): Promise<{ thread: ChatThreadItem }> {
+  return updateChatThread(token, threadId, { memory_enabled: memoryEnabled });
+}
+
+export async function rememberChat(token: string, threadId: string): Promise<{ result: string; thread: ChatThreadItem }> {
+  const response = await fetch(`/api/chats/${encodeURIComponent(threadId)}/remember`, {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось сохранить чат в память.");
+  }
+  return response.json();
+}
+
+export async function createProject(
+  token: string,
+  title: string,
+  description = ""
+): Promise<{ project: ProjectItem }> {
+  const response = await fetch("/api/projects", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    },
+    body: JSON.stringify({ title, description })
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось создать проект.");
+  }
+  return response.json();
+}
+
+export async function updateProject(
+  token: string,
+  projectId: string,
+  payload: { title?: string; description?: string }
+): Promise<{ project: ProjectItem }> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось обновить проект.");
+  }
+  return response.json();
+}
+
+export async function archiveProject(token: string, projectId: string): Promise<{ project: ProjectItem }> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/archive`, {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось архивировать проект.");
+  }
+  return response.json();
+}
+
+export async function restoreProject(token: string, projectId: string): Promise<{ project: ProjectItem }> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/restore`, {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось восстановить проект.");
+  }
+  return response.json();
+}
+
+export async function deleteProject(token: string, projectId: string): Promise<{ project: ProjectItem }> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось удалить проект.");
+  }
+  return response.json();
+}
+
+export async function archiveChatThread(token: string, threadId: string): Promise<{ thread: ChatThreadItem }> {
+  const response = await fetch(`/api/chats/${encodeURIComponent(threadId)}/archive`, {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось архивировать чат.");
+  }
+  return response.json();
+}
+
+export async function unarchiveChatThread(token: string, threadId: string): Promise<{ thread: ChatThreadItem }> {
+  const response = await fetch(`/api/chats/${encodeURIComponent(threadId)}/unarchive`, {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось вернуть чат из архива.");
+  }
+  return response.json();
+}
+
+export async function deleteChatThread(token: string, threadId: string): Promise<{ thread: ChatThreadItem }> {
+  const response = await fetch(`/api/chats/${encodeURIComponent(threadId)}`, {
+    method: "DELETE",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось удалить чат.");
+  }
+  return response.json();
+}
+
+export async function clearChatMessages(token: string, threadId: string): Promise<{ deleted_messages: number }> {
+  const response = await fetch(`/api/chats/${encodeURIComponent(threadId)}/messages`, {
+    method: "DELETE",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось очистить чат.");
+  }
   return response.json();
 }
 

@@ -1,6 +1,14 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  archiveProject,
+  archiveChatThread,
+  assignChatToProject,
   approveBlockedStep,
+  clearChatMessages,
+  createProject,
+  createChatThread,
+  deleteProject,
+  deleteChatThread,
   executeNextStep,
   fetchBootstrap,
   fetchMe,
@@ -9,7 +17,13 @@ import {
   logout as authLogout,
   openWorkspaceFolder,
   register as authRegister,
+  rememberChat,
+  restoreProject,
   sendMessage,
+  unarchiveChatThread,
+  updateChatMemory,
+  updateProject,
+  updateChatThread,
   updateModelSettings
 } from "./api";
 import type { BootstrapPayload, ChatMessage, ModelProviderOption, UserProfile } from "./types";
@@ -17,6 +31,7 @@ import type { BootstrapPayload, ChatMessage, ModelProviderOption, UserProfile } 
 const DRAFT_KEY = "avelin-draft";
 const THEME_KEY = "avelin-theme-mode";
 const AUTH_TOKEN_KEY = "avelin-auth-token";
+const ACTIVE_THREAD_KEY = "avelin-active-thread";
 
 type ThemeMode = "auto" | "light" | "dark";
 type ResolvedTheme = "light" | "dark";
@@ -27,6 +42,29 @@ const EMPTY_BOOTSTRAP: BootstrapPayload = {
   model: "mock-local",
   notes: [],
   history: [],
+  active_thread: {
+    id: "",
+    user_id: "",
+    title: "Main conversation",
+    status: "active",
+    archived_at: null,
+    deleted_at: null,
+    pinned: false,
+    project_id: null,
+    memory_enabled: true,
+    memory_saved_at: null,
+    created_at: "",
+    updated_at: "",
+    message_count: 0,
+    last_message_at: null
+  },
+  chat_threads: [],
+  archived_chat_threads: [],
+  deleted_chat_threads: [],
+  projects: [],
+  archived_projects: [],
+  deleted_projects: [],
+  active_project: null,
   tasks: [],
   action_logs: [],
   workspace_files: [],
@@ -128,6 +166,8 @@ export default function App() {
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
   const [animatedMessageKey, setAnimatedMessageKey] = useState<string | null>(null);
   const [authToken, setAuthToken] = useState(() => window.localStorage.getItem(AUTH_TOKEN_KEY) ?? "");
+  const [activeThreadId, setActiveThreadId] = useState(() => window.localStorage.getItem(ACTIVE_THREAD_KEY) ?? "");
+  const [activeProjectId, setActiveProjectId] = useState("");
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authLoginValue, setAuthLoginValue] = useState("");
@@ -185,7 +225,7 @@ export default function App() {
         void fetchModelProviders(authToken)
           .then(setModelProviders)
           .catch(() => setModelProviders([]));
-        return refreshBootstrap(true, false, authToken);
+        return refreshBootstrap(true, false, authToken, activeThreadId);
       })
       .catch(() => {
         window.localStorage.removeItem(AUTH_TOKEN_KEY);
@@ -213,7 +253,12 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [themeMode]);
 
-  async function refreshBootstrap(initial = false, animateLatestAssistant = false, token = authToken) {
+  async function refreshBootstrap(
+    initial = false,
+    animateLatestAssistant = false,
+    token = authToken,
+    threadId: string | null = activeThreadId
+  ) {
     if (!token) {
       return;
     }
@@ -225,9 +270,12 @@ export default function App() {
     }
 
     try {
-      const data = await fetchBootstrap(token);
+      const data = await fetchBootstrap(token, threadId || null);
       setBootstrap(data);
       setMessages(data.history);
+      setActiveThreadId(data.active_thread.id);
+      setActiveProjectId(data.active_thread.project_id ?? "");
+      window.localStorage.setItem(ACTIVE_THREAD_KEY, data.active_thread.id);
       setCurrentUser(data.user);
       setSelectedProvider(data.provider);
       setSelectedModel(data.model);
@@ -266,7 +314,11 @@ export default function App() {
     setAnimatedMessageKey(null);
 
     try {
-      await sendMessage(normalized, authToken);
+      const result = await sendMessage(normalized, authToken, activeThreadId || null);
+      if (result.thread_id) {
+        setActiveThreadId(result.thread_id);
+        window.localStorage.setItem(ACTIVE_THREAD_KEY, result.thread_id);
+      }
       await refreshBootstrap(false, true);
       window.localStorage.removeItem(DRAFT_KEY);
       textareaRef.current?.focus();
@@ -293,6 +345,204 @@ export default function App() {
   async function handleRefresh() {
     setAnimatedMessageKey(null);
     await refreshBootstrap();
+  }
+
+  async function handleCreateChat() {
+    if (!authToken) return;
+    setError(null);
+    try {
+      const payload = await createChatThread(authToken, undefined, activeProjectId || null);
+      setActiveThreadId(payload.thread.id);
+      window.localStorage.setItem(ACTIVE_THREAD_KEY, payload.thread.id);
+      setInput("");
+      setAnimatedMessageKey(null);
+      await refreshBootstrap(false, false, authToken, payload.thread.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось создать чат.");
+    }
+  }
+
+  async function handleSelectChat(threadId: string) {
+    if (!authToken || threadId === activeThreadId) return;
+    setActiveThreadId(threadId);
+    window.localStorage.setItem(ACTIVE_THREAD_KEY, threadId);
+    setInput("");
+    setAnimatedMessageKey(null);
+    await refreshBootstrap(false, false, authToken, threadId);
+  }
+
+  async function handleFocusProject(projectId: string) {
+    setActiveProjectId(projectId);
+    const firstThread = bootstrap.chat_threads.find((thread) => thread.project_id === projectId);
+    if (firstThread) {
+      await handleSelectChat(firstThread.id);
+    }
+  }
+
+  async function handleCreateProject() {
+    if (!authToken) return;
+    const title = window.prompt("Название проекта");
+    if (!title?.trim()) return;
+    const description = window.prompt("Краткое описание проекта", "") ?? "";
+    setError(null);
+    try {
+      const payload = await createProject(authToken, title.trim(), description.trim());
+      setActiveProjectId(payload.project.id);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось создать проект.");
+    }
+  }
+
+  async function handleRenameProject() {
+    if (!authToken || !activeProjectId) return;
+    const project = bootstrap.projects.find((item) => item.id === activeProjectId);
+    const title = window.prompt("Новое название проекта", project?.title ?? "");
+    if (!title?.trim()) return;
+    const description = window.prompt("Описание проекта", project?.description ?? "") ?? project?.description ?? "";
+    setError(null);
+    try {
+      await updateProject(authToken, activeProjectId, {
+        title: title.trim(),
+        description: description.trim()
+      });
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось обновить проект.");
+    }
+  }
+
+  async function handleArchiveProject() {
+    if (!authToken || !activeProjectId) return;
+    setError(null);
+    try {
+      await archiveProject(authToken, activeProjectId);
+      setActiveProjectId("");
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось архивировать проект.");
+    }
+  }
+
+  async function handleRestoreProject(projectId: string) {
+    if (!authToken) return;
+    setError(null);
+    try {
+      await restoreProject(authToken, projectId);
+      setActiveProjectId(projectId);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось восстановить проект.");
+    }
+  }
+
+  async function handleDeleteProject() {
+    if (!authToken || !activeProjectId) return;
+    if (!window.confirm("Удалить проект из активного списка? Чаты останутся в истории и сохранят привязку.")) return;
+    setError(null);
+    try {
+      await deleteProject(authToken, activeProjectId);
+      setActiveProjectId("");
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось удалить проект.");
+    }
+  }
+
+  async function handleAssignActiveChatToProject(projectId: string | null) {
+    if (!authToken || !activeThreadId) return;
+    setError(null);
+    try {
+      await assignChatToProject(authToken, activeThreadId, projectId);
+      setActiveProjectId(projectId ?? "");
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось привязать чат к проекту.");
+    }
+  }
+
+  async function handleToggleChatMemory() {
+    if (!authToken || !activeThreadId) return;
+    setError(null);
+    try {
+      await updateChatMemory(authToken, activeThreadId, !bootstrap.active_thread.memory_enabled);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось обновить правила памяти чата.");
+    }
+  }
+
+  async function handleRememberChat() {
+    if (!authToken || !activeThreadId) return;
+    setError(null);
+    try {
+      await rememberChat(authToken, activeThreadId);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось сохранить чат в память.");
+    }
+  }
+
+  async function handleRenameChat() {
+    if (!authToken || !activeThreadId) return;
+    const title = window.prompt("Новое название чата", bootstrap.active_thread.title);
+    if (!title?.trim()) return;
+    setError(null);
+    try {
+      await updateChatThread(authToken, activeThreadId, { title: title.trim() });
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось переименовать чат.");
+    }
+  }
+
+  async function handleArchiveChat() {
+    if (!authToken || !activeThreadId) return;
+    setError(null);
+    try {
+      await archiveChatThread(authToken, activeThreadId);
+      const nextThread = bootstrap.chat_threads.find((thread) => thread.id !== activeThreadId);
+      await refreshBootstrap(false, false, authToken, nextThread?.id ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось архивировать чат.");
+    }
+  }
+
+  async function handleUnarchiveChat(threadId: string) {
+    if (!authToken) return;
+    setError(null);
+    try {
+      await unarchiveChatThread(authToken, threadId);
+      await refreshBootstrap(false, false, authToken, threadId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось вернуть чат из архива.");
+    }
+  }
+
+  async function handleClearChat() {
+    if (!authToken || !activeThreadId) return;
+    if (!window.confirm("Очистить сообщения текущего чата? Заметки, задачи и долгосрочная память останутся.")) return;
+    setError(null);
+    try {
+      await clearChatMessages(authToken, activeThreadId);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось очистить чат.");
+    }
+  }
+
+  async function handleDeleteChat() {
+    if (!authToken || !activeThreadId) return;
+    if (!window.confirm("Удалить текущий чат? Он будет скрыт через soft-delete, без окончательного удаления.")) return;
+    setError(null);
+    try {
+      await deleteChatThread(authToken, activeThreadId);
+      const nextThread = bootstrap.chat_threads.find((thread) => thread.id !== activeThreadId);
+      setActiveThreadId(nextThread?.id ?? "");
+      await refreshBootstrap(false, false, authToken, nextThread?.id ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось удалить чат.");
+    }
   }
 
   async function handleExecuteNextStep() {
@@ -379,6 +629,9 @@ export default function App() {
     setCurrentUser(null);
     setBootstrap(EMPTY_BOOTSTRAP);
     setMessages([]);
+    setActiveThreadId("");
+    setActiveProjectId("");
+    window.localStorage.removeItem(ACTIVE_THREAD_KEY);
     setInput("");
     setModelProviders([]);
   }
@@ -412,6 +665,11 @@ export default function App() {
 
   const selectedProviderOption = modelProviders.find((item) => item.provider === selectedProvider);
   const selectedProviderModels = selectedProviderOption?.models ?? [selectedModel];
+  const activeProject = bootstrap.projects.find((project) => project.id === activeProjectId) ?? bootstrap.active_project;
+  const projectThreads = activeProjectId
+    ? bootstrap.chat_threads.filter((thread) => thread.project_id === activeProjectId)
+    : [];
+  const unassignedThreads = bootstrap.chat_threads.filter((thread) => !thread.project_id);
 
   if (!authToken || !currentUser) {
     return (
@@ -501,6 +759,191 @@ export default function App() {
             <h1>{bootstrap.agent_name || "Avelin"}</h1>
           </div>
         </div>
+
+        <section className="panel project-panel">
+          <div className="panel-heading panel-heading-compact">
+            <div>
+              <p className="eyebrow">Projects</p>
+              <h3>Рабочие области</h3>
+            </div>
+            <button className="ghost-button" onClick={() => void handleCreateProject()} type="button">
+              Новый
+            </button>
+          </div>
+
+          <div className="project-list">
+            {bootstrap.projects.length === 0 ? (
+              <p className="muted">Проектов пока нет.</p>
+            ) : (
+              bootstrap.projects.map((project) => (
+                <button
+                  className={project.id === activeProjectId ? "project-item project-item-active" : "project-item"}
+                  key={project.id}
+                  onClick={() => void handleFocusProject(project.id)}
+                  type="button"
+                >
+                  <span>{project.title}</span>
+                  <small>{project.chat_count} чатов</small>
+                </button>
+              ))
+            )}
+          </div>
+
+          <div className="thread-actions">
+            <button className="mini-button" disabled={!activeProjectId} onClick={() => void handleRenameProject()} type="button">
+              Назвать
+            </button>
+            <button className="mini-button" disabled={!activeProjectId} onClick={() => void handleArchiveProject()} type="button">
+              Архив
+            </button>
+            <button className="mini-button" disabled={!activeProjectId} onClick={() => void handleDeleteProject()} type="button">
+              Удалить
+            </button>
+            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleAssignActiveChatToProject(null)} type="button">
+              Без проекта
+            </button>
+          </div>
+
+          {bootstrap.projects.length > 0 ? (
+            <label className="project-select">
+              Чат в проекте
+              <select
+                value={bootstrap.active_thread.project_id ?? ""}
+                onChange={(event) => void handleAssignActiveChatToProject(event.target.value || null)}
+              >
+                <option value="">Без проекта</option>
+                {bootstrap.projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+
+          {bootstrap.archived_projects.length > 0 ? (
+            <details className="thread-archive">
+              <summary>Архив проектов ({bootstrap.archived_projects.length})</summary>
+              <div className="project-list">
+                {bootstrap.archived_projects.map((project) => (
+                  <button
+                    className="project-item"
+                    key={project.id}
+                    onClick={() => void handleRestoreProject(project.id)}
+                    type="button"
+                  >
+                    <span>{project.title}</span>
+                    <small>Вернуть в активные</small>
+                  </button>
+                ))}
+              </div>
+            </details>
+          ) : null}
+        </section>
+
+        <section className="panel chat-workspace-panel">
+          <div className="panel-heading panel-heading-compact">
+            <div>
+              <p className="eyebrow">Chats</p>
+              <h3>{activeProject ? activeProject.title : "Диалоги"}</h3>
+            </div>
+            <button className="ghost-button" onClick={() => void handleCreateChat()} type="button">
+              Новый
+            </button>
+          </div>
+
+          {activeProjectId ? (
+            <div className="thread-list">
+              {projectThreads.length === 0 ? (
+                <p className="muted">В проекте пока нет чатов.</p>
+              ) : (
+                projectThreads.map((thread) => (
+                  <button
+                    className={thread.id === activeThreadId ? "thread-item thread-item-active" : "thread-item"}
+                    key={thread.id}
+                    onClick={() => void handleSelectChat(thread.id)}
+                    type="button"
+                  >
+                    <span>{thread.title}</span>
+                    <small>{thread.message_count} сообщений</small>
+                  </button>
+                ))
+              )}
+            </div>
+          ) : null}
+
+          <div className="thread-list">
+            <p className="thread-group-title">Без проекта</p>
+            {unassignedThreads.length === 0 ? (
+              <p className="muted">Свободных чатов пока нет.</p>
+            ) : (
+              unassignedThreads.map((thread) => (
+                <button
+                  className={thread.id === activeThreadId ? "thread-item thread-item-active" : "thread-item"}
+                  key={thread.id}
+                  onClick={() => void handleSelectChat(thread.id)}
+                  type="button"
+                >
+                  <span>{thread.title}</span>
+                  <small>{thread.message_count} сообщений</small>
+                </button>
+              ))
+            )}
+          </div>
+
+          <div className="thread-actions">
+            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleRenameChat()} type="button">
+              Назвать
+            </button>
+            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleClearChat()} type="button">
+              Очистить
+            </button>
+            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleArchiveChat()} type="button">
+              Архив
+            </button>
+            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleDeleteChat()} type="button">
+              Удалить
+            </button>
+          </div>
+
+          <div className="memory-rule-box">
+            <div>
+              <strong>{bootstrap.active_thread.memory_enabled ? "Чат влияет на память" : "Чат исключен из памяти"}</strong>
+              <span>
+                {bootstrap.active_thread.memory_saved_at
+                  ? `Сохранен: ${formatFileTime(bootstrap.active_thread.memory_saved_at)}`
+                  : "Можно явно сохранить важное из этой ветки."}
+              </span>
+            </div>
+            <div className="thread-actions">
+              <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleRememberChat()} type="button">
+                Запомнить
+              </button>
+              <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleToggleChatMemory()} type="button">
+                {bootstrap.active_thread.memory_enabled ? "Исключить" : "Разрешить"}
+              </button>
+            </div>
+          </div>
+
+          {bootstrap.archived_chat_threads.length > 0 ? (
+            <details className="thread-archive">
+              <summary>Архив ({bootstrap.archived_chat_threads.length})</summary>
+              <div className="thread-list">
+                {bootstrap.archived_chat_threads.map((thread) => (
+                  <button
+                    className="thread-item"
+                    key={thread.id}
+                    onClick={() => void handleUnarchiveChat(thread.id)}
+                    type="button"
+                  >
+                    <span>{thread.title}</span>
+                    <small>Вернуть в активные</small>
+                  </button>
+                ))}
+              </div>
+            </details>
+          ) : null}
+        </section>
 
         <section className="panel panel-compact">
           <div className="panel-heading panel-heading-compact">
@@ -763,7 +1206,7 @@ export default function App() {
         <section className="chat-card">
           <div className="chat-header">
             <div>
-              <strong>Сессия</strong>
+              <strong>{bootstrap.active_thread.title || "Диалог"}</strong>
               <p className="muted">{messageCountLabel}</p>
             </div>
             <div className="header-tags">
