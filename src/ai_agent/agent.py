@@ -11,6 +11,7 @@ from ai_agent.llm.mock_provider import MockProvider
 from ai_agent.llm.ollama_provider import OllamaProvider
 from ai_agent.memory import MemoryStore
 from ai_agent.planner import Planner
+from ai_agent.safety import tool_safety_block_reason
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import ToolRegistry
 from ai_agent.tools.builtin import register_builtin_tools
@@ -128,6 +129,19 @@ class Agent:
                         )
                         self.memory.append_message(
                             Message(role="tool", content=validation_error, name=tool_call.name)
+                        )
+                        continue
+
+                    safety_block = tool_safety_block_reason(tool_call.name, arguments, user_text)
+                    if safety_block:
+                        self.action_log.record(
+                            tool_name=tool_call.name,
+                            status="blocked",
+                            arguments=arguments,
+                            result=safety_block,
+                        )
+                        self.memory.append_message(
+                            Message(role="tool", content=safety_block, name=tool_call.name)
                         )
                         continue
 

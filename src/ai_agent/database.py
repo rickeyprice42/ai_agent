@@ -394,6 +394,18 @@ class AvelinDatabase:
             )
         return self.get_task(task_id)
 
+    def clear_task_result(self, task_id: str) -> dict | None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET result = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (task_id,),
+            )
+        return self.get_task(task_id)
+
     def list_task_steps(self, task_id: str) -> list[dict]:
         with self.connect() as connection:
             rows = connection.execute(
@@ -618,6 +630,18 @@ CREATE TABLE IF NOT EXISTS notes (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS memory_index (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    embedding_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, source_type, source_id)
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -669,6 +693,8 @@ CREATE INDEX IF NOT EXISTS idx_auth_accounts_user_id ON auth_accounts(user_id);
 CREATE INDEX IF NOT EXISTS idx_chat_threads_user_id ON chat_threads(user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_notes_user_id ON notes(user_id);
+CREATE INDEX IF NOT EXISTS idx_memory_index_user_id ON memory_index(user_id);
+CREATE INDEX IF NOT EXISTS idx_memory_index_source ON memory_index(source_type, source_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_task_steps_task_id ON task_steps(task_id);
 CREATE INDEX IF NOT EXISTS idx_action_logs_user_id ON action_logs(user_id);

@@ -64,14 +64,14 @@ def _extract_steps(text: str) -> list[str]:
         return _deduplicate_steps(steps)
 
     marker_match = re.search(
-        r"(?:шаги|план|нужно сделать|задачи)\s*[:：]\s*(.+)",
+        r"(?:шаги|план|нужно сделать|задачи|steps|plan|tasks|todo)\s*[:：]\s*(.+)",
         text,
         flags=re.IGNORECASE,
     )
     if not marker_match:
         return []
 
-    candidates = re.split(r"\s*(?:,\s*затем\s*|,\s*потом\s*|;\s*|\s+->\s+)\s*", marker_match.group(1))
+    candidates = re.split(r"\s*(?:,\s*затем\s*|,\s*потом\s*|,\s*then\s*|;\s*|\s+->\s+)\s*", marker_match.group(1))
     steps = [candidate.strip(" .") for candidate in candidates if candidate.strip(" .")]
     return _deduplicate_steps(steps) if len(steps) >= 2 else []
 
@@ -103,7 +103,7 @@ def _extract_goal_without_steps(text: str) -> str:
             return goal
 
     before_marker = re.split(
-        r"(?:шаги|план|нужно сделать|задачи)\s*[:：]",
+        r"(?:шаги|план|нужно сделать|задачи|steps|plan|tasks|todo)\s*[:：]",
         text,
         maxsplit=1,
         flags=re.IGNORECASE,
@@ -128,7 +128,7 @@ def _specialized_steps(goal: str) -> list[str]:
 
 
 def _docx_steps(goal: str) -> list[str]:
-    if ".docx" not in goal.lower() and not re.search(r"\b(?:документ|word|docx)\b", goal, flags=re.IGNORECASE):
+    if ".docx" not in goal.lower() and not re.search(r"\b(?:документ|document|word|docx)\b", goal, flags=re.IGNORECASE):
         return []
 
     path = _extract_docx_path(goal) or _slug_docx_path(goal)

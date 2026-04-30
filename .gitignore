@@ -11,3 +11,4 @@ frontend/vite.config.d.ts
 frontend/vite.config.js
 src-tauri/target/
 .pytest_cache/
+docs\api_ollama.txt

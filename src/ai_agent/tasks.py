@@ -131,7 +131,9 @@ class TaskManager:
             raise ValueError("Подтверждать можно только шаги из заблокированной задачи.")
 
         task = self.update_step(normalized_step_id, "running", "Шаг подтвержден пользователем.")
-        return self.update_task(task.id, "executing")
+        resumed = self.update_task(task.id, "executing")
+        cleared = self.database.clear_task_result(resumed.id)
+        return _task_from_row(cleared) if cleared is not None else resumed
 
     def block_running_step(self, result: str) -> Task:
         task = self.ensure_running_task()

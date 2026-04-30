@@ -5,9 +5,13 @@ from pathlib import Path
 import re
 
 from ai_agent.action_log import ActionLogStore
+from ai_agent.safety import step_safety_block_reason
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import ToolRegistry
 from ai_agent.types import Task, TaskStep
+
+
+MAX_TOOL_ATTEMPTS = 2
 
 
 @dataclass(slots=True)
@@ -70,13 +74,14 @@ class ExecutionEngine:
             updated = self.tasks.fail_running_step(validation_error)
             return _format_task_state(validation_error, updated)
 
-        tool_result = self.tools.execute(decision.tool_name, arguments)
-        status = _tool_status(tool_result)
-        self.action_log.record(decision.tool_name, status, arguments, tool_result)
+        tool_result, status, attempts = self._execute_tool_with_retries(decision.tool_name, arguments)
 
         if status == "failed":
             updated = self.tasks.fail_running_step(tool_result)
             return _format_task_state(f"Шаг завершился ошибкой.\n{tool_result}", updated)
+
+        if attempts > 1:
+            tool_result = f"{tool_result}\nRetry attempts: {attempts}"
 
         updated = self.tasks.complete_running_step(tool_result)
         return _format_task_state(
@@ -94,6 +99,32 @@ class ExecutionEngine:
         )
         return self.execute_next_step(approved_step_id=step_id)
 
+    def _execute_tool_with_retries(self, tool_name: str, arguments: dict) -> tuple[str, str, int]:
+        last_result = ""
+        last_status = "failed"
+
+        for attempt in range(1, MAX_TOOL_ATTEMPTS + 1):
+            tool_result = self.tools.execute(tool_name, arguments)
+            status = _tool_status(tool_result)
+            log_result = tool_result
+            if attempt > 1:
+                log_result = f"retry attempt {attempt}/{MAX_TOOL_ATTEMPTS}\n{tool_result}"
+            self.action_log.record(tool_name, status, arguments, log_result)
+
+            last_result = tool_result
+            last_status = status
+            if status != "failed" or not _should_retry_tool_failure(tool_name, tool_result, attempt):
+                return tool_result, status, attempt
+
+            self.action_log.record(
+                tool_name,
+                "retrying",
+                arguments,
+                f"retry attempt {attempt + 1}/{MAX_TOOL_ATTEMPTS} scheduled after recoverable failure:\n{tool_result}",
+            )
+
+        return last_result, last_status, MAX_TOOL_ATTEMPTS
+
 
 def decide_step_action(step: TaskStep) -> ExecutionDecision:
     text = step.description.strip()
@@ -106,7 +137,7 @@ def decide_step_action(step: TaskStep) -> ExecutionDecision:
     if _is_list_files_request(text):
         return ExecutionDecision("list_workspace_files", {"limit": 20}, "list workspace files requested")
 
-    read_path = _extract_file_path(text, ("прочитай", "открой", "покажи", "read"))
+    read_path = _extract_file_path(text, ("прочитай", "открой", "покажи", "read", "open", "show"))
     if read_path:
         return ExecutionDecision("read_file", {"path": read_path}, "read file requested")
 
@@ -150,7 +181,7 @@ def decide_step_action(step: TaskStep) -> ExecutionDecision:
 
 
 def _extract_file_path(text: str, verbs: tuple[str, ...]) -> str | None:
-    pattern = r"(?:{})\s+(?:файл\s*)?:?\s*([^\n\r]+)".format("|".join(re.escape(verb) for verb in verbs))
+    pattern = r"(?:{})\s+(?:(?:файл|file)\s*)?:?\s*([^\n\r]+)".format("|".join(re.escape(verb) for verb in verbs))
     match = re.search(pattern, text, flags=re.IGNORECASE)
     if not match:
         return None
@@ -159,7 +190,7 @@ def _extract_file_path(text: str, verbs: tuple[str, ...]) -> str | None:
 
 def _extract_write_file(text: str) -> tuple[str, str, bool] | None:
     match = re.search(
-        r"(?:запиши|создай)\s+файл\s+(.+?)\s+(?:с текстом|текст|content)\s*[:=]\s*(.+)",
+        r"(?:запиши|создай|write|create)\s+(?:файл|file)\s+(.+?)\s+(?:с текстом|текст|content|with text)\s*[:=]\s*(.+)",
         text,
         flags=re.IGNORECASE,
     )
@@ -173,7 +204,7 @@ def _extract_write_file(text: str) -> tuple[str, str, bool] | None:
 
 def _extract_open_folder(text: str) -> str | None:
     match = re.search(
-        r"(?:открой|покажи)\s+(?:рабочую\s+)?(?:папку|директорию)(?:\s+(.+))?$",
+        r"(?:открой|покажи|open|show)\s+(?:рабочую\s+|workspace\s+)?(?:папку|директорию|folder|directory)(?:\s+(.+))?$",
         text,
         flags=re.IGNORECASE,
     )
@@ -185,7 +216,7 @@ def _extract_open_folder(text: str) -> str | None:
 def _is_list_files_request(text: str) -> bool:
     return bool(
         re.search(
-            r"(?:покажи|список|какие|перечисли)\s+(?:мои\s+|рабочие\s+)?(?:файлы|документы)",
+            r"(?:покажи|список|какие|перечисли|show|list)\s+(?:мои\s+|рабочие\s+|my\s+|workspace\s+)?(?:файлы|документы|files|documents)",
             text,
             flags=re.IGNORECASE,
         )
@@ -194,7 +225,7 @@ def _is_list_files_request(text: str) -> bool:
 
 def _extract_docx(text: str) -> tuple[str, str, list[str], bool] | None:
     match = re.search(
-        r"(?:создай|сделай|подготовь)\s+(?:docx\s+)?(?:документ|файл)\s+(.+?\.docx)"
+        r"(?:создай|сделай|подготовь|create|make|prepare)\s+(?:docx\s+)?(?:документ|файл|document|file)\s+(.+?\.docx)"
         r"(?:\s+(?:с заголовком|заголовок|title)\s*[:=]\s*(.+?))?"
         r"(?:\s+(?:с текстом|текст|content)\s*[:=]\s*(.+))?$",
         text,
@@ -215,8 +246,8 @@ def _extract_docx(text: str) -> tuple[str, str, list[str], bool] | None:
 
 def _extract_append_docx(text: str) -> tuple[str, list[str]] | None:
     match = re.search(
-        r"(?:допиши|добавь|вставь)\s+(?:в\s+)?(?:документ|docx|файл)\s+(.+?\.docx)"
-        r"\s+(?:текст|с текстом|content)\s*[:=]\s*(.+)$",
+        r"(?:допиши|добавь|вставь|append|add|insert)\s+(?:в\s+|to\s+)?(?:документ|docx|файл|document|file)\s+(.+?\.docx)"
+        r"\s+(?:текст|с текстом|content|with text)\s*[:=]\s*(.+)$",
         text,
         flags=re.IGNORECASE,
     )
@@ -230,7 +261,7 @@ def _extract_append_docx(text: str) -> tuple[str, list[str]] | None:
 
 def _extract_shell_command(text: str) -> str | None:
     match = re.search(
-        r"(?:запусти|выполни|проверь)\s+(?:команду|shell)\s*:?\s*(.+)",
+        r"(?:запусти|выполни|проверь|run|execute|check)\s+(?:команду|command|shell)\s*:?\s*(.+)",
         text,
         flags=re.IGNORECASE,
     )
@@ -251,32 +282,41 @@ def _split_paragraphs(content: str) -> list[str]:
 
 
 def _safety_block_reason(step: TaskStep, decision: ExecutionDecision) -> str | None:
-    lowered = step.description.lower()
-    risky_words = (
-        "удали",
-        "удалить",
-        "сотри",
-        "стереть",
-        "очисти",
-        "очистить",
-        "delete",
-        "remove",
-        "erase",
-        "rm ",
+    return step_safety_block_reason(step.description, decision.tool_name, decision.arguments)
+
+
+def _should_retry_tool_failure(tool_name: str, tool_result: str, attempt: int) -> bool:
+    if attempt >= MAX_TOOL_ATTEMPTS:
+        return False
+
+    lowered = tool_result.lower()
+    transient_markers = (
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+        "remote end closed",
+        "http request failed",
     )
-    if any(word in lowered for word in risky_words):
-        return (
-            "Шаг требует подтверждения пользователя: в описании есть потенциально "
-            "разрушительное действие."
-        )
+    if any(marker in lowered for marker in transient_markers):
+        return True
 
-    if decision.tool_name in {"write_file", "create_docx"} and decision.arguments.get("overwrite") is True:
-        return "Шаг требует подтверждения пользователя: запись файла запрошена с overwrite=true."
+    if tool_name == "http_request":
+        match = re.search(r"^Status:\s*(\d{3})", tool_result, flags=re.MULTILINE)
+        if match and int(match.group(1)) >= 500:
+            return True
 
-    return None
+    if tool_name == "run_shell" and "Код возврата: -1" in tool_result:
+        return True
+
+    return False
 
 
 def _tool_status(tool_result: str) -> str:
+    http_status = re.search(r"^Status:\s*(\d{3})", tool_result, flags=re.MULTILINE)
+    if http_status and int(http_status.group(1)) >= 500:
+        return "failed"
     if "требует подтверждения пользователя" in tool_result:
         return "blocked"
     if "не смог выполнить действие" in tool_result:
