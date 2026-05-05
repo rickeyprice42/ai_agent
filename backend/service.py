@@ -70,7 +70,7 @@ class AgentService:
         return self.database.create_chat_thread(user_id, title="New chat")
 
     def settings_for_user(self, user_id: str) -> Settings:
-        model_settings = self.database.get_model_settings(user_id)
+        model_settings = self._normalized_model_settings(user_id)
         return replace(
             self.settings,
             model_provider=model_settings["provider"],
@@ -117,7 +117,23 @@ class AgentService:
         return names
 
     def model_settings(self, user_id: str) -> dict[str, str]:
-        return self.database.get_model_settings(user_id)
+        return self._normalized_model_settings(user_id)
+
+    def _normalized_model_settings(self, user_id: str) -> dict[str, str]:
+        settings = self.database.get_model_settings(user_id)
+        if (
+            settings["provider"] == "ollama_cloud"
+            and settings["model_name"] != self.settings.ollama_cloud_model
+        ):
+            settings = self.database.set_model_settings(
+                user_id=user_id,
+                provider="ollama_cloud",
+                model_name=self.settings.ollama_cloud_model,
+                ollama_url=settings.get("ollama_url") or None,
+            )
+            for key in [key for key in self._agents if key[0] == user_id]:
+                self._agents.pop(key, None)
+        return settings
 
     def update_model_settings(
         self,
@@ -247,6 +263,37 @@ class AgentService:
         self._agents.pop((user_id, thread_id), None)
         return deleted
 
+    def memory_overview(self, user_id: str) -> dict:
+        return self.database.memory_overview(user_id)
+
+    def export_memory(self, user_id: str) -> dict:
+        return self.database.export_agent_memory(user_id)
+
+    def delete_memory_note(self, user_id: str, note_id: str) -> int:
+        deleted = self.database.delete_note(user_id, note_id)
+        if deleted == 0:
+            raise ValueError("Заметка памяти не найдена.")
+        self._drop_user_agents(user_id)
+        return deleted
+
+    def clear_memory(
+        self,
+        user_id: str,
+        scope: str = "all",
+        thread_id: str | None = None,
+        project_id: str | None = None,
+        include_action_logs: bool = False,
+    ) -> dict[str, int]:
+        result = self.database.clear_agent_memory(
+            user_id,
+            scope=scope,
+            thread_id=thread_id,
+            project_id=project_id,
+            include_action_logs=include_action_logs,
+        )
+        self._drop_user_agents(user_id)
+        return result
+
     def list_projects(self, user_id: str, status: str = "active") -> list[dict]:
         return self.database.list_projects(user_id, status=status)
 
@@ -277,7 +324,7 @@ class AgentService:
         agent = self.agent_for_user(user_id, active_thread["id"])
         memory = agent.memory.snapshot()
         user = self.database.get_user(user_id)
-        model_settings = self.database.get_model_settings(user_id)
+        model_settings = self._normalized_model_settings(user_id)
         active_project = None
         if active_thread.get("project_id"):
             active_project = self.database.get_project(user_id, str(active_thread["project_id"]))
@@ -300,6 +347,10 @@ class AgentService:
             "workspace_files": [_workspace_file_to_payload(file) for file in agent.files.list_files(limit=20)],
             "user": user,
         }
+
+    def _drop_user_agents(self, user_id: str) -> None:
+        for key in [key for key in self._agents if key[0] == user_id]:
+            self._agents.pop(key, None)
 
 
 agent_service = AgentService()

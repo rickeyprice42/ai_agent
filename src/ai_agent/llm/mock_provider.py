@@ -59,6 +59,43 @@ class MockProvider:
             path = read_file_match.group(1).strip().strip("'\"`")
             return ModelResponse(tool_calls=[ToolCall(name="read_file", arguments={"path": path})])
 
+        presentation_match = None
+        for candidate in normalized:
+            presentation_match = re.search(
+                r"(?:создай|сделай|подготовь)\s+(?:pptx\s+|powerpoint\s+)?(?:презентацию|слайды)"
+                r"(?:[:\s]+(.+?\.pptx))?"
+                r"(?:\s+(?:с заголовком|заголовок|title)[:\s]+(.+?))?"
+                r"(?:\s+(?:с текстом|текст|content|о теме|на тему|про)[:\s]+(.+))?$",
+                candidate,
+                re.IGNORECASE,
+            )
+            if presentation_match:
+                break
+        if presentation_match:
+            path = (presentation_match.group(1) or "").strip().strip("'\"`")
+            title = (presentation_match.group(2) or "").strip().strip("'\"`")
+            topic = (presentation_match.group(3) or "").strip().strip("'\"`")
+            if not path:
+                path = _slug_pptx_path(title or topic or "presentation")
+            if not title:
+                title = topic or path.rsplit("/", 1)[-1].rsplit(".", 1)[0].replace("_", " ").replace("-", " ").capitalize()
+            return ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        name="create_presentation",
+                        arguments={
+                            "path": path,
+                            "title": title,
+                            "topic": topic or title,
+                            "slide_count": 6,
+                            "slides": [],
+                            "theme": "business",
+                            "overwrite": False,
+                        },
+                    )
+                ]
+            )
+
         if any(
             phrase in candidate
             for candidate in normalized
@@ -283,3 +320,9 @@ def _repair_mojibake(text: str) -> str | None:
         if repaired and repaired != text:
             return repaired
     return None
+
+
+def _slug_pptx_path(text: str) -> str:
+    words = re.findall(r"[A-Za-zА-Яа-я0-9]+", text.lower())
+    slug = "-".join(words[:5]) or "presentation"
+    return f"presentations/{slug}.pptx"

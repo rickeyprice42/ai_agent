@@ -53,7 +53,7 @@ def tool_safety_block_reason(tool_name: str, arguments: dict[str, Any], user_tex
             "после явной просьбы пользователя открыть или показать папку."
         )
 
-    if tool_name in {"write_file", "create_docx"} and arguments.get("overwrite") is True:
+    if tool_name in {"write_file", "create_docx", "create_presentation"} and arguments.get("overwrite") is True:
         if not _has_marker(normalized_user_text, CONFIRMATION_MARKERS):
             return (
                 "Действие требует подтверждения пользователя: инструмент запросил overwrite=true. "
@@ -76,7 +76,7 @@ def step_safety_block_reason(
             "разрушительное действие."
         )
 
-    if tool_name in {"write_file", "create_docx"} and arguments.get("overwrite") is True:
+    if tool_name in {"write_file", "create_docx", "create_presentation"} and arguments.get("overwrite") is True:
         return "Шаг требует подтверждения пользователя: запись файла запрошена с overwrite=true."
 
     return None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from urllib import error, request
 
 from ai_agent.llm.tool_contract import render_tool_contract
@@ -13,10 +14,12 @@ class OllamaProvider:
         model: str = "phi3",
         base_url: str = "http://localhost:11434",
         api_key: str = "",
+        timeout_seconds: int = 120,
     ) -> None:
         self.model = model
         self.url = f"{base_url.rstrip('/')}/api/generate"
         self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
 
     def generate(
         self,
@@ -50,7 +53,7 @@ class OllamaProvider:
         )
 
         try:
-            with request.urlopen(http_request, timeout=60) as response:
+            with request.urlopen(http_request, timeout=self.timeout_seconds) as response:
                 raw_data = response.read().decode("utf-8")
         except error.HTTPError as exc:
             details = exc.read().decode("utf-8", errors="replace").strip()
@@ -77,7 +80,32 @@ class OllamaProvider:
                 )
             )
 
-        data = json.loads(raw_data)
+        except (TimeoutError, socket.timeout) as exc:
+            return ModelResponse(
+                text=(
+                    f"LLM request timed out after {self.timeout_seconds} seconds. "
+                    "The model did not return a response in time. Try again, choose a smaller/faster model, "
+                    "or increase LLM_TIMEOUT_SECONDS in .env."
+                    f" Details: {exc}"
+                )
+            )
+        except OSError as exc:
+            return ModelResponse(
+                text=(
+                    "LLM request failed before a response was received. "
+                    f"Endpoint: {self.url}. Details: {exc}"
+                )
+            )
+
+        try:
+            data = json.loads(raw_data)
+        except json.JSONDecodeError:
+            return ModelResponse(
+                text=(
+                    "LLM returned a response that was not valid JSON from the Ollama API. "
+                    f"Endpoint: {self.url}."
+                )
+            )
         raw_response = str(data.get("response", "")).strip()
         return self._parse_model_response(raw_response)
 

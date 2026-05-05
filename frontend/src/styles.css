@@ -560,6 +560,51 @@ button {
   gap: 0.7rem;
 }
 
+.memory-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin-bottom: 0.75rem;
+}
+
+.memory-stat {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+  padding: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.memory-stat span,
+.memory-scope-list span,
+.note-body small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.memory-stat strong {
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.memory-scope-list,
+.memory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.75rem;
+}
+
+.memory-scope-list span {
+  padding: 0.28rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+}
+
 .task-list,
 .action-log-list,
 .workspace-file-list {
@@ -677,6 +722,11 @@ button {
   opacity: 0.55;
 }
 
+.mini-button-danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+}
+
 .note {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -691,6 +741,19 @@ button {
 .note p {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.note-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: start;
+}
+
+.note-body div {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
 }
 
 .note-index {
@@ -1085,5 +1148,13 @@ button {
 
   .composer-actions button {
     flex: 1;
+  }
+
+  .memory-overview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .note-body {
+    grid-template-columns: 1fr;
   }
 }

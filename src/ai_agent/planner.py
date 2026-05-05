@@ -121,10 +121,77 @@ def _default_steps(goal: str) -> list[str]:
 
 
 def _specialized_steps(goal: str) -> list[str]:
+    presentation_steps = _presentation_steps(goal)
+    if presentation_steps:
+        return presentation_steps
+
     docx_steps = _docx_steps(goal)
     if docx_steps:
         return docx_steps
     return []
+
+
+def _presentation_steps(goal: str) -> list[str]:
+    if ".pptx" not in goal.lower() and not re.search(
+        r"\b(?:презентац|presentation|powerpoint|pptx|слайды)\b",
+        goal,
+        flags=re.IGNORECASE,
+    ):
+        return []
+
+    path = _extract_pptx_path(goal) or _slug_pptx_path(goal)
+    title = _extract_title(goal) or PathLikeTitle.from_path(path).title
+    content = _extract_content(goal) or _presentation_summary_content(goal)
+    slide_count = _extract_slide_count(goal)
+    audience = _extract_audience(goal)
+    style = _extract_style(goal)
+    details = []
+    if audience:
+        details.append(f"для аудитории: {audience}")
+    if slide_count:
+        details.append(f"на {slide_count} слайдов")
+    if style:
+        details.append(f"стиль: {style}")
+    details_text = " " + " ".join(details) if details else ""
+
+    return [
+        f"создай презентацию {path} с заголовком: {title} на тему: {content}{details_text}",
+        "покажи файлы",
+    ]
+
+
+def _extract_pptx_path(text: str) -> str | None:
+    match = re.search(r"([A-Za-zА-Яа-я0-9_./\\-]+\.pptx)", text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip().replace("\\", "/").strip("'\"`")
+
+
+def _presentation_summary_content(goal: str) -> str:
+    cleaned = re.sub(r"\s+", " ", goal).strip(" .")
+    return f"Черновик презентации по задаче: {cleaned}"
+
+
+def _slug_pptx_path(goal: str) -> str:
+    words = re.findall(r"[A-Za-zА-Яа-я0-9]+", goal.lower())
+    meaningful_words = [
+        word
+        for word in words
+        if word
+        not in {
+            "создай",
+            "сделай",
+            "подготовь",
+            "презентацию",
+            "презентация",
+            "powerpoint",
+            "presentation",
+            "pptx",
+            "слайды",
+        }
+    ]
+    slug = "-".join(meaningful_words[:4]) or "presentation"
+    return f"presentations/{slug}.pptx"
 
 
 def _docx_steps(goal: str) -> list[str]:
@@ -160,10 +227,27 @@ def _extract_title(text: str) -> str | None:
 
 
 def _extract_content(text: str) -> str | None:
-    match = re.search(r"(?:с текстом|текст|content)\s*[:=]\s*(.+)$", text, flags=re.IGNORECASE)
+    match = re.search(r"(?:с текстом|текст|content|на тему|о теме|topic)\s*[:=]?\s*(.+)$", text, flags=re.IGNORECASE)
     if not match:
         return None
     return match.group(1).strip(" .'\"`")
+
+
+def _extract_slide_count(text: str) -> int:
+    match = re.search(r"(?:на\s+)?(\d{1,2})\s+(?:слайд|slides?)", text, flags=re.IGNORECASE)
+    if not match:
+        return 0
+    return max(0, min(int(match.group(1)), 30))
+
+
+def _extract_audience(text: str) -> str:
+    match = re.search(r"(?:для аудитории|аудитория|для)\s*[:=]?\s*(.+?)(?=\s+(?:стиль|style|на\s+\d+\s+слайд\w*)|$)", text, flags=re.IGNORECASE)
+    return match.group(1).strip(" .'\"`") if match else ""
+
+
+def _extract_style(text: str) -> str:
+    match = re.search(r"(?:стиль|style|в стиле)\s*[:=]?\s*(.+?)(?=\s+(?:для аудитории|аудитория|на\s+\d+\s+слайд\w*)|$)", text, flags=re.IGNORECASE)
+    return match.group(1).strip(" .'\"`") if match else ""
 
 
 def _docx_summary_content(goal: str) -> str:

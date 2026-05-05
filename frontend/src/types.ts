@@ -91,6 +91,31 @@ export type WorkspaceFileItem = {
   modified_at: string;
 };
 
+export type MemoryCounts = {
+  notes: number;
+  global_notes: number;
+  project_notes: number;
+  chat_notes: number;
+  memory_index: number;
+  chat_messages: number;
+  tasks: number;
+  action_logs: number;
+};
+
+export type MemoryNoteItem = {
+  id: string;
+  content: string;
+  scope: string;
+  project_id?: string | null;
+  source_thread_id?: string | null;
+  created_at: string;
+};
+
+export type MemoryOverview = {
+  counts: MemoryCounts;
+  notes: MemoryNoteItem[];
+};
+
 export type UserProfile = {
   id: string;
   email: string;

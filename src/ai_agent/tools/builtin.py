@@ -10,6 +10,7 @@ from ai_agent.tools.base import Tool, ToolRegistry
 from ai_agent.tools.documents import DocumentSandbox
 from ai_agent.tools.files import FileSandbox
 from ai_agent.tools.http import HttpSandbox
+from ai_agent.tools.presentations import PresentationSandbox
 from ai_agent.tools.shell import ShellSandbox
 from ai_agent.types import Task
 
@@ -21,6 +22,7 @@ def register_builtin_tools(
     planner: Planner,
     files: FileSandbox,
     documents: DocumentSandbox,
+    presentations: PresentationSandbox,
     shell: ShellSandbox,
     http: HttpSandbox,
     executor: ExecutionEngine,
@@ -239,6 +241,66 @@ def register_builtin_tools(
                 bullets=[str(item) for item in args.get("bullets", [])]
                 if isinstance(args.get("bullets"), list)
                 else [],
+            ),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="create_presentation",
+            description=(
+                "Создает совместимую .pptx презентацию внутри безопасной рабочей папки инструментов. "
+                "Принимает список слайдов с layout, title, subtitle, body, bullets, caption, source и image_path. "
+                "image_path должен быть относительным путем к .png/.jpg/.jpeg/.gif внутри рабочей папки. "
+                "Если slides не переданы, сам собирает структуру из title/topic/audience/purpose/slide_count/style. "
+                "Поддерживает layout title, agenda, content, section, image, quote, comparison, metrics и closing. "
+                "Поддерживает темы business, strict, dark, education, pitch, product и report. "
+                "По умолчанию не перезаписывает существующие презентации."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Относительный путь к .pptx презентации внутри рабочей папки инструментов",
+                    },
+                    "title": {"type": "string", "description": "Название презентации"},
+                    "slides": {
+                        "type": "array",
+                        "description": (
+                            "Слайды презентации. Каждый слайд: layout title/agenda/content/section/image/quote/comparison/metrics/closing, "
+                            "title, subtitle, body, bullets, caption, source, image_path."
+                        ),
+                    },
+                    "topic": {"type": "string", "description": "Тема презентации, если слайды нужно сгенерировать автоматически"},
+                    "audience": {"type": "string", "description": "Аудитория презентации"},
+                    "purpose": {"type": "string", "description": "Цель презентации или ожидаемое действие аудитории"},
+                    "slide_count": {"type": "integer", "description": "Желаемое количество слайдов, обычно от 4 до 12"},
+                    "style": {"type": "string", "description": "Стиль: строгий деловой, учебный, pitch, product, report и т.п."},
+                    "theme": {
+                        "type": "string",
+                        "description": "Тема оформления: business, strict, dark, education, pitch, product или report",
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "Можно ли заменить существующую .pptx презентацию",
+                    },
+                },
+                "required": ["path"],
+            },
+            handler=lambda args: presentations.create_presentation(
+                relative_path=str(args.get("path", "")),
+                title=str(args.get("title", "")),
+                slides=[item for item in args.get("slides", []) if isinstance(item, dict)]
+                if isinstance(args.get("slides"), list)
+                else [],
+                theme=str(args.get("theme", "business")),
+                topic=str(args.get("topic", "")),
+                audience=str(args.get("audience", "")),
+                purpose=str(args.get("purpose", "")),
+                slide_count=int(args.get("slide_count", 0)),
+                style=str(args.get("style", "")),
+                overwrite=bool(args.get("overwrite", False)),
             ),
         )
     )

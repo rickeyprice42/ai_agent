@@ -23,6 +23,29 @@ AI_agent/
 
 ## Backend
 
+Быстрый dev-запуск backend и frontend одной командой:
+
+```powershell
+.\scripts\dev.ps1
+```
+
+Только backend или только frontend:
+
+```powershell
+.\scripts\dev.ps1 -Target backend
+.\scripts\dev.ps1 -Target frontend
+```
+
+Если нужно заодно установить зависимости:
+
+```powershell
+.\scripts\dev.ps1 -Install
+```
+
+Скрипт поднимает backend на `http://127.0.0.1:8000`, frontend на
+`http://127.0.0.1:5173`. Backend и frontend открываются в отдельных PowerShell-окнах;
+остановить сервер можно через `Ctrl+C` в его окне.
+
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1

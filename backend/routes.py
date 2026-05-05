@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 
 from backend.auth import hash_password, hash_token, issue_session_token, verify_password
 from backend.models import (
@@ -14,11 +15,14 @@ from backend.models import (
     ChatThreadCreateRequest,
     ChatThreadItem,
     ChatThreadUpdateRequest,
+    ClearMemoryRequest,
+    ClearMemoryResponse,
     ClearChatResponse,
     ChatRequest,
     ChatResponse,
     ChatMemoryResponse,
     ExecuteStepResponse,
+    MemoryOverviewResponse,
     ModelProviderOption,
     ModelSettings,
     ModelSettingsRequest,
@@ -293,6 +297,49 @@ def remember_chat(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ChatMemoryResponse(result=result["result"], thread=ChatThreadItem(**result["thread"]))
+
+
+@router.get("/memory", response_model=MemoryOverviewResponse)
+def memory_overview(user: dict[str, str] = Depends(current_user)) -> MemoryOverviewResponse:
+    return MemoryOverviewResponse(**agent_service.memory_overview(user["id"]))
+
+
+@router.get("/memory/export")
+def export_memory(user: dict[str, str] = Depends(current_user)) -> Response:
+    payload = agent_service.export_memory(user["id"])
+    filename = f"avelin-memory-{user['id']}.json"
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, indent=2),
+        media_type="application/json; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.delete("/memory/notes/{note_id}", response_model=ClearMemoryResponse)
+def delete_memory_note(
+    note_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ClearMemoryResponse:
+    try:
+        deleted = agent_service.delete_memory_note(user["id"], note_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ClearMemoryResponse(deleted_notes=deleted)
+
+
+@router.post("/memory/clear", response_model=ClearMemoryResponse)
+def clear_memory(
+    payload: ClearMemoryRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ClearMemoryResponse:
+    result = agent_service.clear_memory(
+        user["id"],
+        scope=payload.scope,
+        thread_id=payload.thread_id,
+        project_id=payload.project_id,
+        include_action_logs=payload.include_action_logs,
+    )
+    return ClearMemoryResponse(**result)
 
 
 @router.get("/projects", response_model=list[ProjectItem])

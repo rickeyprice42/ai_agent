@@ -7,6 +7,7 @@ from ai_agent.config import Settings
 from ai_agent.context import ContextBuilder
 from ai_agent.executor import ExecutionEngine
 from ai_agent.executor import _tool_status
+from ai_agent.executor import decide_step_action
 from ai_agent.llm.mock_provider import MockProvider
 from ai_agent.llm.ollama_provider import OllamaProvider
 from ai_agent.memory import MemoryStore
@@ -18,8 +19,10 @@ from ai_agent.tools.builtin import register_builtin_tools
 from ai_agent.tools.documents import DocumentSandbox
 from ai_agent.tools.files import FileSandbox
 from ai_agent.tools.http import HttpSandbox
+from ai_agent.tools.presentations import PresentationSandbox
 from ai_agent.tools.shell import ShellSandbox
 from ai_agent.types import Message
+from ai_agent.types import TaskStep
 
 
 class Agent:
@@ -49,6 +52,10 @@ class Agent:
             workspace_dir=settings.tool_workspace_dir,
             max_text_chars=settings.max_file_write_chars,
         )
+        self.presentations = PresentationSandbox(
+            workspace_dir=settings.tool_workspace_dir,
+            max_text_chars=settings.max_file_write_chars,
+        )
         self.shell = ShellSandbox(
             workspace_dir=settings.tool_workspace_dir,
             timeout_seconds=settings.shell_timeout_seconds,
@@ -67,6 +74,7 @@ class Agent:
             self.planner,
             self.files,
             self.documents,
+            self.presentations,
             self.shell,
             self.http,
             self.executor,
@@ -80,12 +88,14 @@ class Agent:
             return OllamaProvider(
                 model=self.settings.model_name,
                 base_url=self.settings.ollama_url,
+                timeout_seconds=self.settings.llm_timeout_seconds,
             )
         if self.settings.model_provider == "ollama_cloud":
             return OllamaProvider(
                 model=self.settings.model_name,
                 base_url=self.settings.ollama_cloud_url,
                 api_key=self.settings.ollama_api_key,
+                timeout_seconds=self.settings.llm_timeout_seconds,
             )
         raise ValueError(
             f"Неизвестный провайдер: {self.settings.model_provider}. "
@@ -95,6 +105,11 @@ class Agent:
     def respond(self, user_text: str) -> str:
         user_message = Message(role="user", content=user_text)
         self.memory.append_message(user_message)
+
+        direct_result = self._try_direct_tool_action(user_text)
+        if direct_result is not None:
+            self.memory.append_message(Message(role="assistant", content=direct_result))
+            return direct_result
 
         for _ in range(4):
             context = self.context.build(self.settings.system_prompt)
@@ -170,6 +185,58 @@ class Agent:
         fallback = "Достигнут предел шагов агента, но архитектура цикла уже готова для доработки."
         self.memory.append_message(Message(role="assistant", content=fallback))
         return fallback
+
+    def _try_direct_tool_action(self, user_text: str) -> str | None:
+        decision = decide_step_action(
+            TaskStep(id="direct-chat", task_id="direct-chat", description=user_text)
+        )
+        if decision.tool_name is None:
+            return None
+        if decision.tool_name in {"run_shell", "http_request", "execute_next_step"}:
+            return None
+        if not self.tools.has(decision.tool_name):
+            return None
+
+        arguments, validation_error = self.tools.validate_arguments(
+            decision.tool_name,
+            decision.arguments,
+        )
+        if validation_error:
+            self.action_log.record(
+                tool_name=decision.tool_name,
+                status="validation_error",
+                arguments=decision.arguments,
+                result=validation_error,
+            )
+            self.memory.append_message(
+                Message(role="tool", content=validation_error, name=decision.tool_name)
+            )
+            return validation_error
+
+        safety_block = tool_safety_block_reason(decision.tool_name, arguments, user_text)
+        if safety_block:
+            self.action_log.record(
+                tool_name=decision.tool_name,
+                status="blocked",
+                arguments=arguments,
+                result=safety_block,
+            )
+            self.memory.append_message(
+                Message(role="tool", content=safety_block, name=decision.tool_name)
+            )
+            return safety_block
+
+        tool_result = self.tools.execute(decision.tool_name, arguments)
+        self.action_log.record(
+            tool_name=decision.tool_name,
+            status=_tool_status(tool_result),
+            arguments=arguments,
+            result=tool_result,
+        )
+        self.memory.append_message(
+            Message(role="tool", content=tool_result, name=decision.tool_name)
+        )
+        return tool_result
 
 
 class AgentApp:

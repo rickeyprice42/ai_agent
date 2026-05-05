@@ -5,13 +5,17 @@ import {
   assignChatToProject,
   approveBlockedStep,
   clearChatMessages,
+  clearAgentMemory,
   createProject,
   createChatThread,
+  deleteMemoryNote,
   deleteProject,
   deleteChatThread,
   executeNextStep,
+  exportAgentMemory,
   fetchBootstrap,
   fetchMe,
+  fetchMemoryOverview,
   fetchModelProviders,
   login as authLogin,
   logout as authLogout,
@@ -26,7 +30,7 @@ import {
   updateChatThread,
   updateModelSettings
 } from "./api";
-import type { BootstrapPayload, ChatMessage, ModelProviderOption, UserProfile } from "./types";
+import type { BootstrapPayload, ChatMessage, MemoryOverview, ModelProviderOption, UserProfile } from "./types";
 
 const DRAFT_KEY = "avelin-draft";
 const THEME_KEY = "avelin-theme-mode";
@@ -75,6 +79,20 @@ const EMPTY_BOOTSTRAP: BootstrapPayload = {
     display_name: "",
     auth_provider: "password"
   }
+};
+
+const EMPTY_MEMORY_OVERVIEW: MemoryOverview = {
+  counts: {
+    notes: 0,
+    global_notes: 0,
+    project_notes: 0,
+    chat_notes: 0,
+    memory_index: 0,
+    chat_messages: 0,
+    tasks: 0,
+    action_logs: 0
+  },
+  notes: []
 };
 
 const QUICK_ACTIONS = [
@@ -154,6 +172,7 @@ function readStoredThemeMode(): ThemeMode {
 
 export default function App() {
   const [bootstrap, setBootstrap] = useState<BootstrapPayload>(EMPTY_BOOTSTRAP);
+  const [memoryOverview, setMemoryOverview] = useState<MemoryOverview>(EMPTY_MEMORY_OVERVIEW);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -162,6 +181,9 @@ export default function App() {
   const [isExecutingStep, setIsExecutingStep] = useState(false);
   const [approvingStepId, setApprovingStepId] = useState<string | null>(null);
   const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false);
+  const [isClearingMemory, setIsClearingMemory] = useState(false);
+  const [isExportingMemory, setIsExportingMemory] = useState(false);
+  const [deletingNoteId, setDeletingNoteId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
   const [animatedMessageKey, setAnimatedMessageKey] = useState<string | null>(null);
@@ -270,8 +292,12 @@ export default function App() {
     }
 
     try {
-      const data = await fetchBootstrap(token, threadId || null);
+      const [data, memoryData] = await Promise.all([
+        fetchBootstrap(token, threadId || null),
+        fetchMemoryOverview(token)
+      ]);
       setBootstrap(data);
+      setMemoryOverview(memoryData);
       setMessages(data.history);
       setActiveThreadId(data.active_thread.id);
       setActiveProjectId(data.active_thread.project_id ?? "");
@@ -480,6 +506,73 @@ export default function App() {
       await refreshBootstrap(false, false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось сохранить чат в память.");
+    }
+  }
+
+  async function handleDeleteMemoryNote(noteId: string) {
+    if (!authToken || deletingNoteId) return;
+    if (!window.confirm("Удалить эту заметку из памяти агента? История чатов и задачи останутся без изменений.")) return;
+    setDeletingNoteId(noteId);
+    setError(null);
+    try {
+      await deleteMemoryNote(authToken, noteId);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось удалить заметку памяти.");
+    } finally {
+      setDeletingNoteId(null);
+    }
+  }
+
+  async function handleExportMemory() {
+    if (!authToken || isExportingMemory) return;
+    setIsExportingMemory(true);
+    setError(null);
+    try {
+      const blob = await exportAgentMemory(authToken);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const stamp = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.download = `avelin-memory-${stamp}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось экспортировать память агента.");
+    } finally {
+      setIsExportingMemory(false);
+    }
+  }
+
+  async function handleClearMemory(scope: "all" | "global" | "current_chat" | "current_project") {
+    if (!authToken || isClearingMemory) return;
+    const labels = {
+      all: "всю долгосрочную память агента",
+      global: "глобальную память агента",
+      current_chat: "память текущего чата",
+      current_project: "память текущего проекта"
+    };
+    if (scope === "current_chat" && !activeThreadId) return;
+    if (scope === "current_project" && !activeProjectId) return;
+    if (!window.confirm(`Очистить ${labels[scope]}? Сообщения чатов, задачи, проекты и настройки модели не будут удалены.`)) {
+      return;
+    }
+    setIsClearingMemory(true);
+    setError(null);
+    try {
+      await clearAgentMemory(authToken, {
+        scope,
+        thread_id: scope === "current_chat" ? activeThreadId : null,
+        project_id: scope === "current_project" ? activeProjectId : null,
+        include_action_logs: scope === "all"
+      });
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось очистить память агента.");
+    } finally {
+      setIsClearingMemory(false);
     }
   }
 
@@ -1053,14 +1146,76 @@ export default function App() {
             </button>
           </div>
 
+          <div className="memory-overview-grid">
+            <div className="memory-stat">
+              <span>Заметки</span>
+              <strong>{memoryOverview.counts.notes}</strong>
+            </div>
+            <div className="memory-stat">
+              <span>Чаты</span>
+              <strong>{memoryOverview.counts.chat_messages}</strong>
+            </div>
+            <div className="memory-stat">
+              <span>Задачи</span>
+              <strong>{memoryOverview.counts.tasks}</strong>
+            </div>
+            <div className="memory-stat">
+              <span>Журнал</span>
+              <strong>{memoryOverview.counts.action_logs}</strong>
+            </div>
+          </div>
+
+          <div className="memory-scope-list">
+            <span>Глобальные: {memoryOverview.counts.global_notes}</span>
+            <span>Проектные: {memoryOverview.counts.project_notes}</span>
+            <span>Из чатов: {memoryOverview.counts.chat_notes}</span>
+            <span>Индекс: {memoryOverview.counts.memory_index}</span>
+          </div>
+
+          <div className="memory-actions">
+            <button className="mini-button" disabled={isExportingMemory} onClick={() => void handleExportMemory()} type="button">
+              {isExportingMemory ? "Экспорт..." : "Экспорт JSON"}
+            </button>
+            <button className="mini-button" disabled={isClearingMemory} onClick={() => void handleClearMemory("current_chat")} type="button">
+              Очистить чат
+            </button>
+            <button
+              className="mini-button"
+              disabled={isClearingMemory || !activeProjectId}
+              onClick={() => void handleClearMemory("current_project")}
+              type="button"
+            >
+              Очистить проект
+            </button>
+            <button className="mini-button" disabled={isClearingMemory} onClick={() => void handleClearMemory("global")} type="button">
+              Очистить global
+            </button>
+            <button className="mini-button mini-button-danger" disabled={isClearingMemory} onClick={() => void handleClearMemory("all")} type="button">
+              Очистить всё
+            </button>
+          </div>
+
           <div className="notes">
-            {bootstrap.notes.length === 0 ? (
+            {memoryOverview.notes.length === 0 ? (
               <p className="muted">Пока без заметок.</p>
             ) : (
-              bootstrap.notes.map((note, index) => (
-                <article className="note" key={`${note}-${index}`}>
+              memoryOverview.notes.map((note, index) => (
+                <article className="note" key={note.id}>
                   <span className="note-index">{String(index + 1).padStart(2, "0")}</span>
-                  <p>{note}</p>
+                  <div className="note-body">
+                    <div>
+                      <p>{note.content}</p>
+                      <small>{note.scope === "global" ? "global" : note.scope === "current_project" ? "project" : "chat"}</small>
+                    </div>
+                    <button
+                      className="mini-button"
+                      disabled={deletingNoteId === note.id}
+                      onClick={() => void handleDeleteMemoryNote(note.id)}
+                      type="button"
+                    >
+                      {deletingNoteId === note.id ? "Удаляю..." : "Удалить"}
+                    </button>
+                  </div>
                 </article>
               ))
             )}

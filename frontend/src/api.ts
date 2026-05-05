@@ -2,6 +2,7 @@ import type {
   AuthPayload,
   BootstrapPayload,
   ChatThreadItem,
+  MemoryOverview,
   ModelProviderOption,
   ModelSettings,
   ProjectItem,
@@ -116,6 +117,60 @@ export async function rememberChat(token: string, threadId: string): Promise<{ r
   });
   if (!response.ok) {
     throw await parseError(response, "Не удалось сохранить чат в память.");
+  }
+  return response.json();
+}
+
+export async function fetchMemoryOverview(token: string): Promise<MemoryOverview> {
+  const response = await fetch("/api/memory", {
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось загрузить память агента.");
+  }
+  return response.json();
+}
+
+export async function exportAgentMemory(token: string): Promise<Blob> {
+  const response = await fetch("/api/memory/export", {
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось экспортировать память агента.");
+  }
+  return response.blob();
+}
+
+export async function deleteMemoryNote(token: string, noteId: string): Promise<{ deleted_notes: number }> {
+  const response = await fetch(`/api/memory/notes/${encodeURIComponent(noteId)}`, {
+    method: "DELETE",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось удалить заметку памяти.");
+  }
+  return response.json();
+}
+
+export async function clearAgentMemory(
+  token: string,
+  payload: { scope: string; thread_id?: string | null; project_id?: string | null; include_action_logs?: boolean }
+): Promise<{
+  deleted_notes: number;
+  deleted_memory_index: number;
+  deleted_action_logs: number;
+  updated_threads: number;
+}> {
+  const response = await fetch("/api/memory/clear", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(token)
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось очистить память агента.");
   }
   return response.json();
 }

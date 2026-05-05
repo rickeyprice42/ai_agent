@@ -168,6 +168,26 @@ def decide_step_action(step: TaskStep) -> ExecutionDecision:
             "append docx requested",
         )
 
+    presentation_target = _extract_presentation(text)
+    if presentation_target is not None:
+        path, title, slides, theme, topic, audience, purpose, slide_count, style, overwrite = presentation_target
+        return ExecutionDecision(
+            "create_presentation",
+            {
+                "path": path,
+                "title": title,
+                "slides": slides,
+                "theme": theme,
+                "topic": topic,
+                "audience": audience,
+                "purpose": purpose,
+                "slide_count": slide_count,
+                "style": style,
+                "overwrite": overwrite,
+            },
+            "pptx presentation requested",
+        )
+
     command = _extract_shell_command(text)
     if command:
         return ExecutionDecision("run_shell", {"command": command}, "shell verification requested")
@@ -181,6 +201,15 @@ def decide_step_action(step: TaskStep) -> ExecutionDecision:
 
 
 def _extract_file_path(text: str, verbs: tuple[str, ...]) -> str | None:
+    if any(verb in verbs for verb in ("read", "open", "show")):
+        simple_match = re.search(
+            r"(?:прочитай|открой|покажи|read|open|show)\s+(?:(?:файл|file)\s*)?:?\s*([^\n\r]+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if simple_match:
+            return simple_match.group(1).strip().strip("'\"`")
+
     pattern = r"(?:{})\s+(?:(?:файл|file)\s*)?:?\s*([^\n\r]+)".format("|".join(re.escape(verb) for verb in verbs))
     match = re.search(pattern, text, flags=re.IGNORECASE)
     if not match:
@@ -257,6 +286,152 @@ def _extract_append_docx(text: str) -> tuple[str, list[str]] | None:
     path = match.group(1).strip().strip("'\"`")
     content = match.group(2).strip().strip("'\"`")
     return path, _split_paragraphs(content)
+
+
+def _extract_presentation(text: str) -> tuple[str, str, list[dict], str, str, str, str, int, str, bool] | None:
+    if not re.search(
+        r"\b(?:создай|сделай|подготовь|create|make|prepare)\b",
+        text,
+        flags=re.IGNORECASE,
+    ) or not re.search(
+        r"\b(?:презентац\w*|presentation|powerpoint|pptx|slides|слайды)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return None
+
+    path_match = re.search(r"([A-Za-zА-Яа-я0-9_./\\-]+\.pptx)", text, flags=re.IGNORECASE)
+    path = path_match.group(1).strip().replace("\\", "/").strip("'\"`") if path_match else ""
+    title = _extract_labeled_value(text, ("с заголовком", "заголовок", "title"))
+    content = _extract_labeled_value(text, ("с текстом", "текст", "content"))
+    topic = _extract_labeled_value(text, ("о теме", "на тему", "про", "topic"))
+    audience = _extract_labeled_value(text, ("для аудитории", "аудитория", "для", "audience"))
+    purpose = _extract_labeled_value(text, ("цель", "purpose", "чтобы"))
+    style = _extract_labeled_value(text, ("стиль", "style", "в стиле"))
+    slide_count = _extract_slide_count(text)
+    if not topic and not content:
+        topic = _presentation_topic_from_request(text, path)
+    if not title:
+        title = topic or (Path(path).stem.replace("_", " ").replace("-", " ").strip().capitalize() if path else "")
+    if not path:
+        path = _slug_pptx_path(title or topic or text)
+    paragraphs = _split_paragraphs(content) if content else []
+    slides = _slides_from_content(title, paragraphs, topic, audience, purpose, slide_count)
+    theme = _theme_from_style(style)
+    overwrite = bool(re.search(r"\b(?:overwrite|перезапиши|замени)\b", text, flags=re.IGNORECASE))
+    return path, title, slides, theme, topic, audience, purpose, slide_count, style, overwrite
+
+
+def _slides_from_content(
+    title: str,
+    paragraphs: list[str],
+    topic: str = "",
+    audience: str = "",
+    purpose: str = "",
+    slide_count: int = 0,
+) -> list[dict]:
+    if not paragraphs:
+        return []
+
+    slides: list[dict] = [
+        {
+            "layout": "title",
+            "title": title,
+            "subtitle": purpose or audience or "Презентация Avelin",
+        }
+    ]
+    agenda_items = [paragraph[:80] for paragraph in paragraphs[:5]]
+    if len(paragraphs) >= 3:
+        slides.append({"layout": "agenda", "title": "Структура", "bullets": agenda_items})
+
+    target_content_slides = max(1, min(slide_count - 2 if slide_count else 5, len(paragraphs)))
+    chunks = _chunk_items(paragraphs, target_content_slides)
+    for index, chunk in enumerate(chunks, start=1):
+        slide_title = chunk[0] if len(chunk[0]) <= 70 else f"Раздел {index}"
+        slides.append(
+            {
+                "layout": "content",
+                "title": slide_title,
+                "subtitle": topic if index == 1 and topic else "",
+                "bullets": chunk[:6],
+            }
+        )
+    slides.append({"layout": "closing", "title": "Итоги", "bullets": ["Главные тезисы собраны", purpose or "Готово к обсуждению"]})
+    return slides
+
+
+def _extract_labeled_value(text: str, labels: tuple[str, ...]) -> str:
+    escaped = "|".join(re.escape(label) for label in labels)
+    stop_words = (
+        "с заголовком|заголовок|title|с текстом|текст|content|о теме|на тему|про|topic|"
+        "для аудитории|аудитория|для|audience|цель|purpose|чтобы|стиль|style|в стиле|"
+        "на \\d+ слайд\\w*|\\d+ слайд\\w*"
+    )
+    match = re.search(
+        rf"(?:{escaped})\s*[:=]?\s*(.+?)(?=\s+(?:{stop_words})\b|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return match.group(1).strip(" .'\"`")
+
+
+def _extract_slide_count(text: str) -> int:
+    match = re.search(r"(?:на\s+)?(\d{1,2})\s+(?:слайд|slides?)", text, flags=re.IGNORECASE)
+    if not match:
+        return 0
+    return max(0, min(int(match.group(1)), 30))
+
+
+def _presentation_topic_from_request(text: str, path: str) -> str:
+    cleaned = re.sub(r"([A-Za-zА-Яа-я0-9_./\\-]+\.pptx)", " ", text, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\b(?:создай|сделай|подготовь|create|make|prepare|pptx|powerpoint|презентацию|презентация|presentation|slides|слайды)\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .:;")
+    if cleaned:
+        return cleaned
+    if path:
+        return Path(path).stem.replace("_", " ").replace("-", " ").strip().capitalize()
+    return "Презентация"
+
+
+def _theme_from_style(style: str) -> str:
+    lowered = style.lower()
+    if any(word in lowered for word in ("строг", "strict")):
+        return "strict"
+    if any(word in lowered for word in ("учеб", "education", "обуч")):
+        return "education"
+    if "pitch" in lowered or "питч" in lowered:
+        return "pitch"
+    if any(word in lowered for word in ("product", "продукт")):
+        return "product"
+    if any(word in lowered for word in ("report", "отчет", "исслед")):
+        return "report"
+    if any(word in lowered for word in ("dark", "темн")):
+        return "dark"
+    return "business"
+
+
+def _slug_pptx_path(text: str) -> str:
+    words = re.findall(r"[A-Za-zА-Яа-я0-9]+", text.lower())
+    stop_words = {"создай", "сделай", "подготовь", "презентацию", "презентация", "powerpoint", "presentation", "pptx", "слайды"}
+    meaningful = [word for word in words if word not in stop_words]
+    slug = "-".join(meaningful[:5]) or "presentation"
+    return f"presentations/{slug}.pptx"
+
+
+def _chunk_items(items: list[str], chunk_count: int) -> list[list[str]]:
+    if chunk_count <= 1:
+        return [items]
+    chunks: list[list[str]] = [[] for _ in range(chunk_count)]
+    for index, item in enumerate(items):
+        chunks[index % chunk_count].append(item)
+    return [chunk for chunk in chunks if chunk]
 
 
 def _extract_shell_command(text: str) -> str | None:

@@ -26,6 +26,7 @@ class Settings:
     ollama_cloud_url: str
     ollama_api_key: str
     ollama_cloud_model: str
+    llm_timeout_seconds: int
     database_file: Path
     memory_file: Path
     tool_workspace_dir: Path
@@ -55,7 +56,8 @@ class Settings:
             ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
             ollama_cloud_url=os.getenv("OLLAMA_CLOUD_URL", "https://ollama.com"),
             ollama_api_key=os.getenv("OLLAMA_API_KEY", ""),
-            ollama_cloud_model=os.getenv("OLLAMA_CLOUD_MODEL", "qwen3.5:397b-cloud"),
+            ollama_cloud_model=os.getenv("OLLAMA_CLOUD_MODEL", "gemma4:31b-cloud"),
+            llm_timeout_seconds=_read_int_env("LLM_TIMEOUT_SECONDS", default=120, minimum=10),
             database_file=database_path,
             memory_file=memory_path,
             tool_workspace_dir=workspace_path,

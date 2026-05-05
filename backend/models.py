@@ -119,6 +119,45 @@ class ChatMemoryResponse(BaseModel):
     thread: ChatThreadItem
 
 
+class MemoryCounts(BaseModel):
+    notes: int = 0
+    global_notes: int = 0
+    project_notes: int = 0
+    chat_notes: int = 0
+    memory_index: int = 0
+    chat_messages: int = 0
+    tasks: int = 0
+    action_logs: int = 0
+
+
+class MemoryNoteItem(BaseModel):
+    id: str
+    content: str
+    scope: str
+    project_id: str | None = None
+    source_thread_id: str | None = None
+    created_at: str
+
+
+class MemoryOverviewResponse(BaseModel):
+    counts: MemoryCounts
+    notes: list[MemoryNoteItem]
+
+
+class ClearMemoryRequest(BaseModel):
+    scope: str = Field(default="all", max_length=40)
+    thread_id: str | None = Field(default=None, max_length=120)
+    project_id: str | None = Field(default=None, max_length=120)
+    include_action_logs: bool = False
+
+
+class ClearMemoryResponse(BaseModel):
+    deleted_notes: int = 0
+    deleted_memory_index: int = 0
+    deleted_action_logs: int = 0
+    updated_threads: int = 0
+
+
 class ProjectItem(BaseModel):
     id: str
     user_id: str

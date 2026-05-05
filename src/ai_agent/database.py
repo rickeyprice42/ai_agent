@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 import json
@@ -720,6 +721,329 @@ class AvelinDatabase:
             ).fetchall()
             return [str(row["content"]) for row in rows]
 
+    def memory_overview(self, user_id: str = DEFAULT_USER_ID) -> dict:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            note_rows = connection.execute(
+                """
+                SELECT id, content, project_id, source_thread_id, created_at
+                FROM notes
+                WHERE user_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 50
+                """,
+                (user_id,),
+            ).fetchall()
+            counts = {
+                "notes": int(
+                    connection.execute(
+                        "SELECT COUNT(*) AS count FROM notes WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchone()["count"]
+                ),
+                "global_notes": int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) AS count
+                        FROM notes
+                        WHERE user_id = ? AND project_id IS NULL AND source_thread_id IS NULL
+                        """,
+                        (user_id,),
+                    ).fetchone()["count"]
+                ),
+                "project_notes": int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) AS count
+                        FROM notes
+                        WHERE user_id = ? AND project_id IS NOT NULL
+                        """,
+                        (user_id,),
+                    ).fetchone()["count"]
+                ),
+                "chat_notes": int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) AS count
+                        FROM notes
+                        WHERE user_id = ? AND source_thread_id IS NOT NULL
+                        """,
+                        (user_id,),
+                    ).fetchone()["count"]
+                ),
+                "memory_index": int(
+                    connection.execute(
+                        "SELECT COUNT(*) AS count FROM memory_index WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchone()["count"]
+                ),
+                "chat_messages": int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) AS count
+                        FROM messages
+                        WHERE thread_id IN (SELECT id FROM chat_threads WHERE user_id = ?)
+                        """,
+                        (user_id,),
+                    ).fetchone()["count"]
+                ),
+                "tasks": int(
+                    connection.execute(
+                        "SELECT COUNT(*) AS count FROM tasks WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchone()["count"]
+                ),
+                "action_logs": int(
+                    connection.execute(
+                        "SELECT COUNT(*) AS count FROM action_logs WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchone()["count"]
+                ),
+            }
+        return {
+            "counts": counts,
+            "notes": [
+                {
+                    "id": str(row["id"]),
+                    "content": str(row["content"]),
+                    "scope": _note_scope_from_row(row),
+                    "project_id": row["project_id"],
+                    "source_thread_id": row["source_thread_id"],
+                    "created_at": str(row["created_at"]),
+                }
+                for row in note_rows
+            ],
+        }
+
+    def export_agent_memory(self, user_id: str = DEFAULT_USER_ID) -> dict:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            user_row = connection.execute(
+                """
+                SELECT id, email, username, display_name, created_at, updated_at
+                FROM users
+                WHERE id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            notes = _rows_to_dicts(
+                connection.execute(
+                    """
+                    SELECT id, content, project_id, source_thread_id, created_at
+                    FROM notes
+                    WHERE user_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (user_id,),
+                ).fetchall()
+            )
+            memory_index = _rows_to_dicts(
+                connection.execute(
+                    """
+                    SELECT id, source_type, source_id, content, embedding_json, created_at, updated_at
+                    FROM memory_index
+                    WHERE user_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (user_id,),
+                ).fetchall()
+            )
+            chat_threads = _rows_to_dicts(
+                connection.execute(
+                    """
+                    SELECT id, title, status, archived_at, deleted_at, pinned, project_id,
+                           memory_enabled, memory_saved_at, created_at, updated_at
+                    FROM chat_threads
+                    WHERE user_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (user_id,),
+                ).fetchall()
+            )
+            messages = _rows_to_dicts(
+                connection.execute(
+                    """
+                    SELECT messages.id, messages.thread_id, messages.role, messages.content,
+                           messages.name, messages.created_at
+                    FROM messages
+                    JOIN chat_threads ON chat_threads.id = messages.thread_id
+                    WHERE chat_threads.user_id = ?
+                    ORDER BY messages.created_at ASC, messages.rowid ASC
+                    """,
+                    (user_id,),
+                ).fetchall()
+            )
+            tasks = _rows_to_dicts(
+                connection.execute(
+                    """
+                    SELECT id, project_id, description, status, priority, result, created_at, updated_at
+                    FROM tasks
+                    WHERE user_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (user_id,),
+                ).fetchall()
+            )
+            task_steps = _rows_to_dicts(
+                connection.execute(
+                    """
+                    SELECT task_steps.id, task_steps.task_id, task_steps.position, task_steps.description,
+                           task_steps.status, task_steps.result, task_steps.created_at, task_steps.updated_at
+                    FROM task_steps
+                    JOIN tasks ON tasks.id = task_steps.task_id
+                    WHERE tasks.user_id = ?
+                    ORDER BY task_steps.created_at ASC, task_steps.rowid ASC
+                    """,
+                    (user_id,),
+                ).fetchall()
+            )
+            action_logs = _rows_to_dicts(
+                connection.execute(
+                    """
+                    SELECT id, tool_name, status, arguments_json, result, created_at
+                    FROM action_logs
+                    WHERE user_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (user_id,),
+                ).fetchall()
+            )
+
+        return {
+            "format": "avelin-memory-export-v1",
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "user": dict(user_row) if user_row else {"id": user_id},
+            "overview": self.memory_overview(user_id),
+            "notes": notes,
+            "memory_index": memory_index,
+            "chat_threads": chat_threads,
+            "messages": messages,
+            "tasks": tasks,
+            "task_steps": task_steps,
+            "action_logs": action_logs,
+        }
+
+    def delete_note(self, user_id: str, note_id: str) -> int:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM notes WHERE user_id = ? AND id = ?",
+                (user_id, note_id),
+            )
+            connection.execute(
+                """
+                DELETE FROM memory_index
+                WHERE user_id = ? AND source_type = 'note' AND source_id = ?
+                """,
+                (user_id, note_id),
+            )
+            return int(cursor.rowcount)
+
+    def clear_agent_memory(
+        self,
+        user_id: str,
+        scope: str = "all",
+        thread_id: str | None = None,
+        project_id: str | None = None,
+        include_action_logs: bool = False,
+    ) -> dict[str, int]:
+        normalized_scope = scope.strip().lower()
+        if normalized_scope not in {"all", "global", "current_chat", "current_project"}:
+            normalized_scope = "all"
+
+        deleted_notes = 0
+        deleted_memory_index = 0
+        deleted_action_logs = 0
+        updated_threads = 0
+
+        with self.connect() as connection:
+            note_where = "user_id = ?"
+            note_params: list[str] = [user_id]
+            if normalized_scope == "global":
+                note_where += " AND project_id IS NULL AND source_thread_id IS NULL"
+            elif normalized_scope == "current_chat":
+                if not thread_id:
+                    return {
+                        "deleted_notes": 0,
+                        "deleted_memory_index": 0,
+                        "deleted_action_logs": 0,
+                        "updated_threads": 0,
+                    }
+                note_where += " AND source_thread_id = ?"
+                note_params.append(thread_id)
+            elif normalized_scope == "current_project":
+                if not project_id:
+                    return {
+                        "deleted_notes": 0,
+                        "deleted_memory_index": 0,
+                        "deleted_action_logs": 0,
+                        "updated_threads": 0,
+                    }
+                note_where += " AND project_id = ?"
+                note_params.append(project_id)
+
+            note_ids = [
+                str(row["id"])
+                for row in connection.execute(
+                    f"SELECT id FROM notes WHERE {note_where}",
+                    note_params,
+                ).fetchall()
+            ]
+            if note_ids:
+                placeholders = ",".join("?" for _ in note_ids)
+                cursor = connection.execute(
+                    f"DELETE FROM notes WHERE id IN ({placeholders}) AND user_id = ?",
+                    [*note_ids, user_id],
+                )
+                deleted_notes = int(cursor.rowcount)
+                cursor = connection.execute(
+                    f"""
+                    DELETE FROM memory_index
+                    WHERE user_id = ? AND source_type = 'note' AND source_id IN ({placeholders})
+                    """,
+                    [user_id, *note_ids],
+                )
+                deleted_memory_index += int(cursor.rowcount)
+
+            if normalized_scope == "all":
+                cursor = connection.execute("DELETE FROM memory_index WHERE user_id = ?", (user_id,))
+                deleted_memory_index += int(cursor.rowcount)
+
+            if normalized_scope == "current_chat" and thread_id:
+                cursor = connection.execute(
+                    """
+                    UPDATE chat_threads
+                    SET memory_enabled = 0,
+                        memory_saved_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ? AND id = ?
+                    """,
+                    (user_id, thread_id),
+                )
+                updated_threads = int(cursor.rowcount)
+            elif normalized_scope == "all":
+                cursor = connection.execute(
+                    """
+                    UPDATE chat_threads
+                    SET memory_enabled = 0,
+                        memory_saved_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ?
+                    """,
+                    (user_id,),
+                )
+                updated_threads = int(cursor.rowcount)
+
+            if include_action_logs:
+                cursor = connection.execute("DELETE FROM action_logs WHERE user_id = ?", (user_id,))
+                deleted_action_logs = int(cursor.rowcount)
+
+        return {
+            "deleted_notes": deleted_notes,
+            "deleted_memory_index": deleted_memory_index,
+            "deleted_action_logs": deleted_action_logs,
+            "updated_threads": updated_threads,
+        }
+
     def list_note_items(
         self,
         user_id: str = DEFAULT_USER_ID,
@@ -1280,3 +1604,15 @@ def _title_from_message(content: str) -> str:
         return ""
     title = normalized[:48].rstrip(".,!?;:")
     return f"{title}..." if len(normalized) > len(title) else title
+
+
+def _note_scope_from_row(row: sqlite3.Row) -> str:
+    if row["source_thread_id"]:
+        return "current_chat"
+    if row["project_id"]:
+        return "current_project"
+    return "global"
+
+
+def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict]:
+    return [dict(row) for row in rows]
