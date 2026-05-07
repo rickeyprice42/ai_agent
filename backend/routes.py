@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, File as FastApiFile, Header, HTTPException, Query, Response, UploadFile
+from fastapi.responses import FileResponse
 
 from backend.auth import hash_password, hash_token, issue_session_token, verify_password
 from backend.models import (
@@ -34,6 +35,9 @@ from backend.models import (
     ProjectUpdateRequest,
     RegisterRequest,
     UserProfile,
+    WorkspaceDeleteResponse,
+    WorkspaceFileItem,
+    WorkspaceUploadResponse,
 )
 from backend.service import agent_service
 
@@ -441,3 +445,55 @@ def open_workspace_folder(user: dict[str, str] = Depends(current_user)) -> OpenW
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return OpenWorkspaceResponse(result=result)
+
+
+@router.post("/workspace/files", response_model=WorkspaceUploadResponse)
+async def upload_workspace_files(
+    files: list[UploadFile] = FastApiFile(...),
+    thread_id: str | None = Query(default=None),
+    project_id: str | None = Query(default=None),
+    user: dict[str, str] = Depends(current_user),
+) -> WorkspaceUploadResponse:
+    uploaded: list[WorkspaceFileItem] = []
+    try:
+        for file in files:
+            content = await file.read()
+            uploaded.append(
+                WorkspaceFileItem(
+                    **agent_service.upload_workspace_file(
+                        user_id=user["id"],
+                        filename=file.filename or "upload",
+                        content=content,
+                        mime_type=file.content_type or "",
+                        thread_id=thread_id,
+                        project_id=project_id,
+                    )
+                )
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return WorkspaceUploadResponse(files=uploaded)
+
+
+@router.get("/workspace/files/{relative_path:path}/preview")
+def preview_workspace_file(
+    relative_path: str,
+    user: dict[str, str] = Depends(current_user),
+) -> FileResponse:
+    try:
+        path = agent_service.workspace_file_path(user["id"], relative_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path)
+
+
+@router.delete("/workspace/files/{relative_path:path}", response_model=WorkspaceDeleteResponse)
+def delete_workspace_file(
+    relative_path: str,
+    user: dict[str, str] = Depends(current_user),
+) -> WorkspaceDeleteResponse:
+    try:
+        deleted = agent_service.delete_workspace_file(user["id"], relative_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return WorkspaceDeleteResponse(deleted=WorkspaceFileItem(**deleted))

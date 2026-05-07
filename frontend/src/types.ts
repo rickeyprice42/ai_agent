@@ -89,6 +89,10 @@ export type WorkspaceFileItem = {
   extension: string;
   size_bytes: number;
   modified_at: string;
+  uploaded: boolean;
+  mime_type: string;
+  project_id?: string | null;
+  thread_id?: string | null;
 };
 
 export type MemoryCounts = {

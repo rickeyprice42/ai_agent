@@ -4,7 +4,9 @@ from dataclasses import replace
 from pathlib import Path
 from urllib import error, request
 import json
+import re
 import sys
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -37,6 +39,10 @@ AVAILABLE_MODELS = [
         "models": [],
     },
 ]
+
+ALLOWED_UPLOAD_EXTENSIONS = {".txt", ".md", ".docx", ".png", ".jpg", ".jpeg", ".gif", ".webp"}
+IMAGE_UPLOAD_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024
 
 
 class AgentService:
@@ -175,6 +181,58 @@ class AgentService:
 
     def open_workspace_folder(self, user_id: str) -> str:
         return self.agent_for_user(user_id).files.open_folder()
+
+    def upload_workspace_file(
+        self,
+        user_id: str,
+        filename: str,
+        content: bytes,
+        mime_type: str,
+        thread_id: str | None = None,
+        project_id: str | None = None,
+    ) -> dict:
+        self.resolve_thread(user_id, thread_id)
+        if project_id and self.database.get_project(user_id, project_id) is None:
+            raise ValueError("Проект не найден.")
+        safe_name = _safe_upload_filename(filename)
+        extension = Path(safe_name).suffix.lower()
+        if extension not in ALLOWED_UPLOAD_EXTENSIONS:
+            allowed = ", ".join(sorted(ALLOWED_UPLOAD_EXTENSIONS))
+            raise ValueError(f"Тип файла не поддерживается. Разрешены: {allowed}.")
+        if len(content) > MAX_UPLOAD_SIZE_BYTES:
+            raise ValueError("Файл слишком большой. Лимит: 10 MB.")
+
+        relative_path = f"uploads/{user_id}/{uuid4().hex}-{safe_name}"
+        file_info = self.agent_for_user(user_id, thread_id).files.save_binary_file(
+            relative_path,
+            content,
+            max_size_bytes=MAX_UPLOAD_SIZE_BYTES,
+        )
+        metadata = self.database.upsert_uploaded_file(
+            user_id=user_id,
+            path=file_info.path,
+            original_name=filename,
+            mime_type=mime_type,
+            size_bytes=file_info.size_bytes,
+            project_id=project_id,
+            thread_id=thread_id,
+        )
+        return _workspace_file_to_payload(file_info, metadata)
+
+    def delete_workspace_file(self, user_id: str, relative_path: str) -> dict:
+        metadata = self.database.get_uploaded_file(user_id, relative_path)
+        file_info = self.agent_for_user(user_id).files.delete_file(relative_path)
+        self.database.delete_uploaded_file(user_id, file_info.path)
+        return _workspace_file_to_payload(file_info, metadata)
+
+    def workspace_file_path(self, user_id: str, relative_path: str) -> Path:
+        metadata = self.database.get_uploaded_file(user_id, relative_path)
+        if metadata is None:
+            raise ValueError("Файл не найден среди загруженных файлов пользователя.")
+        extension = Path(relative_path).suffix.lower()
+        if extension not in IMAGE_UPLOAD_EXTENSIONS:
+            raise ValueError("Предпросмотр доступен только для изображений.")
+        return self.agent_for_user(user_id).files.absolute_file_path(relative_path)
 
     def list_chat_threads(
         self,
@@ -344,13 +402,24 @@ class AgentService:
             "active_project": active_project,
             "tasks": [_task_to_payload(task) for task in agent.tasks.list_tasks()],
             "action_logs": [_action_log_to_payload(log) for log in agent.action_log.recent(limit=20)],
-            "workspace_files": [_workspace_file_to_payload(file) for file in agent.files.list_files(limit=20)],
+            "workspace_files": self.workspace_files(user_id, limit=20),
             "user": user,
         }
 
     def _drop_user_agents(self, user_id: str) -> None:
         for key in [key for key in self._agents if key[0] == user_id]:
             self._agents.pop(key, None)
+
+    def workspace_files(self, user_id: str, limit: int = 20) -> list[dict]:
+        agent = self.agent_for_user(user_id)
+        uploaded_by_path = {
+            item["path"]: item
+            for item in self.database.list_uploaded_files(user_id)
+        }
+        files = []
+        for file in agent.files.list_files(limit=limit):
+            files.append(_workspace_file_to_payload(file, uploaded_by_path.get(file.path)))
+        return files
 
 
 agent_service = AgentService()
@@ -390,11 +459,23 @@ def _action_log_to_payload(log) -> dict:
     }
 
 
-def _workspace_file_to_payload(file) -> dict:
+def _workspace_file_to_payload(file, metadata: dict | None = None) -> dict:
     return {
         "path": file.path,
-        "name": file.name,
+        "name": metadata["original_name"] if metadata else file.name,
         "extension": file.extension,
         "size_bytes": file.size_bytes,
         "modified_at": file.modified_at,
+        "uploaded": metadata is not None,
+        "mime_type": metadata["mime_type"] if metadata else "",
+        "project_id": metadata["project_id"] if metadata else None,
+        "thread_id": metadata["thread_id"] if metadata else None,
     }
+
+
+def _safe_upload_filename(filename: str) -> str:
+    name = Path(filename or "upload").name.strip()
+    stem = Path(name).stem.strip() or "upload"
+    extension = Path(name).suffix.lower()
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip(".-") or "upload"
+    return f"{safe_stem[:80]}{extension}"

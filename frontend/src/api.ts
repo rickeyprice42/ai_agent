@@ -6,7 +6,8 @@ import type {
   ModelProviderOption,
   ModelSettings,
   ProjectItem,
-  UserProfile
+  UserProfile,
+  WorkspaceFileItem
 } from "./types";
 
 function authHeaders(token: string): HeadersInit {
@@ -321,6 +322,53 @@ export async function openWorkspaceFolder(token: string): Promise<{ result: stri
     throw await parseError(response, "Не удалось открыть рабочую папку.");
   }
   return response.json();
+}
+
+export async function uploadWorkspaceFiles(
+  token: string,
+  files: FileList | File[],
+  threadId?: string | null,
+  projectId?: string | null
+): Promise<{ files: WorkspaceFileItem[] }> {
+  const data = new FormData();
+  Array.from(files).forEach((file) => data.append("files", file));
+  const params = new URLSearchParams();
+  if (threadId) params.set("thread_id", threadId);
+  if (projectId) params.set("project_id", projectId);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`/api/workspace/files${query}`, {
+    method: "POST",
+    headers: authHeaders(token),
+    body: data
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось загрузить файлы.");
+  }
+  return response.json();
+}
+
+export async function deleteWorkspaceFile(
+  token: string,
+  path: string
+): Promise<{ deleted: WorkspaceFileItem }> {
+  const response = await fetch(`/api/workspace/files/${encodeURIComponent(path)}`, {
+    method: "DELETE",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось удалить файл.");
+  }
+  return response.json();
+}
+
+export async function fetchWorkspaceFilePreview(token: string, path: string): Promise<Blob> {
+  const response = await fetch(`/api/workspace/files/${encodeURIComponent(path)}/preview`, {
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось загрузить предпросмотр.");
+  }
+  return response.blob();
 }
 
 export async function login(loginValue: string, password: string): Promise<AuthPayload> {

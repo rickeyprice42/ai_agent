@@ -224,6 +224,18 @@ class WorkspaceFileItem(BaseModel):
     extension: str
     size_bytes: int
     modified_at: str
+    uploaded: bool = False
+    mime_type: str = ""
+    project_id: str | None = None
+    thread_id: str | None = None
+
+
+class WorkspaceUploadResponse(BaseModel):
+    files: list[WorkspaceFileItem]
+
+
+class WorkspaceDeleteResponse(BaseModel):
+    deleted: WorkspaceFileItem
 
 
 class BootstrapResponse(BaseModel):

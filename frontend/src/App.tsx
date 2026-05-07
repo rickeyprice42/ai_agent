@@ -9,6 +9,7 @@ import {
   createProject,
   createChatThread,
   deleteMemoryNote,
+  deleteWorkspaceFile,
   deleteProject,
   deleteChatThread,
   executeNextStep,
@@ -17,6 +18,7 @@ import {
   fetchMe,
   fetchMemoryOverview,
   fetchModelProviders,
+  fetchWorkspaceFilePreview,
   login as authLogin,
   logout as authLogout,
   openWorkspaceFolder,
@@ -25,6 +27,7 @@ import {
   restoreProject,
   sendMessage,
   unarchiveChatThread,
+  uploadWorkspaceFiles,
   updateChatMemory,
   updateProject,
   updateChatThread,
@@ -125,6 +128,10 @@ function formatFileTime(value: string): string {
   });
 }
 
+function isImageFile(extension: string): boolean {
+  return [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(extension.toLowerCase());
+}
+
 function TypewriterText({ text }: { text: string }) {
   const [visibleText, setVisibleText] = useState(text);
 
@@ -181,6 +188,9 @@ export default function App() {
   const [isExecutingStep, setIsExecutingStep] = useState(false);
   const [approvingStepId, setApprovingStepId] = useState<string | null>(null);
   const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false);
+  const [isUploadingFiles, setIsUploadingFiles] = useState(false);
+  const [deletingWorkspacePath, setDeletingWorkspacePath] = useState<string | null>(null);
+  const [filePreviews, setFilePreviews] = useState<Record<string, string>>({});
   const [isClearingMemory, setIsClearingMemory] = useState(false);
   const [isExportingMemory, setIsExportingMemory] = useState(false);
   const [deletingNoteId, setDeletingNoteId] = useState<string | null>(null);
@@ -208,6 +218,7 @@ export default function App() {
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const messageCountLabel = useMemo(() => {
     if (isLoading) return "Загрузка истории...";
@@ -233,6 +244,48 @@ export default function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, isSending, animatedMessageKey]);
+
+  useEffect(() => {
+    if (!authToken) {
+      setFilePreviews({});
+      return;
+    }
+
+    const imageFiles = bootstrap.workspace_files.filter((file) => isImageFile(file.extension) && file.uploaded);
+    const objectUrls: string[] = [];
+    let cancelled = false;
+
+    async function loadPreviews() {
+      const entries = await Promise.all(
+        imageFiles.slice(0, 8).map(async (file) => {
+          try {
+            const blob = await fetchWorkspaceFilePreview(authToken, file.path);
+            const url = window.URL.createObjectURL(blob);
+            objectUrls.push(url);
+            return [file.path, url] as const;
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      if (cancelled) {
+        objectUrls.forEach((url) => window.URL.revokeObjectURL(url));
+        return;
+      }
+
+      setFilePreviews(
+        Object.fromEntries(entries.filter((entry): entry is readonly [string, string] => entry !== null))
+      );
+    }
+
+    void loadPreviews();
+
+    return () => {
+      cancelled = true;
+      objectUrls.forEach((url) => window.URL.revokeObjectURL(url));
+    };
+  }, [authToken, bootstrap.workspace_files]);
 
   useEffect(() => {
     if (!authToken) {
@@ -681,6 +734,40 @@ export default function App() {
       setError(err instanceof Error ? err.message : "Не удалось открыть рабочую папку.");
     } finally {
       setIsOpeningWorkspace(false);
+    }
+  }
+
+  async function handleUploadFiles(files: FileList | null) {
+    if (!authToken || !files?.length || isUploadingFiles) return;
+    setIsUploadingFiles(true);
+    setError(null);
+
+    try {
+      await uploadWorkspaceFiles(authToken, files, activeThreadId || null, activeProjectId || null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось загрузить файлы.");
+    } finally {
+      setIsUploadingFiles(false);
+    }
+  }
+
+  async function handleDeleteWorkspaceFile(path: string, name: string) {
+    if (!authToken || deletingWorkspacePath) return;
+    if (!window.confirm(`Удалить файл "${name}" из рабочей папки агента?`)) return;
+    setDeletingWorkspacePath(path);
+    setError(null);
+
+    try {
+      await deleteWorkspaceFile(authToken, path);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось удалить файл.");
+    } finally {
+      setDeletingWorkspacePath(null);
     }
   }
 
@@ -1273,23 +1360,62 @@ export default function App() {
               <p className="eyebrow">Files</p>
               <h3>Файлы агента</h3>
             </div>
-            <button className="ghost-button" disabled={isOpeningWorkspace} onClick={() => void handleOpenWorkspaceFolder()} type="button">
-              {isOpeningWorkspace ? "Открываю..." : "Открыть"}
-            </button>
+            <div className="file-panel-actions">
+              <input
+                ref={fileInputRef}
+                accept=".txt,.md,.docx,.png,.jpg,.jpeg,.gif,.webp"
+                multiple
+                onChange={(event) => void handleUploadFiles(event.currentTarget.files)}
+                type="file"
+              />
+              <button
+                className="ghost-button"
+                disabled={isUploadingFiles}
+                onClick={() => fileInputRef.current?.click()}
+                type="button"
+              >
+                {isUploadingFiles ? "Загружаю..." : "Загрузить"}
+              </button>
+              <button className="ghost-button" disabled={isOpeningWorkspace} onClick={() => void handleOpenWorkspaceFolder()} type="button">
+                {isOpeningWorkspace ? "Открываю..." : "Открыть"}
+              </button>
+            </div>
           </div>
+          <p className="muted file-hint">
+            Поддерживаются .txt, .md, .docx и изображения до 10 MB. Загруженные файлы привязываются к текущему чату и выбранному проекту.
+          </p>
           <div className="workspace-file-list">
             {bootstrap.workspace_files.length === 0 ? (
               <p className="muted">Рабочая папка пока пуста.</p>
             ) : (
               bootstrap.workspace_files.slice(0, 6).map((file) => (
                 <article className="workspace-file" key={file.path}>
-                  <div>
-                    <strong>{file.name}</strong>
-                    <span>{file.path}</span>
+                  {filePreviews[file.path] ? (
+                    <img className="workspace-file-preview" src={filePreviews[file.path]} alt="" />
+                  ) : null}
+                  <div className="workspace-file-body">
+                    <div>
+                      <strong>{file.name}</strong>
+                      <span>{file.path}</span>
+                    </div>
+                    <p>
+                      {formatFileSize(file.size_bytes)} · {formatFileTime(file.modified_at)}
+                      {file.uploaded ? " · загружен" : ""}
+                    </p>
+                    <div className="workspace-file-meta">
+                      {file.thread_id ? <span>чат</span> : null}
+                      {file.project_id ? <span>проект</span> : null}
+                      {file.mime_type ? <span>{file.mime_type}</span> : null}
+                    </div>
                   </div>
-                  <p>
-                    {formatFileSize(file.size_bytes)} · {formatFileTime(file.modified_at)}
-                  </p>
+                  <button
+                    className="mini-button mini-button-danger"
+                    disabled={deletingWorkspacePath === file.path}
+                    onClick={() => void handleDeleteWorkspaceFile(file.path, file.name)}
+                    type="button"
+                  >
+                    {deletingWorkspacePath === file.path ? "Удаляю..." : "Удалить"}
+                  </button>
                 </article>
               ))
             )}

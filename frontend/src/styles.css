@@ -613,6 +613,23 @@ button {
   gap: 0.7rem;
 }
 
+.file-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.file-panel-actions input {
+  display: none;
+}
+
+.file-hint {
+  margin: -0.25rem 0 0.8rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .task-item,
 .action-log-item,
 .workspace-file {
@@ -638,12 +655,16 @@ button {
 
 .workspace-file {
   display: grid;
-  gap: 0.35rem;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: start;
 }
 
-.workspace-file div {
+.workspace-file-body,
+.workspace-file-body div {
   display: grid;
   gap: 0.2rem;
+  min-width: 0;
 }
 
 .workspace-file span,
@@ -653,6 +674,30 @@ button {
   font-size: 0.78rem;
   line-height: 1.4;
   overflow-wrap: anywhere;
+}
+
+.workspace-file-preview {
+  width: 54px;
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--surface);
+}
+
+.workspace-file-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.workspace-file-meta span {
+  padding: 0.18rem 0.38rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 0.68rem;
+  font-weight: 800;
 }
 
 .task-steps {

@@ -63,6 +63,62 @@ class FileSandbox:
             f"Записано символов: {len(content)}"
         )
 
+    def save_binary_file(
+        self,
+        relative_path: str,
+        content: bytes,
+        max_size_bytes: int,
+        overwrite: bool = False,
+    ) -> WorkspaceFile:
+        target = self._resolve_safe_path(relative_path)
+        if target.exists() and not target.is_file():
+            raise ValueError(f"Путь существует, но не является файлом: {relative_path}")
+        if target.exists() and not overwrite:
+            raise ValueError("Файл уже существует.")
+        if len(content) > max_size_bytes:
+            raise ValueError(
+                f"Файл слишком большой: {_format_size(len(content))}. "
+                f"Лимит: {_format_size(max_size_bytes)}."
+            )
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return self.file_info(self._relative_display_path(target))
+
+    def delete_file(self, relative_path: str) -> WorkspaceFile:
+        target = self._resolve_safe_path(relative_path)
+        if not target.exists():
+            raise ValueError(f"Файл не найден в рабочей папке: {relative_path}")
+        if not target.is_file():
+            raise ValueError(f"Путь не является файлом: {relative_path}")
+
+        info = self.file_info(self._relative_display_path(target))
+        target.unlink()
+        return info
+
+    def absolute_file_path(self, relative_path: str) -> Path:
+        target = self._resolve_safe_path(relative_path)
+        if not target.exists():
+            raise ValueError(f"Файл не найден в рабочей папке: {relative_path}")
+        if not target.is_file():
+            raise ValueError(f"Путь не является файлом: {relative_path}")
+        return target
+
+    def file_info(self, relative_path: str) -> WorkspaceFile:
+        target = self._resolve_safe_path(relative_path)
+        if not target.exists():
+            raise ValueError(f"Файл не найден в рабочей папке: {relative_path}")
+        if not target.is_file():
+            raise ValueError(f"Путь не является файлом: {relative_path}")
+        stat = target.stat()
+        return WorkspaceFile(
+            path=self._relative_display_path(target),
+            name=target.name,
+            extension=target.suffix.lower(),
+            size_bytes=int(stat.st_size),
+            modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+        )
+
     def list_files(self, limit: int = 30) -> list[WorkspaceFile]:
         safe_limit = max(1, min(int(limit), 100))
         items = [

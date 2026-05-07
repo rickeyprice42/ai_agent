@@ -104,6 +104,9 @@ class AvelinDatabase:
             CREATE INDEX IF NOT EXISTS idx_chat_threads_status ON chat_threads(status, archived_at, deleted_at);
             CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
             CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+            CREATE INDEX IF NOT EXISTS idx_uploaded_files_user_id ON uploaded_files(user_id);
+            CREATE INDEX IF NOT EXISTS idx_uploaded_files_project_id ON uploaded_files(project_id);
+            CREATE INDEX IF NOT EXISTS idx_uploaded_files_thread_id ON uploaded_files(thread_id);
             """
         )
 
@@ -1453,6 +1456,83 @@ class AvelinDatabase:
             )
         return self.get_model_settings(user_id)
 
+    def upsert_uploaded_file(
+        self,
+        user_id: str,
+        path: str,
+        original_name: str,
+        mime_type: str,
+        size_bytes: int,
+        project_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> dict:
+        self.ensure_user_defaults(user_id)
+        if project_id and self.get_project(user_id, project_id) is None:
+            raise ValueError("Проект не найден.")
+        if thread_id and self.get_chat_thread(user_id, thread_id) is None:
+            raise ValueError("Чат не найден.")
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO uploaded_files (
+                    id, user_id, path, original_name, mime_type, size_bytes, project_id, thread_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, path) DO UPDATE SET
+                    original_name = excluded.original_name,
+                    mime_type = excluded.mime_type,
+                    size_bytes = excluded.size_bytes,
+                    project_id = excluded.project_id,
+                    thread_id = excluded.thread_id,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (str(uuid4()), user_id, path, original_name, mime_type, size_bytes, project_id, thread_id),
+            )
+        return self.get_uploaded_file(user_id, path) or {
+            "path": path,
+            "original_name": original_name,
+            "mime_type": mime_type,
+            "size_bytes": size_bytes,
+            "project_id": project_id,
+            "thread_id": thread_id,
+        }
+
+    def get_uploaded_file(self, user_id: str, path: str) -> dict | None:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, user_id, path, original_name, mime_type, size_bytes, project_id, thread_id, created_at, updated_at
+                FROM uploaded_files
+                WHERE user_id = ? AND path = ?
+                """,
+                (user_id, path),
+            ).fetchone()
+        return _uploaded_file_payload(row) if row else None
+
+    def list_uploaded_files(self, user_id: str) -> list[dict]:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, user_id, path, original_name, mime_type, size_bytes, project_id, thread_id, created_at, updated_at
+                FROM uploaded_files
+                WHERE user_id = ?
+                ORDER BY updated_at DESC, created_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        return [_uploaded_file_payload(row) for row in rows]
+
+    def delete_uploaded_file(self, user_id: str, path: str) -> int:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM uploaded_files WHERE user_id = ? AND path = ?",
+                (user_id, path),
+            )
+        return int(cursor.rowcount)
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -1579,6 +1659,20 @@ CREATE TABLE IF NOT EXISTS model_settings (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS uploaded_files (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    mime_type TEXT NOT NULL DEFAULT '',
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    project_id TEXT,
+    thread_id TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, path)
+);
+
 CREATE TABLE IF NOT EXISTS app_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -1595,6 +1689,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_index_source ON memory_index(source_type, 
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_task_steps_task_id ON task_steps(task_id);
 CREATE INDEX IF NOT EXISTS idx_action_logs_user_id ON action_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_uploaded_files_user_id ON uploaded_files(user_id);
+CREATE INDEX IF NOT EXISTS idx_uploaded_files_project_id ON uploaded_files(project_id);
+CREATE INDEX IF NOT EXISTS idx_uploaded_files_thread_id ON uploaded_files(thread_id);
 """
 
 
@@ -1616,3 +1713,18 @@ def _note_scope_from_row(row: sqlite3.Row) -> str:
 
 def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict]:
     return [dict(row) for row in rows]
+
+
+def _uploaded_file_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "path": str(row["path"]),
+        "original_name": str(row["original_name"]),
+        "mime_type": str(row["mime_type"] or ""),
+        "size_bytes": int(row["size_bytes"] or 0),
+        "project_id": row["project_id"],
+        "thread_id": row["thread_id"],
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }

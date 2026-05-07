@@ -62,3 +62,7 @@ class WorkspaceFile:
     extension: str
     size_bytes: int
     modified_at: str
+    uploaded: bool = False
+    mime_type: str = ""
+    project_id: str | None = None
+    thread_id: str | None = None
