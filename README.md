@@ -127,3 +127,12 @@ npm run build
 ## Roadmap
 
 Основной план работ лежит в [docs/roadmap.txt](docs/roadmap.txt).
+
+## GitHub-стратегия
+
+Avelin развивается в двух независимых линиях:
+
+- `app` - desktop-приложение агента: React/Vite UI, FastAPI backend, `src/ai_agent/`, Tauri-интеграция, локальные данные, инструменты и релизы приложения.
+- `website` - публичный сайт: landing, новости, страницы загрузки, публичные release notes и hosting-specific код.
+
+PR для приложения открываются в `app`, PR для сайта - в `website`. Общие бренд-материалы и документация синхронизируются осознанно небольшими изменениями. Подробные правила лежат в [docs/github-strategy.md](docs/github-strategy.md).
