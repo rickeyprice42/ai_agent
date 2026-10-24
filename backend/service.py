@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ai_agent.agent import Agent
+from ai_agent.chat_output import history_for_ui
 from ai_agent.config import Settings
 from ai_agent.database import AvelinDatabase
 
@@ -23,18 +24,21 @@ AVAILABLE_MODELS = [
         "label": "Mock",
         "description": "Локальный безопасный режим без внешней модели.",
         "models": ["mock-local"],
+        "capabilities": ["streaming", "tool_calling", "structured_output", "cancellation"],
     },
     {
         "provider": "ollama",
         "label": "Ollama",
         "description": "Локальная LLM через Ollama API.",
         "models": [],
+        "capabilities": ["streaming", "tool_calling", "structured_output", "cancellation"],
     },
     {
         "provider": "ollama_cloud",
         "label": "Ollama Cloud",
         "description": "Облачная модель через прямой Ollama API и OLLAMA_API_KEY.",
         "models": [],
+        "capabilities": ["streaming", "tool_calling", "structured_output", "cancellation"],
     },
 ]
 
@@ -43,7 +47,11 @@ class AgentService:
     def __init__(self) -> None:
         self.root_dir = ROOT
         self.settings = Settings.load(self.root_dir)
-        self.database = AvelinDatabase(self.settings.database_file)
+        self.database = AvelinDatabase(
+            self.settings.database_file,
+            default_model_provider=self.settings.model_provider,
+            default_model_name=self.settings.model_name,
+        )
         self._agents: dict[tuple[str, str], Agent] = {}
 
     def agent_for_user(self, user_id: str, thread_id: str | None = None) -> Agent:
@@ -167,6 +175,10 @@ class AgentService:
         reply = self.agent_for_user(user_id, thread["id"]).respond(message)
         return {"reply": reply, "thread_id": thread["id"]}
 
+    def chat_stream(self, message: str, user_id: str, thread_id: str | None = None):
+        thread = self.resolve_thread(user_id, thread_id)
+        return thread["id"], self.agent_for_user(user_id, thread["id"]).respond_stream(message)
+
     def execute_next_step(self, user_id: str) -> str:
         return self.agent_for_user(user_id).executor.execute_next_step()
 
@@ -175,6 +187,9 @@ class AgentService:
 
     def open_workspace_folder(self, user_id: str) -> str:
         return self.agent_for_user(user_id).files.open_folder()
+
+    def workspace_file_path(self, user_id: str, relative_path: str) -> Path:
+        return self.agent_for_user(user_id).files.resolve_download_path(relative_path)
 
     def list_chat_threads(
         self,
@@ -333,7 +348,7 @@ class AgentService:
             "provider": model_settings["provider"],
             "model": model_settings["model_name"],
             "notes": memory.notes,
-            "history": memory.history,
+            "history": history_for_ui(memory.history, agent.files),
             "active_thread": active_thread,
             "chat_threads": self.database.list_chat_threads(user_id, status="active"),
             "archived_chat_threads": self.database.list_chat_threads(user_id, status="archived"),

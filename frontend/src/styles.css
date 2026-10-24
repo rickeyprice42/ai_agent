@@ -911,11 +911,142 @@ button {
   animation: rise 180ms ease;
 }
 
-.message p {
+.message-content > p,
+.message-content li {
   margin: 0.25rem 0 0;
   line-height: 1.55;
   overflow-wrap: anywhere;
+}
+
+.message-user .message-content,
+.message-tool .message-content {
+  margin-top: 0.25rem;
+  line-height: 1.55;
   white-space: pre-wrap;
+}
+
+.message-content > :first-child {
+  margin-top: 0.25rem;
+}
+
+.message-content > :last-child {
+  margin-bottom: 0;
+}
+
+.message-content pre {
+  overflow-x: auto;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-strong);
+}
+
+.message-content code {
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.message-content :not(pre) > code {
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  background: var(--surface-strong);
+}
+
+.message-content table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.message-content th,
+.message-content td {
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--line);
+  text-align: left;
+}
+
+.message-content a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.message-failed,
+.message-cancelled {
+  border-style: dashed;
+}
+
+.message-error {
+  margin-top: 0.65rem !important;
+  color: var(--danger);
+  font-size: 0.82rem;
+}
+
+.message-artifacts {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.85rem;
+}
+
+.artifact-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  width: min(100%, 560px);
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface-strong);
+  text-align: left;
+  cursor: pointer;
+}
+
+.artifact-card:hover {
+  border-color: var(--line-strong);
+  transform: translateY(-1px);
+}
+
+.artifact-card:disabled {
+  cursor: wait;
+  opacity: 0.65;
+  transform: none;
+}
+
+.artifact-icon {
+  display: grid;
+  place-items: center;
+  width: 2.8rem;
+  height: 2.8rem;
+  border-radius: 7px;
+  color: var(--inverse);
+  background: var(--text);
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+
+.artifact-copy {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.artifact-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-copy small {
+  color: var(--muted);
+}
+
+.artifact-action {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .message-user {
@@ -1049,6 +1180,12 @@ button {
   color: var(--text);
   background: var(--surface-strong);
   border: 1px solid var(--line);
+}
+
+.composer button.stop-button {
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--line));
+  background: var(--surface-strong);
 }
 
 .composer button:disabled,

@@ -2,10 +2,29 @@ from __future__ import annotations
 
 import re
 
-from ai_agent.types import Message, ModelResponse, ToolCall
+from ai_agent.llm.base import ProviderCapabilities, ProviderDescriptor
+from ai_agent.types import Message, ModelResponse, ModelStreamChunk, ToolCall
 
 
 class MockProvider:
+    def __init__(self, model: str = "mock-local") -> None:
+        self.model = model
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return ProviderDescriptor(
+            name="mock",
+            model=self.model,
+            capabilities=ProviderCapabilities(),
+        )
+
+    def stream(self, system_prompt, messages, tools):
+        response = self.generate(system_prompt, messages, tools)
+        if response.text:
+            for start in range(0, len(response.text), 24):
+                yield ModelStreamChunk(delta=response.text[start : start + 24])
+        yield ModelStreamChunk(response=response)
+
     def generate(
         self,
         system_prompt: str,

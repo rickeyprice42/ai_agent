@@ -8,7 +8,7 @@ desktop-приложение через Tauri.
 
 ```text
 AI_agent/
-├─ backend/        FastAPI API: /api/health, /api/bootstrap, /api/chat
+├─ backend/        FastAPI API: /api/health, /api/bootstrap, /api/chat/stream
 ├─ frontend/       React/Vite интерфейс
 ├─ src/ai_agent/   ядро агента, LLM-провайдеры, память и инструменты
 ├─ src-tauri/      будущий Tauri-слой, сейчас только заглушка
@@ -79,6 +79,23 @@ python -c "from fastapi.testclient import TestClient; from backend.main import a
 - `GET /api/auth/oauth/google` и `/api/auth/oauth/vk` - подготовленные OAuth-контракты.
 - `GET /api/models` - список доступных provider-ов и моделей.
 - `GET /api/model-settings` и `PUT /api/model-settings` - чтение и смена активной модели пользователя.
+- `POST /api/chat/stream` - поток NDJSON с событиями `delta`, `status`, `done` и `error`.
+
+Ответы ассистента сохраняются вместе со статусом (`pending`, `complete`, `cancelled`,
+`failed`), provider-ом и моделью. Ошибки Ollama не записываются как обычные ответы и
+не раскрывают тело ответа upstream-сервера.
+
+## Ollama Cloud
+
+Для облачного запуска положи тестовый ключ в игнорируемый Git-файл `API_KEY.txt`
+(одна строка с ключом) либо задай `OLLAMA_API_KEY` в `.env`. При наличии ключа по
+умолчанию используются `ollama_cloud` и `beam:cloud`. Значения можно переопределить:
+
+```dotenv
+MODEL_PROVIDER=ollama_cloud
+MODEL_NAME=beam:cloud
+OLLAMA_CLOUD_MODEL=beam:cloud
+```
 
 ## Frontend
 
@@ -95,6 +112,44 @@ Vite dev server ожидается на `http://127.0.0.1:5173`.
 ```powershell
 cd frontend
 npm run build
+```
+
+Интерфейс получает ответ потоково, поддерживает Markdown/GFM и позволяет остановить
+генерацию. Частичный ответ после остановки остаётся в истории с соответствующим статусом.
+Успешно созданные документы и другие файлы показываются под итоговым ответом Avelin
+отдельными карточками со скачиванием. Служебные сообщения файловых инструментов в чат
+не выводятся; старые записи истории с таким сообщением преобразуются при загрузке.
+Avelin также может искать публичную информацию через `web_search` и читать известные
+страницы через безопасный `http_request`. Доступ ограничен GET/HEAD, публичными адресами,
+таймаутом и лимитом ответа; локальные и приватные сети по умолчанию заблокированы.
+Поисковая выдача проходит фильтр релевантности: страницы входа, общие главные страницы,
+дубли и результаты не из запрошенного каталога не используются как источники. Если для
+исследовательского Word-файла найдено меньше двух подходящих источников, файл не создаётся.
+
+LLM-провайдеры подключаются через общий registry/runtime-контракт с описанием capabilities,
+едиными ошибками, потоковой очисткой при отмене и повтором временных ошибок до
+`LLM_MAX_RETRIES`. Локальная Ollama, Ollama Cloud и mock не требуют изменений frontend.
+
+## Локальный лаунчер
+
+Создать или обновить ярлык `Avelin Core Agent` на рабочем столе:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_launcher.ps1
+```
+
+Ярлык запускает GUI без консольных окон, проверяет backend/frontend, открывает браузер и
+останавливает поднятые им процессы при закрытии. Логи запуска находятся в
+`.local/logs/`. Диагностическая проверка без GUI:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\launch_local.py --check
+```
+
+Регрессионные тесты:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
 ## Desktop environment

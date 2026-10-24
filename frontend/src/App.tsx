@@ -1,4 +1,6 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   archiveProject,
   archiveChatThread,
@@ -11,6 +13,7 @@ import {
   deleteMemoryNote,
   deleteProject,
   deleteChatThread,
+  downloadWorkspaceFile,
   executeNextStep,
   exportAgentMemory,
   fetchBootstrap,
@@ -23,14 +26,14 @@ import {
   register as authRegister,
   rememberChat,
   restoreProject,
-  sendMessage,
+  sendMessageStream,
   unarchiveChatThread,
   updateChatMemory,
   updateProject,
   updateChatThread,
   updateModelSettings
 } from "./api";
-import type { BootstrapPayload, ChatMessage, MemoryOverview, ModelProviderOption, UserProfile } from "./types";
+import type { BootstrapPayload, ChatMessage, FileArtifact, MemoryOverview, ModelProviderOption, UserProfile } from "./types";
 
 const DRAFT_KEY = "avelin-draft";
 const THEME_KEY = "avelin-theme-mode";
@@ -184,6 +187,7 @@ export default function App() {
   const [isClearingMemory, setIsClearingMemory] = useState(false);
   const [isExportingMemory, setIsExportingMemory] = useState(false);
   const [deletingNoteId, setDeletingNoteId] = useState<string | null>(null);
+  const [downloadingArtifactPath, setDownloadingArtifactPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
   const [animatedMessageKey, setAnimatedMessageKey] = useState<string | null>(null);
@@ -208,6 +212,7 @@ export default function App() {
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const generationControllerRef = useRef<AbortController | null>(null);
 
   const messageCountLabel = useMemo(() => {
     if (isLoading) return "Загрузка истории...";
@@ -332,30 +337,71 @@ export default function App() {
       return;
     }
 
-    const optimisticMessage: ChatMessage = { role: "user", content: normalized };
-    setMessages((current) => [...current, optimisticMessage]);
+    const optimisticMessage: ChatMessage = { role: "user", content: normalized, status: "complete" };
+    const pendingMessage: ChatMessage = { role: "assistant", content: "", status: "pending" };
+    setMessages((current) => [...current, optimisticMessage, pendingMessage]);
     setInput("");
     setIsSending(true);
     setError(null);
     setAnimatedMessageKey(null);
 
+    const controller = new AbortController();
+    generationControllerRef.current = controller;
+
     try {
-      const result = await sendMessage(normalized, authToken, activeThreadId || null);
-      if (result.thread_id) {
-        setActiveThreadId(result.thread_id);
-        window.localStorage.setItem(ACTIVE_THREAD_KEY, result.thread_id);
-      }
-      await refreshBootstrap(false, true);
+      await sendMessageStream(
+        normalized,
+        authToken,
+        activeThreadId || null,
+        controller.signal,
+        (event) => {
+          if (event.thread_id) {
+            setActiveThreadId(event.thread_id);
+            window.localStorage.setItem(ACTIVE_THREAD_KEY, event.thread_id);
+          }
+          if (event.type === "delta" && event.text) {
+            setMessages((current) => {
+              const next = [...current];
+              let index = -1;
+              for (let candidate = next.length - 1; candidate >= 0; candidate -= 1) {
+                if (next[candidate].role === "assistant" && next[candidate].status === "pending") {
+                  index = candidate;
+                  break;
+                }
+              }
+              if (index >= 0) next[index] = { ...next[index], content: next[index].content + event.text };
+              return next;
+            });
+          }
+          if (event.type === "done") {
+            setMessages((current) => current.map((item) =>
+              item.role === "assistant" && item.status === "pending" ? { ...item, status: "complete" } : item
+            ));
+          }
+        }
+      );
+      await refreshBootstrap(false, false, authToken, window.localStorage.getItem(ACTIVE_THREAD_KEY));
       window.localStorage.removeItem(DRAFT_KEY);
       textareaRef.current?.focus();
     } catch (err) {
-      const fallback = err instanceof Error ? err.message : "Неизвестная ошибка.";
+      const cancelled = err instanceof DOMException && err.name === "AbortError";
+      const fallback = cancelled
+        ? "Генерация остановлена. Частичный ответ сохранён в истории."
+        : err instanceof Error ? err.message : "Неизвестная ошибка.";
       setError(fallback);
-      setMessages((current) => current.slice(0, -1));
-      setInput(normalized);
+      setMessages((current) => current.map((item) =>
+        item.role === "assistant" && item.status === "pending"
+          ? { ...item, status: cancelled ? "cancelled" : "failed", error: fallback }
+          : item
+      ));
     } finally {
+      generationControllerRef.current = null;
       setIsSending(false);
     }
+  }
+
+  function handleStopGeneration() {
+    generationControllerRef.current?.abort();
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -366,6 +412,27 @@ export default function App() {
   async function handleQuickAction(text: string) {
     setInput(text);
     textareaRef.current?.focus();
+  }
+
+  async function handleDownloadArtifact(artifact: FileArtifact) {
+    if (!authToken || downloadingArtifactPath) return;
+    setDownloadingArtifactPath(artifact.path);
+    setError(null);
+    try {
+      const blob = await downloadWorkspaceFile(artifact.path, authToken);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = artifact.name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось скачать файл.");
+    } finally {
+      setDownloadingArtifactPath(null);
+    }
   }
 
   async function handleRefresh() {
@@ -1384,29 +1451,54 @@ export default function App() {
               const messageKey = `${message.role}-${index}`;
 
               return (
-                <article className={`message message-${message.role}`} key={messageKey}>
+                <article className={`message message-${message.role} message-${message.status ?? "complete"}`} key={messageKey}>
                   <span className="message-role">{formatRoleLabel(message, bootstrap.agent_name)}</span>
-                  <p>
-                    {animatedMessageKey === messageKey ? (
+                  <div className="message-content">
+                    {message.status === "pending" && !message.content ? (
+                      <div className="typing-dots" aria-label="Avelin печатает"><span /><span /><span /></div>
+                    ) : animatedMessageKey === messageKey ? (
                       <TypewriterText text={message.content} />
+                    ) : message.role === "assistant" ? (
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />
+                        }}
+                      >
+                        {message.content}
+                      </ReactMarkdown>
                     ) : (
                       message.content
                     )}
-                  </p>
+                    {message.error ? <p className="message-error">{message.error}</p> : null}
+                    {message.artifacts?.length ? (
+                      <div className="message-artifacts" aria-label="Созданные файлы">
+                        {message.artifacts.map((artifact) => (
+                          <button
+                            className="artifact-card"
+                            disabled={downloadingArtifactPath === artifact.path}
+                            key={artifact.path}
+                            onClick={() => void handleDownloadArtifact(artifact)}
+                            type="button"
+                          >
+                            <span className="artifact-icon" aria-hidden="true">
+                              {artifact.extension.replace(".", "").slice(0, 4).toUpperCase() || "FILE"}
+                            </span>
+                            <span className="artifact-copy">
+                              <strong>{artifact.name}</strong>
+                              <small>{formatFileSize(artifact.size_bytes)}</small>
+                            </span>
+                            <span className="artifact-action">
+                              {downloadingArtifactPath === artifact.path ? "Скачивание…" : "Скачать ↓"}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
                 </article>
               );
             })}
-
-            {isSending ? (
-              <article className="message message-assistant message-pending">
-                <span className="message-role">{bootstrap.agent_name}</span>
-                <div className="typing-dots" aria-label="Avelin печатает">
-                  <span />
-                  <span />
-                  <span />
-                </div>
-              </article>
-            ) : null}
 
             <div ref={messagesEndRef} />
           </div>
@@ -1433,9 +1525,11 @@ export default function App() {
                 >
                   Очистить
                 </button>
-                <button disabled={isSending || !input.trim()} type="submit">
-                  {isSending ? "Отправка..." : "Отправить"}
-                </button>
+                {isSending ? (
+                  <button className="stop-button" onClick={handleStopGeneration} type="button">Остановить</button>
+                ) : (
+                  <button disabled={!input.trim()} type="submit">Отправить</button>
+                )}
               </div>
             </div>
           </form>

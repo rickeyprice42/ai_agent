@@ -86,6 +86,25 @@ class FileSandbox:
             )
         return files
 
+    def describe_file(self, relative_path: str) -> WorkspaceFile:
+        target = self._resolve_safe_path(relative_path)
+        if not target.exists() or not target.is_file():
+            raise ValueError(f"Файл не найден в рабочей папке: {relative_path}")
+        if _is_hidden_or_internal(target, self.workspace_dir):
+            raise ValueError("Скрытые и служебные файлы недоступны.")
+        stat = target.stat()
+        return WorkspaceFile(
+            path=self._relative_display_path(target),
+            name=target.name,
+            extension=target.suffix.lower(),
+            size_bytes=int(stat.st_size),
+            modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+        )
+
+    def resolve_download_path(self, relative_path: str) -> Path:
+        file = self.describe_file(relative_path)
+        return self._resolve_safe_path(file.path)
+
     def format_file_list(self, limit: int = 30) -> str:
         files = self.list_files(limit=limit)
         if not files:

@@ -14,8 +14,15 @@ DEFAULT_THREAD_ID = "default-thread"
 
 
 class AvelinDatabase:
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        default_model_provider: str = "mock",
+        default_model_name: str = "mock-local",
+    ) -> None:
         self.path = path
+        self.default_model_provider = default_model_provider
+        self.default_model_name = default_model_name
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize()
 
@@ -38,6 +45,7 @@ class AvelinDatabase:
             connection.executescript(SCHEMA)
             self._migrate_chat_threads(connection)
             self._migrate_project_links(connection)
+            self._migrate_messages(connection)
             self._ensure_migrated_indexes(connection)
             connection.execute(
                 """
@@ -58,8 +66,24 @@ class AvelinDatabase:
                 INSERT OR IGNORE INTO model_settings (user_id, provider, model_name)
                 VALUES (?, ?, ?)
                 """,
-                (DEFAULT_USER_ID, "mock", "mock-local"),
+                (DEFAULT_USER_ID, self.default_model_provider, self.default_model_name),
             )
+
+    def _migrate_messages(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        migrations = {
+            "status": "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'",
+            "error": "ALTER TABLE messages ADD COLUMN error TEXT",
+            "provider": "ALTER TABLE messages ADD COLUMN provider TEXT",
+            "model": "ALTER TABLE messages ADD COLUMN model TEXT",
+            "artifacts_json": "ALTER TABLE messages ADD COLUMN artifacts_json TEXT NOT NULL DEFAULT '[]'",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                connection.execute(statement)
 
     def _migrate_project_links(self, connection: sqlite3.Connection) -> None:
         table_columns = {
@@ -277,7 +301,7 @@ class AvelinDatabase:
             INSERT OR IGNORE INTO model_settings (user_id, provider, model_name)
             VALUES (?, ?, ?)
             """,
-            (user_id, "mock", "mock-local"),
+            (user_id, self.default_model_provider, self.default_model_name),
         )
 
     def list_chat_threads(
@@ -291,19 +315,26 @@ class AvelinDatabase:
         if status not in {"active", "archived", "deleted", "all"}:
             status = "active"
 
-        where = "user_id = ?"
+        where = "chat_threads.user_id = ?"
         params: list[str] = [user_id]
         if status == "active":
-            where += " AND deleted_at IS NULL AND archived_at IS NULL AND status = 'active'"
+            where += (
+                " AND chat_threads.deleted_at IS NULL"
+                " AND chat_threads.archived_at IS NULL"
+                " AND chat_threads.status = 'active'"
+            )
         elif status == "archived":
-            where += " AND deleted_at IS NULL AND (archived_at IS NOT NULL OR status = 'archived')"
+            where += (
+                " AND chat_threads.deleted_at IS NULL"
+                " AND (chat_threads.archived_at IS NOT NULL OR chat_threads.status = 'archived')"
+            )
         elif status == "deleted":
-            where += " AND deleted_at IS NOT NULL"
+            where += " AND chat_threads.deleted_at IS NOT NULL"
         if project_id:
-            where += " AND project_id = ?"
+            where += " AND chat_threads.project_id = ?"
             params.append(project_id)
         elif unassigned:
-            where += " AND project_id IS NULL"
+            where += " AND chat_threads.project_id IS NULL"
 
         with self.connect() as connection:
             rows = connection.execute(
@@ -864,7 +895,8 @@ class AvelinDatabase:
                 connection.execute(
                     """
                     SELECT messages.id, messages.thread_id, messages.role, messages.content,
-                           messages.name, messages.created_at
+                           messages.name, messages.status, messages.error, messages.provider,
+                           messages.model, messages.artifacts_json, messages.created_at
                     FROM messages
                     JOIN chat_threads ON chat_threads.id = messages.thread_id
                     WHERE chat_threads.user_id = ?
@@ -1126,14 +1158,33 @@ class AvelinDatabase:
         content: str,
         name: str | None = None,
         thread_id: str = DEFAULT_THREAD_ID,
-    ) -> None:
+        status: str = "complete",
+        error: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        artifacts: list[dict] | None = None,
+    ) -> str:
+        message_id = str(uuid4())
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO messages (id, thread_id, role, content, name)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO messages (
+                    id, thread_id, role, content, name, status, error, provider, model, artifacts_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (str(uuid4()), thread_id, role, content, name),
+                (
+                    message_id,
+                    thread_id,
+                    role,
+                    content,
+                    name,
+                    status,
+                    error,
+                    provider,
+                    model,
+                    json.dumps(artifacts or [], ensure_ascii=False),
+                ),
             )
             connection.execute(
                 """
@@ -1143,12 +1194,48 @@ class AvelinDatabase:
                 """,
                 (thread_id,),
             )
+        return message_id
+
+    def update_message(
+        self,
+        message_id: str,
+        *,
+        content: str | None = None,
+        status: str | None = None,
+        error: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        artifacts: list[dict] | None = None,
+    ) -> None:
+        assignments = []
+        values: list[str | None] = []
+        for column, value in (
+            ("content", content),
+            ("status", status),
+            ("error", error),
+            ("provider", provider),
+            ("model", model),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                values.append(value)
+        if artifacts is not None:
+            assignments.append("artifacts_json = ?")
+            values.append(json.dumps(artifacts, ensure_ascii=False))
+        if not assignments:
+            return
+        values.append(message_id)
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE messages SET {', '.join(assignments)} WHERE id = ?",
+                values,
+            )
 
     def list_messages(self, thread_id: str = DEFAULT_THREAD_ID) -> list[dict[str, str | None]]:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT role, content, name
+                SELECT role, content, name, status, error, provider, model, artifacts_json
                 FROM messages
                 WHERE thread_id = ?
                 ORDER BY created_at ASC, rowid ASC
@@ -1156,7 +1243,16 @@ class AvelinDatabase:
                 (thread_id,),
             ).fetchall()
             return [
-                {"role": str(row["role"]), "content": str(row["content"]), "name": row["name"]}
+                {
+                    "role": str(row["role"]),
+                    "content": str(row["content"]),
+                    "name": row["name"],
+                    "status": str(row["status"] or "complete"),
+                    "error": row["error"],
+                    "provider": row["provider"],
+                    "model": row["model"],
+                    "artifacts": _load_json_list(row["artifacts_json"]),
+                }
                 for row in rows
             ]
 
@@ -1514,6 +1610,11 @@ CREATE TABLE IF NOT EXISTS messages (
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     name TEXT,
+    status TEXT NOT NULL DEFAULT 'complete',
+    error TEXT,
+    provider TEXT,
+    model TEXT,
+    artifacts_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1616,3 +1717,11 @@ def _note_scope_from_row(row: sqlite3.Row) -> str:
 
 def _rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict]:
     return [dict(row) for row in rows]
+
+
+def _load_json_list(raw_value) -> list[dict]:
+    try:
+        value = json.loads(str(raw_value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []

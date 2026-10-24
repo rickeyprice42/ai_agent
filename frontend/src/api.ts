@@ -56,6 +56,64 @@ export async function sendMessage(
   return response.json();
 }
 
+export type ChatStreamEvent = {
+  type: "delta" | "status" | "done" | "error";
+  text?: string;
+  code?: string;
+  thread_id: string;
+  provider?: string;
+  model?: string;
+};
+
+export async function sendMessageStream(
+  message: string,
+  token: string,
+  threadId: string | null,
+  signal: AbortSignal,
+  onEvent: (event: ChatStreamEvent) => void
+): Promise<void> {
+  const response = await fetch("/api/chat/stream", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/x-ndjson",
+      ...authHeaders(token)
+    },
+    body: JSON.stringify({ message, thread_id: threadId }),
+    signal
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось получить ответ агента.");
+  }
+  if (!response.body) {
+    throw new Error("Браузер не получил поток ответа.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line) as ChatStreamEvent;
+      onEvent(event);
+      if (event.type === "error") {
+        throw new Error(event.text || "Провайдер прервал генерацию.");
+      }
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) {
+    const event = JSON.parse(buffer) as ChatStreamEvent;
+    onEvent(event);
+    if (event.type === "error") throw new Error(event.text || "Провайдер прервал генерацию.");
+  }
+}
+
 export async function createChatThread(
   token: string,
   title?: string,
@@ -288,6 +346,17 @@ export async function clearChatMessages(token: string, threadId: string): Promis
     throw await parseError(response, "Не удалось очистить чат.");
   }
   return response.json();
+}
+
+export async function downloadWorkspaceFile(path: string, token: string): Promise<Blob> {
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  const response = await fetch(`/api/workspace/files/${encodedPath}`, {
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось скачать файл.");
+  }
+  return response.blob();
 }
 
 export async function executeNextStep(token: string): Promise<{ result: string }> {

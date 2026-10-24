@@ -1,9 +1,21 @@
 export type ChatRole = "user" | "assistant" | "tool";
 
+export type FileArtifact = {
+  path: string;
+  name: string;
+  extension: string;
+  size_bytes: number;
+};
+
 export type ChatMessage = {
   role: ChatRole;
   content: string;
   name?: string | null;
+  status?: "pending" | "complete" | "cancelled" | "failed" | string;
+  error?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  artifacts?: FileArtifact[];
 };
 
 export type ChatThreadItem = {
@@ -134,6 +146,7 @@ export type ModelProviderOption = {
   label: string;
   description: string;
   models: string[];
+  capabilities: string[];
 };
 
 export type ModelSettings = {

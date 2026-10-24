@@ -1,8 +1,10 @@
 .env
+API_KEY.txt
 __pycache__/
 *.pyc
 .venv/
 .logs/
+.local/
 data/
 frontend/node_modules/
 frontend/dist/
@@ -12,3 +14,7 @@ frontend/vite.config.js
 src-tauri/target/
 .pytest_cache/
 docs\api_ollama.txt
+desktop.ini
+github_logo_icon_229278.ico
+/Белый угловатый логотип «A» на прозрачном фоне.png
+/Белый-угловатый-логотип-«A»-на-прозрачном-фоне.ico

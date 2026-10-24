@@ -9,6 +9,7 @@ class Message:
     role: str
     content: str
     name: str | None = None
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -21,6 +22,12 @@ class ToolCall:
 class ModelResponse:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ModelStreamChunk:
+    delta: str = ""
+    response: ModelResponse | None = None
 
 
 @dataclass(slots=True)

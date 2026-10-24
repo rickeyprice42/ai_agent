@@ -62,6 +62,7 @@ class ModelProviderOption(BaseModel):
     label: str
     description: str
     models: list[str]
+    capabilities: list[str] = Field(default_factory=list)
 
 
 class ModelSettings(BaseModel):
@@ -183,10 +184,22 @@ class ProjectActionResponse(BaseModel):
     project: ProjectItem
 
 
+class FileArtifactItem(BaseModel):
+    path: str
+    name: str
+    extension: str = ""
+    size_bytes: int = 0
+
+
 class HistoryItem(BaseModel):
     role: str
     content: str
     name: str | None = None
+    status: str = "complete"
+    error: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    artifacts: list[FileArtifactItem] = Field(default_factory=list)
 
 
 class TaskStepItem(BaseModel):

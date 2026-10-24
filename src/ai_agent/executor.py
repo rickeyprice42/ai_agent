@@ -490,7 +490,7 @@ def _should_retry_tool_failure(tool_name: str, tool_result: str, attempt: int) -
 
 def _tool_status(tool_result: str) -> str:
     http_status = re.search(r"^Status:\s*(\d{3})", tool_result, flags=re.MULTILINE)
-    if http_status and int(http_status.group(1)) >= 500:
+    if http_status and int(http_status.group(1)) >= 400:
         return "failed"
     if "требует подтверждения пользователя" in tool_result:
         return "blocked"

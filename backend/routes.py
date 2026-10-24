@@ -4,6 +4,7 @@ import json
 import sqlite3
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.auth import hash_password, hash_token, issue_session_token, verify_password
 from backend.models import (
@@ -36,6 +37,7 @@ from backend.models import (
     UserProfile,
 )
 from backend.service import agent_service
+from ai_agent.llm.base import ProviderError
 
 
 router = APIRouter(prefix="/api")
@@ -169,7 +171,39 @@ def chat(payload: ChatRequest, user: dict[str, str] = Depends(current_user)) -> 
         result = agent_service.chat(payload.message, user["id"], thread_id=payload.thread_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=exc.user_message) from exc
     return ChatResponse(**result)
+
+
+@router.post("/chat/stream")
+def chat_stream(payload: ChatRequest, user: dict[str, str] = Depends(current_user)) -> StreamingResponse:
+    try:
+        thread_id, events = agent_service.chat_stream(
+            payload.message,
+            user["id"],
+            thread_id=payload.thread_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    def ndjson_stream():
+        try:
+            for event in events:
+                yield json.dumps({**event, "thread_id": thread_id}, ensure_ascii=False) + "\n"
+        finally:
+            close = getattr(events, "close", None)
+            if close is not None:
+                close()
+
+    return StreamingResponse(
+        ndjson_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/chats", response_model=list[ChatThreadItem])
@@ -441,3 +475,15 @@ def open_workspace_folder(user: dict[str, str] = Depends(current_user)) -> OpenW
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return OpenWorkspaceResponse(result=result)
+
+
+@router.get("/workspace/files/{file_path:path}")
+def download_workspace_file(
+    file_path: str,
+    user: dict[str, str] = Depends(current_user),
+) -> FileResponse:
+    try:
+        path = agent_service.workspace_file_path(user["id"], file_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=path, filename=path.name, media_type="application/octet-stream")

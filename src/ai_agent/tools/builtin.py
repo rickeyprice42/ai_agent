@@ -329,9 +329,36 @@ def register_builtin_tools(
 
     registry.register(
         Tool(
+            name="web_search",
+            description=(
+                "Ищет актуальную публичную информацию в интернете. "
+                "Возвращает заголовки, URL и короткие фрагменты результатов без сырого HTML."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Поисковый запрос"},
+                    "limit": {"type": "integer", "description": "Количество результатов, от 1 до 10"},
+                    "country": {
+                        "type": "string",
+                        "description": "Необязательный двухбуквенный storefront, например us или ru",
+                    },
+                },
+                "required": ["query"],
+            },
+            handler=lambda args: http.search(
+                query=str(args.get("query", "")),
+                limit=int(args.get("limit", 5)),
+                country=str(args.get("country", "")).strip() or None,
+            ),
+        )
+    )
+
+    registry.register(
+        Tool(
             name="http_request",
             description=(
-                "Выполняет безопасный HTTP-запрос. Разрешены только GET и HEAD, "
+                "Читает известную публичную веб-страницу безопасным HTTP-запросом. Разрешены только GET и HEAD, "
                 "только http/https URL, с таймаутом, лимитом ответа и блокировкой локальных сетей по умолчанию."
             ),
             schema={

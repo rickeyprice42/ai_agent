@@ -109,17 +109,60 @@ class MemoryStore:
 
         return candidates[-safe_limit:]
 
-    def append_message(self, message: Message) -> None:
-        self.database.add_message(
+    def append_message(self, message: Message) -> str:
+        message_id = self.database.add_message(
             role=message.role,
             content=message.content,
             name=message.name,
             thread_id=self.thread_id,
+            artifacts=message.artifacts,
         )
         self.database.auto_title_chat_thread(self.user_id, self.thread_id)
+        return message_id
+
+    def append_assistant_state(
+        self,
+        content: str,
+        status: str,
+        error: str | None,
+        provider: str,
+        model: str,
+        artifacts: list[dict] | None = None,
+    ) -> str:
+        return self.database.add_message(
+            role="assistant",
+            content=content,
+            thread_id=self.thread_id,
+            status=status,
+            error=error,
+            provider=provider,
+            model=model,
+            artifacts=artifacts,
+        )
+
+    def update_message(
+        self,
+        message_id: str,
+        *,
+        content: str,
+        status: str,
+        error: str | None = None,
+        artifacts: list[dict] | None = None,
+    ) -> None:
+        self.database.update_message(
+            message_id,
+            content=content,
+            status=status,
+            error=error,
+            artifacts=artifacts,
+        )
 
     def recent_messages(self, limit: int = 12) -> list[Message]:
-        items = self.database.list_messages(thread_id=self.thread_id)[-limit:]
+        items = [
+            item
+            for item in self.database.list_messages(thread_id=self.thread_id)
+            if item.get("status") == "complete" and not item.get("error")
+        ][-limit:]
         return [
             Message(
                 role=str(item.get("role", "user")),
@@ -132,7 +175,11 @@ class MemoryStore:
     def messages_before_recent(self, recent_limit: int = 12, older_limit: int = 24) -> list[Message]:
         safe_recent_limit = max(0, int(recent_limit))
         safe_older_limit = max(1, int(older_limit))
-        items = self.database.list_messages(thread_id=self.thread_id)
+        items = [
+            item
+            for item in self.database.list_messages(thread_id=self.thread_id)
+            if item.get("status") == "complete" and not item.get("error")
+        ]
         if safe_recent_limit:
             items = items[:-safe_recent_limit]
         if not items:
@@ -188,6 +235,8 @@ class MemoryStore:
 
         if memory_enabled:
             for message in self.database.list_messages(self.thread_id)[-20:]:
+                if message.get("status") != "complete" or message.get("error"):
+                    continue
                 content = str(message.get("content") or "").strip()
                 if not content:
                     continue
