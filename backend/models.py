@@ -239,6 +239,36 @@ class WorkspaceFileItem(BaseModel):
     modified_at: str
 
 
+class ContextComponentTraceItem(BaseModel):
+    name: str
+    kind: str
+    priority: int
+    pinned: bool
+    available_tokens: int
+    used_tokens: int
+    source_items: int
+    included_items: int
+    truncated: bool = False
+    omitted: bool = False
+
+
+class ContextTraceResponse(BaseModel):
+    model: str
+    token_profile: str
+    context_window_tokens: int
+    output_reserve_tokens: int
+    input_budget_tokens: int
+    tool_schema_tokens: int
+    used_input_tokens: int
+    remaining_input_tokens: int
+    message_count: int
+    omitted_message_count: int
+    overflow: bool
+    fingerprint: str
+    components: list[ContextComponentTraceItem]
+    created_at: str
+
+
 class BootstrapResponse(BaseModel):
     agent_name: str
     provider: str

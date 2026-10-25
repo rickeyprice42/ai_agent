@@ -28,6 +28,8 @@ class Settings:
     ollama_cloud_model: str
     llm_timeout_seconds: int
     llm_max_retries: int
+    context_window_tokens: int
+    context_output_reserve_tokens: int
     database_file: Path
     memory_file: Path
     tool_workspace_dir: Path
@@ -63,6 +65,9 @@ class Settings:
         workspace_raw = os.getenv("TOOL_WORKSPACE_DIR", "data/workspace")
         workspace_path = (root_dir / workspace_raw).resolve()
 
+        context_window_tokens = _read_int_env("CONTEXT_WINDOW_TOKENS", default=32768, minimum=4096)
+        output_reserve_tokens = _read_int_env("CONTEXT_OUTPUT_RESERVE_TOKENS", default=4096, minimum=256)
+
         return cls(
             agent_name=os.getenv("AGENT_NAME", "Avelin"),
             model_provider=model_provider,
@@ -73,6 +78,8 @@ class Settings:
             ollama_cloud_model=os.getenv("OLLAMA_CLOUD_MODEL", "beam:cloud"),
             llm_timeout_seconds=_read_int_env("LLM_TIMEOUT_SECONDS", default=120, minimum=10),
             llm_max_retries=_read_int_env("LLM_MAX_RETRIES", default=1, minimum=0),
+            context_window_tokens=context_window_tokens,
+            context_output_reserve_tokens=min(output_reserve_tokens, context_window_tokens - 1024),
             database_file=database_path,
             memory_file=memory_path,
             tool_workspace_dir=workspace_path,

@@ -22,6 +22,7 @@ from backend.models import (
     ChatRequest,
     ChatResponse,
     ChatMemoryResponse,
+    ContextTraceResponse,
     ExecuteStepResponse,
     MemoryOverviewResponse,
     ModelProviderOption,
@@ -204,6 +205,18 @@ def chat_stream(payload: ChatRequest, user: dict[str, str] = Depends(current_use
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/chats/{thread_id}/context-trace", response_model=ContextTraceResponse)
+def context_trace(
+    thread_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ContextTraceResponse:
+    try:
+        trace = agent_service.context_trace(user["id"], thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ContextTraceResponse(**trace)
 
 
 @router.get("/chats", response_model=list[ChatThreadItem])

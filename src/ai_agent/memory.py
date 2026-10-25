@@ -106,7 +106,8 @@ class MemoryStore:
         if scored:
             scored.sort(key=lambda item: item.score, reverse=True)
             return scored[:safe_limit]
-
+        if query_terms:
+            return []
         return candidates[-safe_limit:]
 
     def append_message(self, message: Message) -> str:

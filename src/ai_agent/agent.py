@@ -54,7 +54,13 @@ class Agent:
         self.planner = Planner()
         self.tasks = TaskManager(self.memory.database, user_id=user_id)
         self.action_log = ActionLogStore(self.memory.database, user_id=user_id)
-        self.context = ContextBuilder(self.memory, self.tasks, self.action_log)
+        self.context = ContextBuilder(
+            self.memory,
+            self.tasks,
+            self.action_log,
+            context_window_tokens=settings.context_window_tokens,
+            output_reserve_tokens=settings.context_output_reserve_tokens,
+        )
         self.files = FileSandbox(
             workspace_dir=settings.tool_workspace_dir,
             max_read_chars=settings.max_file_read_chars,
@@ -110,12 +116,17 @@ class Agent:
 
         completed_tools = ToolOutcome()
         for attempt in range(4):
-            context = self.context.build(self.settings.system_prompt)
             try:
+                tool_definitions = self.tools.list_for_model()
+                context = self.context.build(
+                    self.settings.system_prompt,
+                    model=self.settings.model_name,
+                    tools=tool_definitions,
+                )
                 response = self.provider.generate(
                     system_prompt=context.system_prompt,
                     messages=context.messages,
-                    tools=self.tools.list_for_model(),
+                    tools=tool_definitions,
                 )
             except ProviderError as exc:
                 if completed_tools.artifacts:
@@ -192,12 +203,17 @@ class Agent:
         completed_tools = ToolOutcome()
         try:
             for attempt in range(4):
-                context = self.context.build(self.settings.system_prompt)
+                tool_definitions = self.tools.list_for_model()
+                context = self.context.build(
+                    self.settings.system_prompt,
+                    model=self.settings.model_name,
+                    tools=tool_definitions,
+                )
                 response = None
                 for chunk in self.provider.stream(
                     system_prompt=context.system_prompt,
                     messages=context.messages,
-                    tools=self.tools.list_for_model(),
+                    tools=tool_definitions,
                 ):
                     if chunk.delta:
                         if message_id is None:

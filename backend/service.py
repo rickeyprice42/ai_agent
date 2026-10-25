@@ -179,6 +179,13 @@ class AgentService:
         thread = self.resolve_thread(user_id, thread_id)
         return thread["id"], self.agent_for_user(user_id, thread["id"]).respond_stream(message)
 
+    def context_trace(self, user_id: str, thread_id: str) -> dict:
+        thread = self.resolve_thread(user_id, thread_id)
+        trace = self.agent_for_user(user_id, thread["id"]).context.latest_trace()
+        if trace is None:
+            raise ValueError("Трассировка контекста ещё не создана для этого чата.")
+        return trace
+
     def execute_next_step(self, user_id: str) -> str:
         return self.agent_for_user(user_id).executor.execute_next_step()
 
