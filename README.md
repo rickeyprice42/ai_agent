@@ -87,6 +87,7 @@ python -c "from fastapi.testclient import TestClient; from backend.main import a
 - `POST /api/chats/{thread_id}/compactions/{id}/rollback` - исключить summary и вернуться к оригиналам.
 - `GET/POST /api/memory/records` - просмотр и сохранение персональной памяти с явным согласием.
 - `PATCH/DELETE /api/memory/records/{id}` - изменение, отзыв и удаление записи владельцем.
+- `GET /api/chats/{thread_id}/memory-retrieval-trace` - последний замер поиска памяти: кандидаты, источники, токены, latency и конфликты.
 - `GET /api/memory/export?include_sensitive=false` - экспорт; Health-данные по умолчанию исключены.
 
 Ответы ассистента сохраняются вместе со статусом (`pending`, `complete`, `cancelled`,
@@ -180,6 +181,14 @@ Context Engine создаёт детерминированный extractive-сн
 confidence, status, TTL/timestamps и provenance. Сохранение через API невозможно без
 `consent_granted=true`. Истёкшие и отозванные записи не возвращаются в активном списке.
 Все CRUD-запросы дополнительно ограничены владельцем записи.
+
+Перед сборкой prompt активные записи выбираются через SQLite FTS5 и metadata-фильтры
+scope (`global/project/chat`), затем ранжируются по лексической релевантности,
+confidence, актуальности, provenance и близости scope. В контекст попадают идентификатор
+источника и confidence; противоречащие записи помечаются как `CONFLICT`, а отсутствие
+совпадений возвращает пустой результат без догадок. Последний retrieval trace хранит
+число кандидатов и результатов, примерную стоимость в токенах и latency. Векторный поиск
+не включён: к pgvector следует переходить только после сравнения на измеримом benchmark.
 
 Чувствительные Health-записи физически хранятся в отдельной таблице и не попадают в
 обычное чтение или экспорт. Их просмотр и экспорт требуют отдельного явного действия в

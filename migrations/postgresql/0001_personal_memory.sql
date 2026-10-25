@@ -46,6 +46,8 @@ CREATE TABLE memory_provenance (
 
 CREATE INDEX idx_memory_records_user_status ON memory_records(user_id, status);
 CREATE INDEX idx_memory_records_scope ON memory_records(user_id, scope, project_id, thread_id);
+CREATE INDEX idx_memory_records_content_fts
+    ON memory_records USING gin (to_tsvector('simple', content));
 CREATE INDEX idx_health_memory_records_user_status ON health_memory_records(user_id, status);
 CREATE INDEX idx_memory_provenance_memory ON memory_provenance(user_id, memory_store, memory_id);
 

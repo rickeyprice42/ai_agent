@@ -27,6 +27,7 @@ from backend.models import (
     ContextTraceResponse,
     ExecuteStepResponse,
     MemoryOverviewResponse,
+    MemoryRetrievalTraceResponse,
     PersonalMemoryCreateRequest,
     PersonalMemoryItem,
     PersonalMemoryUpdateRequest,
@@ -434,6 +435,21 @@ def list_personal_memory(
             include_inactive=include_inactive,
         )
     ]
+
+
+@router.get(
+    "/chats/{thread_id}/memory-retrieval-trace",
+    response_model=MemoryRetrievalTraceResponse,
+)
+def memory_retrieval_trace(
+    thread_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> MemoryRetrievalTraceResponse:
+    try:
+        trace = agent_service.memory_retrieval_trace(user["id"], thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return MemoryRetrievalTraceResponse(**trace)
 
 
 @router.post("/memory/records", response_model=PersonalMemoryItem)

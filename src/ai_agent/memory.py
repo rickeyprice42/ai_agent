@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import re
+import time
 
 from ai_agent.database import AvelinDatabase
 from ai_agent.types import Message
@@ -20,7 +22,12 @@ class MemoryItem:
     kind: str
     content: str
     scope: str = "global"
-    score: int = 0
+    score: float = 0.0
+    memory_id: str | None = None
+    confidence: float = 1.0
+    updated_at: str | None = None
+    provenance: tuple[str, ...] = field(default_factory=tuple)
+    conflict_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
 class MemoryStore:
@@ -35,6 +42,7 @@ class MemoryStore:
         self.legacy_json_path = legacy_json_path
         self.user_id = user_id
         self.database.ensure_user_defaults(user_id)
+        self._last_retrieval_trace: dict = {}
         self.thread_id = thread_id or ("default-thread" if user_id == "local-user" else user_id)
         if self.database.get_chat_thread(user_id, self.thread_id) is None:
             self.thread_id = self.database.create_chat_thread(user_id)["id"]
@@ -105,24 +113,82 @@ class MemoryStore:
         return self.database.list_notes(user_id=self.user_id)
 
     def relevant_memories(self, query: str, limit: int = 8) -> list[MemoryItem]:
+        started = time.perf_counter()
         safe_limit = max(1, min(int(limit), 50))
         query_terms = _terms(query)
-        candidates = self._memory_candidates()
-        if not candidates:
-            return []
+        thread = self.current_thread()
+        project_id = str(thread["project_id"]) if thread and thread.get("project_id") else None
+        persistent = self.database.search_memory_records(
+            self.user_id,
+            terms=sorted(query_terms),
+            project_id=project_id,
+            thread_id=self.thread_id if thread and thread.get("memory_enabled", True) else None,
+            limit=max(safe_limit * 8, 40),
+        )
+        candidates: list[MemoryItem] = []
+        seen_content: set[str] = set()
+        for record in persistent:
+            provenance = tuple(
+                _format_provenance(source)
+                for source in record.get("provenance", [])
+                if source.get("source_type")
+            )
+            item = MemoryItem(
+                kind=str(record["kind"]),
+                content=str(record["content"]),
+                scope=str(record["scope"]),
+                memory_id=str(record["id"]),
+                confidence=float(record["confidence"]),
+                updated_at=str(record["updated_at"]),
+                provenance=provenance,
+            )
+            item.score = _score_memory(item, query_terms, float(record.get("fts_rank", 0.0)))
+            candidates.append(item)
+            seen_content.add(_normalized_content(item.content))
 
-        scored: list[MemoryItem] = []
-        for item in candidates:
-            score = _score_memory(item.content, query_terms)
-            if score > 0:
-                scored.append(MemoryItem(kind=item.kind, content=item.content, scope=item.scope, score=score))
+        for item in self._memory_candidates():
+            if _normalized_content(item.content) in seen_content:
+                continue
+            lexical_score = _legacy_score(item.content, query_terms)
+            if lexical_score > 0:
+                item.score = float(lexical_score)
+                candidates.append(item)
 
-        if scored:
-            scored.sort(key=lambda item: item.score, reverse=True)
-            return scored[:safe_limit]
-        if query_terms:
-            return []
-        return candidates[-safe_limit:]
+        candidates.sort(
+            key=lambda item: (item.score, item.confidence, item.updated_at or "", item.memory_id or ""),
+            reverse=True,
+        )
+        selected = candidates[:safe_limit]
+        _annotate_conflicts(selected)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        self._last_retrieval_trace = {
+            "query_term_count": len(query_terms),
+            "candidate_count": len(candidates),
+            "result_count": len(selected),
+            "estimated_tokens": sum(max(1, len(item.content.encode("utf-8")) // 4) for item in selected),
+            "latency_ms": round(elapsed_ms, 3),
+            "source_ids": [item.memory_id for item in selected if item.memory_id],
+            "conflict_count": sum(1 for item in selected if item.conflict_ids),
+        }
+        self.database.set_metadata(
+            f"memory_retrieval_trace:{self.user_id}:{self.thread_id}",
+            json.dumps(self._last_retrieval_trace, ensure_ascii=False, sort_keys=True),
+        )
+        return selected
+
+    def last_retrieval_trace(self) -> dict:
+        if self._last_retrieval_trace:
+            return dict(self._last_retrieval_trace)
+        raw = self.database.get_metadata(
+            f"memory_retrieval_trace:{self.user_id}:{self.thread_id}"
+        )
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def append_message(self, message: Message) -> str:
         message_id = self.database.add_message(
@@ -277,7 +343,7 @@ class MemoryStore:
         return candidates
 
 
-def _score_memory(content: str, query_terms: set[str]) -> int:
+def _legacy_score(content: str, query_terms: set[str]) -> int:
     if not query_terms:
         return 0
     content_terms = _terms(content)
@@ -287,7 +353,118 @@ def _score_memory(content: str, query_terms: set[str]) -> int:
 
 
 def _terms(text: str) -> set[str]:
-    return {term for term in re.findall(r"[A-Za-zА-Яа-я0-9]+", text.lower()) if len(term) >= 3}
+    stop_words = {
+        "and", "are", "for", "the", "what", "with", "как", "какие", "какой", "мои", "моя",
+        "мне", "про", "что", "это",
+    }
+    raw_terms = {
+        term.replace("ё", "е")
+        for term in re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", text.casefold())
+        if len(term) >= 3 and term not in stop_words
+    }
+    expanded = set(raw_terms)
+    aliases = {
+        "накопитель": {"ssd", "nvme", "диск", "storage"},
+        "накопителя": {"ssd", "nvme", "диск", "storage"},
+        "офис": {"office"},
+        "город": {"живет", "проживает"},
+        "городе": {"живет", "проживает"},
+    }
+    for term in raw_terms:
+        expanded.update(aliases.get(term, set()))
+    return {_term_stem(term) for term in expanded}
+
+
+def _score_memory(item: MemoryItem, query_terms: set[str], fts_rank: float) -> float:
+    content_terms = _terms(item.content)
+    overlap = len(query_terms & content_terms)
+    if overlap == 0:
+        return 0.0
+    coverage = overlap / max(len(query_terms), 1)
+    scope_bonus = {"chat": 0.35, "project": 0.2, "global": 0.1}.get(item.scope, 0.0)
+    provenance_bonus = min(len(item.provenance), 2) * 0.08
+    freshness = _freshness_score(item.updated_at)
+    fts_bonus = 1.0 / (1.0 + abs(fts_rank))
+    return round(
+        overlap * 2.0
+        + coverage
+        + item.confidence
+        + scope_bonus
+        + provenance_bonus
+        + freshness
+        + fts_bonus,
+        6,
+    )
+
+
+def _freshness_score(value: str | None) -> float:
+    if not value:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age_days = max((datetime.now(timezone.utc) - parsed).total_seconds() / 86400, 0.0)
+    return 0.5 / (1.0 + age_days / 30.0)
+
+
+def _term_stem(term: str) -> str:
+    normalized = term.casefold().replace("ё", "е")
+    if normalized.isascii():
+        for suffix in ("ing", "ed", "es", "s"):
+            if normalized.endswith(suffix) and len(normalized) - len(suffix) >= 4:
+                return normalized[: -len(suffix)]
+        return normalized
+    for suffix in (
+        "иями", "ями", "ами", "его", "ого", "ему", "ому", "аться", "яться",
+        "ается", "яется", "ать", "ять", "ить", "ают", "яют", "ает", "яет",
+        "ение", "ения", "енный", "анная", "ого", "ими", "ыми", "ую", "юю",
+        "ый", "ий", "ой", "ая", "яя", "ое", "ее", "ые", "ие", "ом", "ем",
+        "ов", "ев", "ам", "ям", "ах", "ях", "ет", "ит", "ся", "сь", "а", "я",
+        "ы", "и", "у", "ю", "е", "о",
+    ):
+        if normalized.endswith(suffix) and len(normalized) - len(suffix) >= 3:
+            return normalized[: -len(suffix)]
+    return normalized
+
+
+def _format_provenance(source: dict) -> str:
+    label = str(source.get("source_type") or "unknown")
+    reference = source.get("source_id") or source.get("source_uri")
+    return f"{label}:{reference}" if reference else label
+
+
+def _normalized_content(content: str) -> str:
+    return " ".join(content.casefold().split())
+
+
+def _conflict_key(content: str) -> frozenset[str]:
+    positive = re.sub(r"\b(?:не|нет|никогда|not|never|dislike|ненавиж\w*)\b", " ", content.casefold())
+    return frozenset(_terms(positive))
+
+
+def _is_negative(content: str) -> bool:
+    return bool(re.search(r"\b(?:не|нет|никогда|not|never|dislike|ненавиж\w*)\b", content.casefold()))
+
+
+def _annotate_conflicts(items: list[MemoryItem]) -> None:
+    conflicts: dict[int, list[str]] = {}
+    for left_index, left in enumerate(items):
+        if not left.memory_id:
+            continue
+        left_key = _conflict_key(left.content)
+        for right_index in range(left_index + 1, len(items)):
+            right = items[right_index]
+            if not right.memory_id or left.kind != right.kind:
+                continue
+            right_key = _conflict_key(right.content)
+            if left_key and left_key == right_key and _is_negative(left.content) != _is_negative(right.content):
+                conflicts.setdefault(left_index, []).append(right.memory_id)
+                conflicts.setdefault(right_index, []).append(left.memory_id)
+    for index, conflict_ids in conflicts.items():
+        items[index].conflict_ids = tuple(conflict_ids)
 
 
 def _note_scope(note: dict, current_thread_id: str) -> str:

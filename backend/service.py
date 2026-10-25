@@ -360,6 +360,9 @@ class AgentService:
             include_inactive=include_inactive,
         )
 
+    def memory_retrieval_trace(self, user_id: str, thread_id: str) -> dict:
+        return self.agent_for_user(user_id, thread_id).memory.last_retrieval_trace()
+
     def create_personal_memory(self, user_id: str, **payload) -> dict:
         record = self.database.create_memory_record(user_id, **payload)
         self._drop_user_agents(user_id)

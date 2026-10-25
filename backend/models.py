@@ -197,6 +197,16 @@ class PersonalMemoryUpdateRequest(BaseModel):
     clear_expiry: bool = False
 
 
+class MemoryRetrievalTraceResponse(BaseModel):
+    query_term_count: int = 0
+    candidate_count: int = 0
+    result_count: int = 0
+    estimated_tokens: int = 0
+    latency_ms: float = 0.0
+    source_ids: list[str] = Field(default_factory=list)
+    conflict_count: int = 0
+
+
 class ClearMemoryRequest(BaseModel):
     scope: str = Field(default="all", max_length=40)
     thread_id: str | None = Field(default=None, max_length=120)

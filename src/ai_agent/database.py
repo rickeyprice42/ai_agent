@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 import json
+import re
 import sqlite3
 
 
@@ -47,6 +48,7 @@ class AvelinDatabase:
             self._migrate_project_links(connection)
             self._migrate_messages(connection)
             self._ensure_migrated_indexes(connection)
+            self._backfill_memory_search_index(connection)
             connection.execute(
                 """
                 INSERT OR IGNORE INTO users (id, display_name)
@@ -68,6 +70,41 @@ class AvelinDatabase:
                 """,
                 (DEFAULT_USER_ID, self.default_model_provider, self.default_model_name),
             )
+
+    @staticmethod
+    def _backfill_memory_search_index(connection: sqlite3.Connection) -> None:
+        version_row = connection.execute(
+            "SELECT value FROM app_metadata WHERE key = 'memory_records_fts_version'"
+        ).fetchone()
+        if version_row is not None and str(version_row["value"]) == "1":
+            connection.execute(
+                """
+                INSERT INTO memory_records_fts (memory_id, user_id, content)
+                SELECT record.id, record.user_id,
+                       replace(replace(record.content, 'ё', 'е'), 'Ё', 'Е')
+                FROM memory_records AS record
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM memory_records_fts AS indexed
+                    WHERE indexed.memory_id = record.id
+                )
+                """
+            )
+            return
+        connection.execute("DELETE FROM memory_records_fts")
+        connection.execute(
+            """
+            INSERT INTO memory_records_fts (memory_id, user_id, content)
+            SELECT record.id, record.user_id, replace(replace(record.content, 'ё', 'е'), 'Ё', 'Е')
+            FROM memory_records AS record
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO app_metadata (key, value)
+            VALUES ('memory_records_fts_version', '1')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+            """
+        )
 
     def _migrate_messages(self, connection: sqlite3.Connection) -> None:
         columns = {
@@ -849,6 +886,58 @@ class AvelinDatabase:
                     records.append(self._memory_record_payload(connection, row, store, sensitive))
         records.sort(key=lambda item: (item["created_at"], item["id"]), reverse=True)
         return records
+
+    def search_memory_records(
+        self,
+        user_id: str,
+        *,
+        terms: list[str],
+        project_id: str | None = None,
+        thread_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Search consented non-sensitive memory with FTS and metadata scope filters."""
+        self._expire_due_memory(user_id)
+        normalized_terms = [
+            term.casefold()
+            for term in terms
+            if re.fullmatch(r"[A-Za-zА-Яа-яЁё0-9]+", term) and len(term) >= 3
+        ]
+        if not normalized_terms:
+            return []
+        safe_limit = max(1, min(int(limit), 200))
+        scope_clauses = ["record.scope = 'global'"]
+        scope_params: list[object] = []
+        if project_id:
+            scope_clauses.append("(record.scope = 'project' AND record.project_id = ?)")
+            scope_params.append(project_id)
+        if thread_id:
+            scope_clauses.append("(record.scope = 'chat' AND record.thread_id = ?)")
+            scope_params.append(thread_id)
+        fts_query = " OR ".join(f'"{_memory_search_prefix(term)}"*' for term in normalized_terms)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT record.*, bm25(memory_records_fts) AS fts_rank
+                FROM memory_records_fts
+                JOIN memory_records AS record ON record.id = memory_records_fts.memory_id
+                WHERE memory_records_fts MATCH ?
+                  AND record.user_id = ?
+                  AND record.status = 'active'
+                  AND record.consent_status = 'granted'
+                  AND ({' OR '.join(scope_clauses)})
+                ORDER BY fts_rank ASC, record.updated_at DESC
+                LIMIT ?
+                """,
+                [fts_query, user_id, *scope_params, safe_limit],
+            ).fetchall()
+            return [
+                {
+                    **self._memory_record_payload(connection, row, "personal", False),
+                    "fts_rank": float(row["fts_rank"]),
+                }
+                for row in rows
+            ]
 
     def get_memory_record(self, user_id: str, memory_id: str, *, sensitive: bool = False) -> dict | None:
         self._expire_due_memory(user_id)
@@ -2175,6 +2264,31 @@ CREATE TABLE IF NOT EXISTS memory_provenance (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_records_fts USING fts5(
+    memory_id UNINDEXED,
+    user_id UNINDEXED,
+    content,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS memory_records_fts_insert
+AFTER INSERT ON memory_records BEGIN
+    INSERT INTO memory_records_fts (memory_id, user_id, content)
+    VALUES (new.id, new.user_id, replace(replace(new.content, 'ё', 'е'), 'Ё', 'Е'));
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_records_fts_update
+AFTER UPDATE OF content, user_id ON memory_records BEGIN
+    DELETE FROM memory_records_fts WHERE memory_id = old.id;
+    INSERT INTO memory_records_fts (memory_id, user_id, content)
+    VALUES (new.id, new.user_id, replace(replace(new.content, 'ё', 'е'), 'Ё', 'Е'));
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_records_fts_delete
+AFTER DELETE ON memory_records BEGIN
+    DELETE FROM memory_records_fts WHERE memory_id = old.id;
+END;
+
 CREATE TABLE IF NOT EXISTS memory_index (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -2251,6 +2365,12 @@ CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_task_steps_task_id ON task_steps(task_id);
 CREATE INDEX IF NOT EXISTS idx_action_logs_user_id ON action_logs(user_id);
 """
+
+
+def _memory_search_prefix(term: str) -> str:
+    if len(term) <= 4:
+        return term
+    return term[:5] if term.isascii() else term[:4]
 
 
 def _title_from_message(content: str) -> str:

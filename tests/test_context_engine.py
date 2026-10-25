@@ -196,6 +196,37 @@ class ContextEngineTest(unittest.TestCase):
             )
             self.assertNotIn("яблочного пирога", context.system_prompt)
 
+    def test_personal_memory_context_contains_source_and_confidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent = Agent(isolated_settings(root))
+            record = agent.memory.database.create_memory_record(
+                agent.memory.user_id,
+                kind="preference",
+                content="Любит острый соус",
+                confidence=0.87,
+                consent_granted=True,
+                source_type="chat_message",
+                source_id="message-spicy",
+            )
+            agent.memory.append_message(
+                Message(role="user", content="Какой острый соус добавить к рецепту?")
+            )
+
+            context = agent.context.build(
+                "SYSTEM",
+                model="beam:cloud",
+                tools=agent.tools.list_for_model(),
+            )
+
+            self.assertIn("Любит острый соус", context.system_prompt)
+            self.assertIn(f"source={record['id']}", context.system_prompt)
+            self.assertIn("confidence=0.87", context.system_prompt)
+            self.assertIn("provenance=chat_message:message-spicy", context.system_prompt)
+            trace = agent.memory.last_retrieval_trace()
+            self.assertEqual(trace["source_ids"], [record["id"]])
+            self.assertGreater(trace["estimated_tokens"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -441,7 +441,25 @@ class ContextBuilder:
         memories = self.memory.relevant_memories(" ".join(query_parts), limit=self.note_limit)
         if not memories:
             return ""
-        lines = [f"- [{memory.scope}/{memory.kind}] {memory.content}" for memory in memories]
+        lines = []
+        for memory in memories:
+            source = memory.memory_id or (memory.provenance[0] if memory.provenance else "legacy")
+            provenance = (
+                f"; provenance={', '.join(memory.provenance)}"
+                if memory.provenance
+                else ""
+            )
+            conflict = (
+                f"; CONFLICT with {', '.join(memory.conflict_ids)}"
+                if memory.conflict_ids
+                else ""
+            )
+            lines.append(
+                f"- [{memory.scope}/{memory.kind}; source={source}; "
+                f"confidence={memory.confidence:.2f}; score={memory.score:.3f}"
+                f"{provenance}{conflict}] "
+                f"{memory.content}"
+            )
         return _section("Relevant long-term memory", "\n".join(lines))
 
     def _project_context(self) -> str:
