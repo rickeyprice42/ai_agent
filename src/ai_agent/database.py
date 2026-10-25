@@ -905,6 +905,17 @@ class AvelinDatabase:
                     (user_id,),
                 ).fetchall()
             )
+            context_compactions = [
+                _context_compaction_from_row(row)
+                for row in connection.execute(
+                    """
+                    SELECT * FROM context_compactions
+                    WHERE user_id = ?
+                    ORDER BY thread_id ASC, cycle_number ASC
+                    """,
+                    (user_id,),
+                ).fetchall()
+            ]
             tasks = _rows_to_dicts(
                 connection.execute(
                     """
@@ -950,6 +961,7 @@ class AvelinDatabase:
             "memory_index": memory_index,
             "chat_threads": chat_threads,
             "messages": messages,
+            "context_compactions": context_compactions,
             "tasks": tasks,
             "task_steps": task_steps,
             "action_logs": action_logs,
@@ -1231,11 +1243,12 @@ class AvelinDatabase:
                 values,
             )
 
-    def list_messages(self, thread_id: str = DEFAULT_THREAD_ID) -> list[dict[str, str | None]]:
+    def list_messages(self, thread_id: str = DEFAULT_THREAD_ID) -> list[dict]:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT role, content, name, status, error, provider, model, artifacts_json
+                SELECT id, role, content, name, status, error, provider, model,
+                       artifacts_json, created_at
                 FROM messages
                 WHERE thread_id = ?
                 ORDER BY created_at ASC, rowid ASC
@@ -1244,6 +1257,7 @@ class AvelinDatabase:
             ).fetchall()
             return [
                 {
+                    "id": str(row["id"]),
                     "role": str(row["role"]),
                     "content": str(row["content"]),
                     "name": row["name"],
@@ -1252,9 +1266,173 @@ class AvelinDatabase:
                     "provider": row["provider"],
                     "model": row["model"],
                     "artifacts": _load_json_list(row["artifacts_json"]),
+                    "created_at": str(row["created_at"]),
                 }
                 for row in rows
             ]
+
+    def create_context_compaction(
+        self,
+        user_id: str,
+        thread_id: str,
+        *,
+        summary: dict,
+        source_message_ids: list[str],
+        artifact_refs: list[str],
+        source_hash: str,
+    ) -> dict:
+        compaction_id = str(uuid4())
+        with self.connect() as connection:
+            thread = connection.execute(
+                """
+                SELECT id FROM chat_threads
+                WHERE id = ? AND user_id = ? AND deleted_at IS NULL
+                """,
+                (thread_id, user_id),
+            ).fetchone()
+            if thread is None:
+                raise ValueError("Чат не найден или удален.")
+            existing = connection.execute(
+                """
+                SELECT id FROM context_compactions
+                WHERE thread_id = ? AND source_hash = ? AND status != 'rolled_back'
+                """,
+                (thread_id, source_hash),
+            ).fetchone()
+            if existing is not None:
+                existing_id = str(existing["id"])
+            else:
+                existing_id = ""
+                cycle_number = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(cycle_number), 0) + 1 AS value FROM context_compactions WHERE thread_id = ?",
+                        (thread_id,),
+                    ).fetchone()["value"]
+                )
+                connection.execute(
+                    """
+                    INSERT INTO context_compactions (
+                        id, user_id, thread_id, cycle_number, status, summary_json,
+                        source_message_ids_json, artifact_refs_json, source_hash
+                    ) VALUES (?, ?, ?, ?, 'pending_review', ?, ?, ?, ?)
+                    """,
+                    (
+                        compaction_id,
+                        user_id,
+                        thread_id,
+                        cycle_number,
+                        json.dumps(summary, ensure_ascii=False, sort_keys=True),
+                        json.dumps(source_message_ids, ensure_ascii=False),
+                        json.dumps(artifact_refs, ensure_ascii=False),
+                        source_hash,
+                    ),
+                )
+        return self.get_context_compaction(
+            user_id,
+            thread_id,
+            existing_id or compaction_id,
+        ) or {}
+
+    def list_context_compactions(
+        self,
+        user_id: str,
+        thread_id: str,
+        *,
+        include_rolled_back: bool = True,
+    ) -> list[dict]:
+        condition = "" if include_rolled_back else "AND status != 'rolled_back'"
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM context_compactions
+                WHERE user_id = ? AND thread_id = ? {condition}
+                ORDER BY cycle_number ASC
+                """,
+                (user_id, thread_id),
+            ).fetchall()
+        return [_context_compaction_from_row(row) for row in rows]
+
+    def get_context_compaction(
+        self,
+        user_id: str,
+        thread_id: str,
+        compaction_id: str,
+    ) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM context_compactions
+                WHERE id = ? AND user_id = ? AND thread_id = ?
+                """,
+                (compaction_id, user_id, thread_id),
+            ).fetchone()
+        return _context_compaction_from_row(row) if row is not None else None
+
+    def set_context_compaction_status(
+        self,
+        user_id: str,
+        thread_id: str,
+        compaction_id: str,
+        status: str,
+    ) -> dict | None:
+        if status not in {"verified", "rolled_back"}:
+            raise ValueError("Неподдерживаемый статус compaction.")
+        timestamp_column = "verified_at" if status == "verified" else "rolled_back_at"
+        allowed_statuses = (
+            ("pending_review",)
+            if status == "verified"
+            else ("pending_review", "verified")
+        )
+        placeholders = ",".join("?" for _ in allowed_statuses)
+        with self.connect() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE context_compactions
+                SET status = ?, {timestamp_column} = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_id = ? AND thread_id = ?
+                  AND status IN ({placeholders})
+                """,
+                (status, compaction_id, user_id, thread_id, *allowed_statuses),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_context_compaction(user_id, thread_id, compaction_id)
+
+    def context_compaction_sources(
+        self,
+        user_id: str,
+        thread_id: str,
+        compaction_id: str,
+    ) -> list[dict] | None:
+        compaction = self.get_context_compaction(user_id, thread_id, compaction_id)
+        if compaction is None:
+            return None
+        source_ids = compaction["source_message_ids"]
+        if not source_ids:
+            return []
+        placeholders = ",".join("?" for _ in source_ids)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, role, content, name, artifacts_json, created_at
+                FROM messages
+                WHERE thread_id = ? AND id IN ({placeholders})
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                [thread_id, *source_ids],
+            ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "role": str(row["role"]),
+                "content": str(row["content"]),
+                "name": row["name"],
+                "artifacts": _load_json_list(row["artifacts_json"]),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
 
     def create_task(
         self,
@@ -1618,6 +1796,23 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS context_compactions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    thread_id TEXT NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+    cycle_number INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending_review',
+    summary_json TEXT NOT NULL,
+    source_message_ids_json TEXT NOT NULL,
+    artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+    source_hash TEXT NOT NULL,
+    verified_at TEXT,
+    rolled_back_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(thread_id, cycle_number)
+);
+
 CREATE TABLE IF NOT EXISTS notes (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1690,6 +1885,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_auth_accounts_user_id ON auth_accounts(user_id);
 CREATE INDEX IF NOT EXISTS idx_chat_threads_user_id ON chat_threads(user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
+CREATE INDEX IF NOT EXISTS idx_context_compactions_thread_id ON context_compactions(thread_id, cycle_number);
+CREATE INDEX IF NOT EXISTS idx_context_compactions_status ON context_compactions(thread_id, status);
 CREATE INDEX IF NOT EXISTS idx_notes_user_id ON notes(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_index_user_id ON memory_index(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_index_source ON memory_index(source_type, source_id);
@@ -1705,6 +1902,24 @@ def _title_from_message(content: str) -> str:
         return ""
     title = normalized[:48].rstrip(".,!?;:")
     return f"{title}..." if len(normalized) > len(title) else title
+
+
+def _context_compaction_from_row(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "thread_id": str(row["thread_id"]),
+        "cycle_number": int(row["cycle_number"]),
+        "status": str(row["status"]),
+        "summary": _load_json_dict(row["summary_json"]),
+        "source_message_ids": _load_json_string_list(row["source_message_ids_json"]),
+        "artifact_refs": _load_json_string_list(row["artifact_refs_json"]),
+        "source_hash": str(row["source_hash"]),
+        "verified_at": row["verified_at"],
+        "rolled_back_at": row["rolled_back_at"],
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
 
 
 def _note_scope_from_row(row: sqlite3.Row) -> str:
@@ -1725,3 +1940,19 @@ def _load_json_list(raw_value) -> list[dict]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return []
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _load_json_string_list(raw_value) -> list[str]:
+    try:
+        value = json.loads(str(raw_value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [str(item) for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+
+def _load_json_dict(raw_value) -> dict:
+    try:
+        value = json.loads(str(raw_value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}

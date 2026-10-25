@@ -2,6 +2,8 @@ import type {
   AuthPayload,
   BootstrapPayload,
   ChatThreadItem,
+  ContextCompactionItem,
+  ContextCompactionReview,
   MemoryOverview,
   ModelProviderOption,
   ModelSettings,
@@ -177,6 +179,52 @@ export async function rememberChat(token: string, threadId: string): Promise<{ r
     throw await parseError(response, "Не удалось сохранить чат в память.");
   }
   return response.json();
+}
+
+export async function fetchContextCompactions(
+  token: string,
+  threadId: string
+): Promise<ContextCompactionItem[]> {
+  const response = await fetch(`/api/chats/${encodeURIComponent(threadId)}/compactions`, {
+    headers: authHeaders(token)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось загрузить снимки контекста.");
+  return response.json();
+}
+
+export async function fetchContextCompactionReview(
+  token: string,
+  threadId: string,
+  compactionId: string
+): Promise<ContextCompactionReview> {
+  const response = await fetch(
+    `/api/chats/${encodeURIComponent(threadId)}/compactions/${encodeURIComponent(compactionId)}`,
+    { headers: authHeaders(token) }
+  );
+  if (!response.ok) throw await parseError(response, "Не удалось загрузить исходные сообщения.");
+  return response.json();
+}
+
+async function changeContextCompactionStatus(
+  token: string,
+  threadId: string,
+  compactionId: string,
+  action: "verify" | "rollback"
+): Promise<ContextCompactionItem> {
+  const response = await fetch(
+    `/api/chats/${encodeURIComponent(threadId)}/compactions/${encodeURIComponent(compactionId)}/${action}`,
+    { method: "POST", headers: authHeaders(token) }
+  );
+  if (!response.ok) throw await parseError(response, "Не удалось обновить снимок контекста.");
+  return response.json();
+}
+
+export function verifyContextCompaction(token: string, threadId: string, compactionId: string) {
+  return changeContextCompactionStatus(token, threadId, compactionId, "verify");
+}
+
+export function rollbackContextCompaction(token: string, threadId: string, compactionId: string) {
+  return changeContextCompactionStatus(token, threadId, compactionId, "rollback");
 }
 
 export async function fetchMemoryOverview(token: string): Promise<MemoryOverview> {

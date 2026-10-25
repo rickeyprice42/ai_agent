@@ -474,6 +474,115 @@ button {
   font-size: 0.78rem;
 }
 
+.compaction-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  overflow: hidden;
+}
+
+.compaction-panel > summary {
+  cursor: pointer;
+  padding: 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.compaction-list,
+.compaction-review {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0 0.75rem 0.75rem;
+}
+
+.compaction-item {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.compaction-item > div:first-child {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.compaction-item small,
+.compaction-section small,
+.compaction-source small {
+  display: block;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.compaction-status {
+  width: fit-content;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.compaction-status-verified,
+.hash-ok {
+  color: #26834a;
+}
+
+.compaction-status-pending_review {
+  color: #a36a00;
+}
+
+.compaction-status-rolled_back,
+.hash-error {
+  color: var(--danger);
+}
+
+.compaction-review {
+  border-top: 1px solid var(--line);
+  padding-top: 0.75rem;
+}
+
+.compaction-review p,
+.compaction-section ul,
+.compaction-source p {
+  margin: 0;
+}
+
+.compaction-section ul {
+  display: grid;
+  gap: 0.35rem;
+  padding-left: 1.1rem;
+}
+
+.compaction-section li {
+  overflow-wrap: anywhere;
+}
+
+.compaction-sources summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.compaction-source {
+  margin-top: 0.5rem;
+  padding: 0.55rem;
+  border-left: 2px solid var(--line);
+  background: var(--surface);
+}
+
+.compaction-source p {
+  margin-top: 0.25rem;
+  max-height: 9rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .status-pill,
 .status-box,
 .header-tag {

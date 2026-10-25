@@ -60,6 +60,8 @@ class Agent:
             self.action_log,
             context_window_tokens=settings.context_window_tokens,
             output_reserve_tokens=settings.context_output_reserve_tokens,
+            compaction_threshold=settings.context_compaction_threshold,
+            compaction_keep_recent=settings.context_compaction_keep_recent,
         )
         self.files = FileSandbox(
             workspace_dir=settings.tool_workspace_dir,

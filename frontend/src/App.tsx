@@ -17,6 +17,8 @@ import {
   executeNextStep,
   exportAgentMemory,
   fetchBootstrap,
+  fetchContextCompactionReview,
+  fetchContextCompactions,
   fetchMe,
   fetchMemoryOverview,
   fetchModelProviders,
@@ -25,15 +27,26 @@ import {
   openWorkspaceFolder,
   register as authRegister,
   rememberChat,
+  rollbackContextCompaction,
   restoreProject,
   sendMessageStream,
   unarchiveChatThread,
   updateChatMemory,
   updateProject,
   updateChatThread,
-  updateModelSettings
+  updateModelSettings,
+  verifyContextCompaction
 } from "./api";
-import type { BootstrapPayload, ChatMessage, FileArtifact, MemoryOverview, ModelProviderOption, UserProfile } from "./types";
+import type {
+  BootstrapPayload,
+  ChatMessage,
+  ContextCompactionItem,
+  ContextCompactionReview,
+  FileArtifact,
+  MemoryOverview,
+  ModelProviderOption,
+  UserProfile
+} from "./types";
 
 const DRAFT_KEY = "avelin-draft";
 const THEME_KEY = "avelin-theme-mode";
@@ -207,6 +220,9 @@ export default function App() {
   const [selectedProvider, setSelectedProvider] = useState(EMPTY_BOOTSTRAP.provider);
   const [selectedModel, setSelectedModel] = useState(EMPTY_BOOTSTRAP.model);
   const [isModelSaving, setIsModelSaving] = useState(false);
+  const [compactions, setCompactions] = useState<ContextCompactionItem[]>([]);
+  const [compactionReview, setCompactionReview] = useState<ContextCompactionReview | null>(null);
+  const [compactionBusyId, setCompactionBusyId] = useState<string | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readStoredThemeMode());
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveTheme(readStoredThemeMode()));
 
@@ -310,6 +326,9 @@ export default function App() {
       setCurrentUser(data.user);
       setSelectedProvider(data.provider);
       setSelectedModel(data.model);
+      const contextSnapshots = await fetchContextCompactions(token, data.active_thread.id).catch(() => []);
+      setCompactions(contextSnapshots);
+      setCompactionReview(null);
       setError(null);
 
       if (animateLatestAssistant) {
@@ -573,6 +592,49 @@ export default function App() {
       await refreshBootstrap(false, false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось сохранить чат в память.");
+    }
+  }
+
+  async function handleReviewCompaction(compactionId: string) {
+    if (!authToken || !activeThreadId) return;
+    setCompactionBusyId(compactionId);
+    setError(null);
+    try {
+      setCompactionReview(await fetchContextCompactionReview(authToken, activeThreadId, compactionId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось проверить снимок контекста.");
+    } finally {
+      setCompactionBusyId(null);
+    }
+  }
+
+  async function handleVerifyCompaction(compactionId: string) {
+    if (!authToken || !activeThreadId) return;
+    setCompactionBusyId(compactionId);
+    setError(null);
+    try {
+      await verifyContextCompaction(authToken, activeThreadId, compactionId);
+      setCompactions(await fetchContextCompactions(authToken, activeThreadId));
+      setCompactionReview(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось подтвердить снимок контекста.");
+    } finally {
+      setCompactionBusyId(null);
+    }
+  }
+
+  async function handleRollbackCompaction(compactionId: string) {
+    if (!authToken || !activeThreadId) return;
+    setCompactionBusyId(compactionId);
+    setError(null);
+    try {
+      await rollbackContextCompaction(authToken, activeThreadId, compactionId);
+      setCompactions(await fetchContextCompactions(authToken, activeThreadId));
+      setCompactionReview(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось откатить снимок контекста.");
+    } finally {
+      setCompactionBusyId(null);
     }
   }
 
@@ -1084,6 +1146,109 @@ export default function App() {
               </button>
             </div>
           </div>
+
+          {compactions.length > 0 ? (
+            <details className="compaction-panel">
+              <summary>
+                Контекст: {compactions.length} снимков
+                {compactions.some((item) => item.status === "pending_review") ? " · нужна проверка" : ""}
+              </summary>
+              <div className="compaction-list">
+                {compactions.map((item) => (
+                  <article className="compaction-item" key={item.id}>
+                    <div>
+                      <strong>Цикл {item.cycle_number}</strong>
+                      <span className={`compaction-status compaction-status-${item.status}`}>
+                        {item.status === "pending_review"
+                          ? "На проверке"
+                          : item.status === "verified"
+                            ? "Подтверждён"
+                            : "Откачен"}
+                      </span>
+                      <small>{item.summary.source_message_count} сообщений · {item.source_hash.slice(0, 12)}</small>
+                    </div>
+                    <div className="thread-actions">
+                      <button
+                        className="mini-button"
+                        disabled={compactionBusyId === item.id}
+                        onClick={() => void handleReviewCompaction(item.id)}
+                        type="button"
+                      >
+                        Сверить
+                      </button>
+                      {item.status === "pending_review" ? (
+                        <button
+                          className="mini-button"
+                          disabled={
+                            compactionBusyId === item.id ||
+                            compactionReview?.compaction.id !== item.id ||
+                            !compactionReview.source_hash_matches
+                          }
+                          onClick={() => void handleVerifyCompaction(item.id)}
+                          type="button"
+                        >
+                          Подтвердить
+                        </button>
+                      ) : null}
+                      {item.status !== "rolled_back" ? (
+                        <button
+                          className="mini-button"
+                          disabled={compactionBusyId === item.id}
+                          onClick={() => void handleRollbackCompaction(item.id)}
+                          type="button"
+                        >
+                          Откатить
+                        </button>
+                      ) : null}
+                    </div>
+                  </article>
+                ))}
+              </div>
+
+              {compactionReview ? (
+                <div className="compaction-review">
+                  <strong>Сверка цикла {compactionReview.compaction.cycle_number}</strong>
+                  <p className={compactionReview.source_hash_matches ? "hash-ok" : "hash-error"}>
+                    {compactionReview.source_hash_matches
+                      ? "Исходники не изменены, контрольная сумма совпадает."
+                      : "Исходники изменились — подтверждение заблокировано."}
+                  </p>
+                  {(["goals", "decisions", "facts", "open_questions"] as const).map((section) => {
+                    const items = compactionReview.compaction.summary[section];
+                    if (items.length === 0) return null;
+                    const labels = {
+                      goals: "Цели",
+                      decisions: "Решения",
+                      facts: "Факты",
+                      open_questions: "Открытые вопросы"
+                    };
+                    return (
+                      <div className="compaction-section" key={section}>
+                        <b>{labels[section]}</b>
+                        <ul>
+                          {items.map((summaryItem, index) => (
+                            <li key={`${section}-${index}`}>
+                              {summaryItem.text}
+                              <small>{summaryItem.message_ids.map((id) => `message:${id.slice(0, 8)}`).join(", ")}</small>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    );
+                  })}
+                  <details className="compaction-sources">
+                    <summary>Исходные сообщения ({compactionReview.source_messages.length})</summary>
+                    {compactionReview.source_messages.map((source) => (
+                      <div className="compaction-source" key={source.id}>
+                        <small>{source.role} · message:{source.id}</small>
+                        <p>{source.content}</p>
+                      </div>
+                    ))}
+                  </details>
+                </div>
+              ) : null}
+            </details>
+          ) : null}
 
           {bootstrap.archived_chat_threads.length > 0 ? (
             <details className="thread-archive">

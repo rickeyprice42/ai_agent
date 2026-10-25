@@ -43,6 +43,10 @@ AVAILABLE_MODELS = [
 ]
 
 
+class CompactionConflictError(ValueError):
+    pass
+
+
 class AgentService:
     def __init__(self) -> None:
         self.root_dir = ROOT
@@ -185,6 +189,61 @@ class AgentService:
         if trace is None:
             raise ValueError("Трассировка контекста ещё не создана для этого чата.")
         return trace
+
+    def context_compactions(self, user_id: str, thread_id: str) -> list[dict]:
+        thread = self.resolve_thread(user_id, thread_id)
+        return self.agent_for_user(user_id, thread["id"]).context.compaction.list()
+
+    def context_compaction_review(
+        self,
+        user_id: str,
+        thread_id: str,
+        compaction_id: str,
+    ) -> dict:
+        thread = self.resolve_thread(user_id, thread_id)
+        manager = self.agent_for_user(user_id, thread["id"]).context.compaction
+        compaction = manager.get(compaction_id)
+        sources = manager.sources(compaction_id)
+        if compaction is None or sources is None:
+            raise ValueError("Снимок compaction не найден.")
+        return {
+            "compaction": compaction,
+            "source_messages": sources,
+            "source_hash_matches": manager.source_hash_matches(compaction_id),
+        }
+
+    def verify_context_compaction(
+        self,
+        user_id: str,
+        thread_id: str,
+        compaction_id: str,
+    ) -> dict:
+        thread = self.resolve_thread(user_id, thread_id)
+        manager = self.agent_for_user(user_id, thread["id"]).context.compaction
+        if manager.get(compaction_id) is None:
+            raise ValueError("Снимок compaction не найден.")
+        try:
+            result = manager.verify(compaction_id)
+        except ValueError as exc:
+            raise CompactionConflictError(str(exc)) from exc
+        if result is None:
+            raise CompactionConflictError("Подтвердить можно только снимок со статусом pending_review.")
+        return result
+
+    def rollback_context_compaction(
+        self,
+        user_id: str,
+        thread_id: str,
+        compaction_id: str,
+    ) -> dict:
+        thread = self.resolve_thread(user_id, thread_id)
+        manager = self.agent_for_user(user_id, thread["id"]).context.compaction
+        if manager.get(compaction_id) is None:
+            raise ValueError("Снимок compaction не найден.")
+        result = manager.rollback(compaction_id)
+        if result is None:
+            raise CompactionConflictError("Этот снимок уже откачен.")
+        return result
 
     def execute_next_step(self, user_id: str) -> str:
         return self.agent_for_user(user_id).executor.execute_next_step()

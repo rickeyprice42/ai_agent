@@ -154,3 +154,45 @@ export type ModelSettings = {
   model_name: string;
   ollama_url: string;
 };
+
+export type CompactionSummaryItem = {
+  text: string;
+  message_ids: string[];
+  artifact_paths: string[];
+};
+
+export type ContextCompactionItem = {
+  id: string;
+  user_id: string;
+  thread_id: string;
+  cycle_number: number;
+  status: "pending_review" | "verified" | "rolled_back" | string;
+  summary: {
+    goals: CompactionSummaryItem[];
+    decisions: CompactionSummaryItem[];
+    facts: CompactionSummaryItem[];
+    open_questions: CompactionSummaryItem[];
+    source_message_count: number;
+    summary_method: string;
+  };
+  source_message_ids: string[];
+  artifact_refs: string[];
+  source_hash: string;
+  verified_at?: string | null;
+  rolled_back_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ContextCompactionReview = {
+  compaction: ContextCompactionItem;
+  source_messages: Array<{
+    id: string;
+    role: string;
+    content: string;
+    name?: string | null;
+    artifacts: Array<Record<string, unknown>>;
+    created_at: string;
+  }>;
+  source_hash_matches: boolean;
+};

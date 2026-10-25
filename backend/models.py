@@ -263,10 +263,58 @@ class ContextTraceResponse(BaseModel):
     remaining_input_tokens: int
     message_count: int
     omitted_message_count: int
+    compaction_cycle_count: int = 0
+    pending_compaction_count: int = 0
     overflow: bool
     fingerprint: str
     components: list[ContextComponentTraceItem]
     created_at: str
+
+
+class CompactionSummaryItem(BaseModel):
+    text: str
+    message_ids: list[str] = Field(default_factory=list)
+    artifact_paths: list[str] = Field(default_factory=list)
+
+
+class CompactionSummary(BaseModel):
+    goals: list[CompactionSummaryItem] = Field(default_factory=list)
+    decisions: list[CompactionSummaryItem] = Field(default_factory=list)
+    facts: list[CompactionSummaryItem] = Field(default_factory=list)
+    open_questions: list[CompactionSummaryItem] = Field(default_factory=list)
+    source_message_count: int
+    summary_method: str
+
+
+class ContextCompactionItem(BaseModel):
+    id: str
+    user_id: str
+    thread_id: str
+    cycle_number: int
+    status: str
+    summary: CompactionSummary
+    source_message_ids: list[str]
+    artifact_refs: list[str]
+    source_hash: str
+    verified_at: str | None = None
+    rolled_back_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class CompactionSourceMessage(BaseModel):
+    id: str
+    role: str
+    content: str
+    name: str | None = None
+    artifacts: list[dict] = Field(default_factory=list)
+    created_at: str
+
+
+class ContextCompactionReviewResponse(BaseModel):
+    compaction: ContextCompactionItem
+    source_messages: list[CompactionSourceMessage]
+    source_hash_matches: bool
 
 
 class BootstrapResponse(BaseModel):

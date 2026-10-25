@@ -22,6 +22,8 @@ from backend.models import (
     ChatRequest,
     ChatResponse,
     ChatMemoryResponse,
+    ContextCompactionItem,
+    ContextCompactionReviewResponse,
     ContextTraceResponse,
     ExecuteStepResponse,
     MemoryOverviewResponse,
@@ -37,7 +39,7 @@ from backend.models import (
     RegisterRequest,
     UserProfile,
 )
-from backend.service import agent_service
+from backend.service import CompactionConflictError, agent_service
 from ai_agent.llm.base import ProviderError
 
 
@@ -217,6 +219,70 @@ def context_trace(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ContextTraceResponse(**trace)
+
+
+@router.get("/chats/{thread_id}/compactions", response_model=list[ContextCompactionItem])
+def context_compactions(
+    thread_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> list[ContextCompactionItem]:
+    try:
+        items = agent_service.context_compactions(user["id"], thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return [ContextCompactionItem(**item) for item in items]
+
+
+@router.get(
+    "/chats/{thread_id}/compactions/{compaction_id}",
+    response_model=ContextCompactionReviewResponse,
+)
+def context_compaction_review(
+    thread_id: str,
+    compaction_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ContextCompactionReviewResponse:
+    try:
+        result = agent_service.context_compaction_review(user["id"], thread_id, compaction_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ContextCompactionReviewResponse(**result)
+
+
+@router.post(
+    "/chats/{thread_id}/compactions/{compaction_id}/verify",
+    response_model=ContextCompactionItem,
+)
+def verify_context_compaction(
+    thread_id: str,
+    compaction_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ContextCompactionItem:
+    try:
+        result = agent_service.verify_context_compaction(user["id"], thread_id, compaction_id)
+    except CompactionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ContextCompactionItem(**result)
+
+
+@router.post(
+    "/chats/{thread_id}/compactions/{compaction_id}/rollback",
+    response_model=ContextCompactionItem,
+)
+def rollback_context_compaction(
+    thread_id: str,
+    compaction_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ContextCompactionItem:
+    try:
+        result = agent_service.rollback_context_compaction(user["id"], thread_id, compaction_id)
+    except CompactionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ContextCompactionItem(**result)
 
 
 @router.get("/chats", response_model=list[ChatThreadItem])

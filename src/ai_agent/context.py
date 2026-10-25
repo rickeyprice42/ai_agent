@@ -8,6 +8,7 @@ import math
 import re
 
 from ai_agent.action_log import ActionLogStore
+from ai_agent.compaction import CompactionManager
 from ai_agent.llm.base import ProviderError
 from ai_agent.memory import MemoryStore
 from ai_agent.tasks import TaskManager
@@ -111,6 +112,8 @@ class ContextTrace:
     remaining_input_tokens: int
     message_count: int
     omitted_message_count: int
+    compaction_cycle_count: int
+    pending_compaction_count: int
     overflow: bool
     fingerprint: str
     components: list[ContextComponentTrace] = field(default_factory=list)
@@ -144,6 +147,8 @@ class ContextBuilder:
         action_log: ActionLogStore,
         context_window_tokens: int = 32768,
         output_reserve_tokens: int = 4096,
+        compaction_threshold: float = 0.75,
+        compaction_keep_recent: int = 12,
         note_limit: int = 8,
         action_limit: int = 6,
     ) -> None:
@@ -154,6 +159,13 @@ class ContextBuilder:
         self.output_reserve_tokens = max(256, int(output_reserve_tokens))
         self.note_limit = max(1, int(note_limit))
         self.action_limit = max(1, int(action_limit))
+        self.compaction = CompactionManager(
+            self.memory.database,
+            user_id=self.memory.user_id,
+            thread_id=self.memory.thread_id,
+            threshold=compaction_threshold,
+            keep_recent_messages=compaction_keep_recent,
+        )
 
     def build(
         self,
@@ -172,7 +184,8 @@ class ContextBuilder:
         if content_budget <= 0:
             raise ContextBudgetError("Tool schemas exceed the available context budget.")
 
-        raw_messages = self._complete_messages()
+        raw_rows = self._complete_rows()
+        raw_messages = [self._message_from_row(item) for item in raw_rows]
         constraints = self._user_constraints(raw_messages)
         pinned_sections = [
             _ContextSection("core_system", _section("Core system instructions", base_system_prompt.strip()), 100, True),
@@ -219,32 +232,59 @@ class ContextBuilder:
                 "Pinned system instructions, user constraints, and active task exceed the input budget."
             )
 
+        self.compaction.maybe_create(
+            raw_rows,
+            count_message=estimator.count_message,
+            input_budget_tokens=input_budget,
+            fixed_tokens=tool_tokens + used + 64,
+        )
+        compaction_counts = self.compaction.counts()
+        verified_source_ids = self.compaction.verified_source_ids()
+        protected_recent_ids = {
+            str(item["id"])
+            for item in raw_rows[-self.compaction.keep_recent_messages :]
+        }
+        context_rows = [
+            item
+            for item in raw_rows
+            if str(item["id"]) not in verified_source_ids
+            or str(item["id"]) in protected_recent_ids
+        ]
+        context_messages = [self._message_from_row(item) for item in context_rows]
+
         remaining = content_budget - used
-        latest_tokens = estimator.count_message(raw_messages[-1]) if raw_messages else 0
+        latest_tokens = estimator.count_message(context_messages[-1]) if context_messages else 0
         if latest_tokens > remaining:
             raise ContextBudgetError(
                 "The latest conversation item and pinned context exceed the available input budget."
             )
         recent_budget = max(math.floor(remaining * 0.65), latest_tokens)
-        recent_messages, recent_tokens = self._select_recent_messages(raw_messages, estimator, recent_budget)
+        recent_messages, recent_tokens = self._select_recent_messages(context_messages, estimator, recent_budget)
         recent_ids = {id(item) for item in recent_messages}
-        older_messages = [item for item in raw_messages if id(item) not in recent_ids]
+        older_messages = [item for item in context_messages if id(item) not in recent_ids]
         traces.append(
             ContextComponentTrace(
                 name="recent_messages",
                 kind="messages",
                 priority=80,
-                pinned=bool(raw_messages),
+                pinned=bool(context_messages),
                 available_tokens=recent_budget,
                 used_tokens=recent_tokens,
-                source_items=len(raw_messages),
+                source_items=len(context_messages),
                 included_items=len(recent_messages),
-                omitted=len(raw_messages) > len(recent_messages),
+                omitted=len(context_messages) > len(recent_messages),
             )
         )
 
         optional_budget = max(0, remaining - recent_tokens)
         optional_sections = [
+            _ContextSection(
+                "verified_compactions",
+                self.compaction.verified_context(),
+                75,
+                False,
+                compaction_counts["verified"],
+            ),
             _ContextSection("relevant_memory", self._memory_context(recent_messages), 70, False),
             _ContextSection("continuity_digest", self._conversation_digest(older_messages), 60, False, len(older_messages)),
             _ContextSection("recent_actions", self._action_context(), 50, False),
@@ -309,6 +349,8 @@ class ContextBuilder:
             remaining_input_tokens=max(input_budget - used_input, 0),
             message_count=len(recent_messages),
             omitted_message_count=max(len(raw_messages) - len(recent_messages), 0),
+            compaction_cycle_count=compaction_counts["total"],
+            pending_compaction_count=compaction_counts["pending_review"],
             overflow=used_input > input_budget,
             fingerprint=fingerprint,
             components=traces,
@@ -336,12 +378,20 @@ class ContextBuilder:
     def _trace_key(self) -> str:
         return f"context_trace:{self.memory.user_id}:{self.memory.thread_id}"
 
-    def _complete_messages(self) -> list[Message]:
+    def _complete_rows(self) -> list[dict]:
         return [
-            Message(role=str(item["role"]), content=str(item["content"]), name=item.get("name"))
+            item
             for item in self.memory.database.list_messages(self.memory.thread_id)
             if item.get("status") == "complete" and not item.get("error") and str(item.get("content") or "").strip()
         ]
+
+    @staticmethod
+    def _message_from_row(item: dict) -> Message:
+        return Message(
+            role=str(item["role"]),
+            content=str(item["content"]),
+            name=item.get("name"),
+        )
 
     def _select_recent_messages(
         self,

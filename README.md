@@ -81,6 +81,10 @@ python -c "from fastapi.testclient import TestClient; from backend.main import a
 - `GET /api/model-settings` и `PUT /api/model-settings` - чтение и смена активной модели пользователя.
 - `POST /api/chat/stream` - поток NDJSON с событиями `delta`, `status`, `done` и `error`.
 - `GET /api/chats/{thread_id}/context-trace` - последний воспроизводимый trace состава контекста.
+- `GET /api/chats/{thread_id}/compactions` - список циклов сжатия и их статусы.
+- `GET /api/chats/{thread_id}/compactions/{id}` - summary вместе с исходными сообщениями для проверки.
+- `POST /api/chats/{thread_id}/compactions/{id}/verify` - подтвердить summary для использования в контексте.
+- `POST /api/chats/{thread_id}/compactions/{id}/rollback` - исключить summary и вернуться к оригиналам.
 
 Ответы ассистента сохраняются вместе со статусом (`pending`, `complete`, `cancelled`,
 `failed`), provider-ом и моделью. Ошибки Ollama не записываются как обычные ответы и
@@ -145,11 +149,21 @@ LLM-провайдеры подключаются через общий registry
 ```dotenv
 CONTEXT_WINDOW_TOKENS=32768
 CONTEXT_OUTPUT_RESERVE_TOKENS=4096
+CONTEXT_COMPACTION_THRESHOLD=0.75
+CONTEXT_COMPACTION_KEEP_RECENT=12
 ```
 
 Подсчёт использует детерминированный профиль семейства модели. В trace сохраняются
 бюджет, резерв вывода, токены tool schemas, включённые/пропущенные части и fingerprint.
 Это позволяет воспроизвести, почему конкретные данные попали или не попали в prompt.
+
+Когда полная история достигает `CONTEXT_COMPACTION_THRESHOLD` от входного бюджета,
+Context Engine создаёт детерминированный extractive-снимок: цели, решения, факты и
+открытые вопросы. Каждый пункт содержит `message:<id>`, а созданные файлы сохраняются
+как `file:<path>`. Снимок имеет статус `pending_review` и не считается подтверждённым,
+пока пользователь не вызовет `verify`. Одновременно может ожидать проверки только один
+цикл. `rollback` исключает снимок из prompt, но не удаляет исходные сообщения или файлы.
+Получить оригиналы для ручной сверки можно через detail endpoint compaction.
 
 ## Локальный лаунчер
 

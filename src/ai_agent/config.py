@@ -30,6 +30,8 @@ class Settings:
     llm_max_retries: int
     context_window_tokens: int
     context_output_reserve_tokens: int
+    context_compaction_threshold: float
+    context_compaction_keep_recent: int
     database_file: Path
     memory_file: Path
     tool_workspace_dir: Path
@@ -80,6 +82,17 @@ class Settings:
             llm_max_retries=_read_int_env("LLM_MAX_RETRIES", default=1, minimum=0),
             context_window_tokens=context_window_tokens,
             context_output_reserve_tokens=min(output_reserve_tokens, context_window_tokens - 1024),
+            context_compaction_threshold=_read_float_env(
+                "CONTEXT_COMPACTION_THRESHOLD",
+                default=0.75,
+                minimum=0.25,
+                maximum=0.95,
+            ),
+            context_compaction_keep_recent=_read_int_env(
+                "CONTEXT_COMPACTION_KEEP_RECENT",
+                default=12,
+                minimum=2,
+            ),
             database_file=database_path,
             memory_file=memory_path,
             tool_workspace_dir=workspace_path,
@@ -117,3 +130,19 @@ def _read_bool_env(name: str, default: bool) -> bool:
     if raw_value is None:
         return default
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _read_float_env(
+    name: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return default
+    return min(max(value, minimum), maximum)
