@@ -4,7 +4,9 @@ import type {
   ChatThreadItem,
   ContextCompactionItem,
   ContextCompactionReview,
+  AutonomousMemorySettings,
   MemoryOverview,
+  MemorySummary,
   PersonalMemoryItem,
   ModelProviderOption,
   ModelSettings,
@@ -235,6 +237,34 @@ export async function fetchMemoryOverview(token: string): Promise<MemoryOverview
   if (!response.ok) {
     throw await parseError(response, "Не удалось загрузить память агента.");
   }
+  return response.json();
+}
+
+export async function fetchAutonomousMemorySettings(token: string): Promise<AutonomousMemorySettings> {
+  const response = await fetch("/api/memory/settings", { headers: authHeaders(token) });
+  if (!response.ok) throw await parseError(response, "Не удалось загрузить настройки памяти.");
+  return response.json();
+}
+
+export async function updateAutonomousMemorySettings(
+  token: string,
+  autonomousEnabled: boolean
+): Promise<AutonomousMemorySettings> {
+  const response = await fetch("/api/memory/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders(token) },
+    body: JSON.stringify({ autonomous_enabled: autonomousEnabled, health_autonomous_enabled: false })
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось изменить настройки памяти.");
+  return response.json();
+}
+
+export async function fetchMemorySummary(token: string, rebuild = false): Promise<MemorySummary> {
+  const response = await fetch(rebuild ? "/api/memory/summary/rebuild" : "/api/memory/summary", {
+    method: rebuild ? "POST" : "GET",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось собрать сводку памяти.");
   return response.json();
 }
 

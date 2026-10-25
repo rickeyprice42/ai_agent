@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import logging
 import re
 
 from ai_agent.action_log import ActionLogStore
+from ai_agent.autonomous_memory import AutonomousMemoryEngine
 from ai_agent.config import Settings
 from ai_agent.context import ContextBuilder
 from ai_agent.executor import ExecutionEngine
@@ -35,6 +37,7 @@ class ToolOutcome:
 
 
 MIN_RESEARCH_RESULTS = 2
+logger = logging.getLogger("avelin.agent")
 
 
 class Agent:
@@ -54,6 +57,9 @@ class Agent:
         self.planner = Planner()
         self.tasks = TaskManager(self.memory.database, user_id=user_id)
         self.action_log = ActionLogStore(self.memory.database, user_id=user_id)
+        self.autonomous_memory = AutonomousMemoryEngine(
+            self.memory.database, user_id=user_id, thread_id=self.memory.thread_id
+        )
         self.context = ContextBuilder(
             self.memory,
             self.tasks,
@@ -106,7 +112,7 @@ class Agent:
 
     def respond(self, user_text: str) -> str:
         user_message = Message(role="user", content=user_text)
-        self.memory.append_message(user_message)
+        user_message_id = self.memory.append_message(user_message)
 
         direct_result = self._try_direct_tool_action(user_text)
         if direct_result is not None:
@@ -114,6 +120,7 @@ class Agent:
             self.memory.append_message(
                 Message(role="assistant", content=assistant_text, artifacts=direct_result.artifacts)
             )
+            self._extract_autonomous_memory(user_message_id, user_text)
             return assistant_text
 
         completed_tools = ToolOutcome()
@@ -140,6 +147,7 @@ class Agent:
                             artifacts=completed_tools.artifacts,
                         )
                     )
+                    self._extract_autonomous_memory(user_message_id, user_text)
                     return assistant_text
                 self.memory.append_assistant_state(
                     "",
@@ -170,6 +178,7 @@ class Agent:
             self.memory.append_message(
                 Message(role="assistant", content=assistant_text, artifacts=completed_tools.artifacts)
             )
+            self._extract_autonomous_memory(user_message_id, user_text)
             return assistant_text
 
         self._ensure_requested_research_docx(user_text, completed_tools)
@@ -181,16 +190,18 @@ class Agent:
         self.memory.append_message(
             Message(role="assistant", content=fallback, artifacts=completed_tools.artifacts)
         )
+        self._extract_autonomous_memory(user_message_id, user_text)
         return fallback
 
     def respond_stream(self, user_text: str):
-        self.memory.append_message(Message(role="user", content=user_text))
+        user_message_id = self.memory.append_message(Message(role="user", content=user_text))
         direct_result = self._try_direct_tool_action(user_text)
         if direct_result is not None:
             assistant_text = _tool_completion_text(direct_result)
             self.memory.append_message(
                 Message(role="assistant", content=assistant_text, artifacts=direct_result.artifacts)
             )
+            self._extract_autonomous_memory(user_message_id, user_text)
             yield {"type": "delta", "text": assistant_text}
             yield {
                 "type": "done",
@@ -287,6 +298,7 @@ class Agent:
                         artifacts=completed_tools.artifacts,
                     )
                 completed = True
+                self._extract_autonomous_memory(user_message_id, user_text)
                 yield {
                     "type": "done",
                     "provider": self.settings.model_provider,
@@ -304,6 +316,7 @@ class Agent:
                 Message(role="assistant", content=fallback, artifacts=completed_tools.artifacts)
             )
             completed = True
+            self._extract_autonomous_memory(user_message_id, user_text)
             yield {"type": "delta", "text": fallback}
             yield {
                 "type": "done",
@@ -329,6 +342,7 @@ class Agent:
                     artifacts=completed_tools.artifacts,
                 )
             raise
+
         except ProviderError as exc:
             if completed_tools.artifacts:
                 assistant_text = _tool_completion_text(completed_tools)
@@ -350,6 +364,7 @@ class Agent:
                     )
                 if not partial:
                     yield {"type": "delta", "text": assistant_text}
+                self._extract_autonomous_memory(user_message_id, user_text)
                 yield {
                     "type": "done",
                     "provider": self.settings.model_provider,
@@ -378,6 +393,12 @@ class Agent:
                 "provider": self.settings.model_provider,
                 "model": self.settings.model_name,
             }
+
+    def _extract_autonomous_memory(self, source_message_id: str, user_text: str) -> None:
+        try:
+            self.autonomous_memory.process_completed_turn(source_message_id, user_text)
+        except Exception:
+            logger.exception("Autonomous memory extraction failed without affecting the chat response.")
 
     def _execute_tool_calls(self, tool_calls, user_text: str) -> ToolOutcome:
         outcome = ToolOutcome()

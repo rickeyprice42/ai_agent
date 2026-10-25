@@ -14,6 +14,8 @@ CREATE TABLE memory_records (
     scope memory_scope NOT NULL DEFAULT 'global',
     project_id uuid,
     thread_id uuid,
+    memory_key text,
+    auto_generated boolean NOT NULL DEFAULT false,
     confidence double precision NOT NULL DEFAULT 1.0 CHECK (confidence BETWEEN 0 AND 1),
     status memory_status NOT NULL DEFAULT 'active',
     consent_status memory_consent_status NOT NULL DEFAULT 'granted',
@@ -44,19 +46,49 @@ CREATE TABLE memory_provenance (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE memory_settings (
+    user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    autonomous_enabled boolean NOT NULL DEFAULT false,
+    health_autonomous_enabled boolean NOT NULL DEFAULT false,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE memory_candidates (
+    id uuid PRIMARY KEY,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    memory_key text NOT NULL,
+    kind memory_kind NOT NULL,
+    content text NOT NULL,
+    polarity text NOT NULL,
+    observation_count integer NOT NULL DEFAULT 1,
+    confidence double precision NOT NULL DEFAULT 0.5,
+    source_message_ids_json jsonb NOT NULL DEFAULT '[]'::jsonb,
+    decision text NOT NULL DEFAULT 'pending',
+    reason text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE(user_id, memory_key, polarity)
+);
+
 CREATE INDEX idx_memory_records_user_status ON memory_records(user_id, status);
 CREATE INDEX idx_memory_records_scope ON memory_records(user_id, scope, project_id, thread_id);
+CREATE INDEX idx_memory_records_key ON memory_records(user_id, memory_key, status);
 CREATE INDEX idx_memory_records_content_fts
     ON memory_records USING gin (to_tsvector('simple', content));
 CREATE INDEX idx_health_memory_records_user_status ON health_memory_records(user_id, status);
 CREATE INDEX idx_memory_provenance_memory ON memory_provenance(user_id, memory_store, memory_id);
+CREATE INDEX idx_memory_candidates_user_decision ON memory_candidates(user_id, decision, updated_at);
 
 ALTER TABLE memory_records ENABLE ROW LEVEL SECURITY;
 ALTER TABLE health_memory_records ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory_provenance ENABLE ROW LEVEL SECURITY;
+ALTER TABLE memory_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE memory_candidates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory_records FORCE ROW LEVEL SECURITY;
 ALTER TABLE health_memory_records FORCE ROW LEVEL SECURITY;
 ALTER TABLE memory_provenance FORCE ROW LEVEL SECURITY;
+ALTER TABLE memory_settings FORCE ROW LEVEL SECURITY;
+ALTER TABLE memory_candidates FORCE ROW LEVEL SECURITY;
 
 -- The application must SET LOCAL app.user_id for every transaction.
 CREATE POLICY memory_records_user_isolation ON memory_records
@@ -66,6 +98,12 @@ CREATE POLICY health_memory_records_user_isolation ON health_memory_records
     USING (user_id = current_setting('app.user_id', true)::uuid)
     WITH CHECK (user_id = current_setting('app.user_id', true)::uuid);
 CREATE POLICY memory_provenance_user_isolation ON memory_provenance
+    USING (user_id = current_setting('app.user_id', true)::uuid)
+    WITH CHECK (user_id = current_setting('app.user_id', true)::uuid);
+CREATE POLICY memory_settings_user_isolation ON memory_settings
+    USING (user_id = current_setting('app.user_id', true)::uuid)
+    WITH CHECK (user_id = current_setting('app.user_id', true)::uuid);
+CREATE POLICY memory_candidates_user_isolation ON memory_candidates
     USING (user_id = current_setting('app.user_id', true)::uuid)
     WITH CHECK (user_id = current_setting('app.user_id', true)::uuid);
 

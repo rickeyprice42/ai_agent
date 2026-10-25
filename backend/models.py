@@ -162,6 +162,8 @@ class PersonalMemoryItem(BaseModel):
     scope: str
     project_id: str | None = None
     thread_id: str | None = None
+    memory_key: str | None = None
+    auto_generated: bool = False
     confidence: float
     status: str
     consent_status: str
@@ -205,6 +207,37 @@ class MemoryRetrievalTraceResponse(BaseModel):
     latency_ms: float = 0.0
     source_ids: list[str] = Field(default_factory=list)
     conflict_count: int = 0
+
+
+class AutonomousMemorySettings(BaseModel):
+    autonomous_enabled: bool = False
+    health_autonomous_enabled: bool = False
+    updated_at: str = ""
+
+
+class AutonomousMemorySettingsRequest(BaseModel):
+    autonomous_enabled: bool
+    health_autonomous_enabled: bool = False
+
+
+class MemorySummaryResponse(BaseModel):
+    generated_at: str
+    settings: AutonomousMemorySettings
+    sections: dict[str, list[PersonalMemoryItem]]
+    record_count: int
+
+
+class MemoryExtractionTraceResponse(BaseModel):
+    enabled: bool = False
+    candidate_count: int = 0
+    saved_count: int = 0
+    merged_count: int = 0
+    superseded_count: int = 0
+    rejected_count: int = 0
+    pending_count: int = 0
+    estimated_tokens: int = 0
+    latency_ms: float = 0.0
+    reasons: dict[str, int] = Field(default_factory=dict)
 
 
 class ClearMemoryRequest(BaseModel):

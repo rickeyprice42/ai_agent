@@ -137,6 +137,8 @@ export type PersonalMemoryItem = {
   scope: "global" | "project" | "chat";
   project_id?: string | null;
   thread_id?: string | null;
+  memory_key?: string | null;
+  auto_generated: boolean;
   confidence: number;
   status: "active" | "superseded" | "revoked" | "expired";
   consent_status: "granted" | "revoked";
@@ -153,6 +155,19 @@ export type PersonalMemoryItem = {
     source_uri?: string | null;
     created_at: string;
   }>;
+};
+
+export type AutonomousMemorySettings = {
+  autonomous_enabled: boolean;
+  health_autonomous_enabled: boolean;
+  updated_at: string;
+};
+
+export type MemorySummary = {
+  generated_at: string;
+  settings: AutonomousMemorySettings;
+  sections: Record<PersonalMemoryItem["kind"], PersonalMemoryItem[]>;
+  record_count: number;
 };
 
 export type UserProfile = {

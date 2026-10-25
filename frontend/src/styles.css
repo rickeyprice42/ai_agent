@@ -474,6 +474,70 @@ button {
   font-size: 0.78rem;
 }
 
+.autonomous-memory-box {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  border-style: solid;
+}
+
+.memory-summary-card {
+  display: grid;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.memory-summary-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.memory-summary-heading > div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.memory-summary-heading span,
+.memory-summary-section > span,
+.memory-summary-section small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.memory-summary-section {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.memory-summary-section > span {
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.memory-summary-section ul {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memory-summary-section li {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.55rem 0.65rem;
+  border-left: 2px solid var(--line-strong);
+  background: var(--surface);
+  overflow-wrap: anywhere;
+}
+
 .compaction-panel {
   border: 1px solid var(--line);
   border-radius: 8px;

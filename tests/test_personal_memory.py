@@ -250,6 +250,70 @@ class PersonalMemoryDatabaseTests(unittest.TestCase):
 
 
 class PersonalMemoryApiTests(unittest.TestCase):
+    def test_autonomous_settings_and_summary_are_opt_in_and_user_scoped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = temporary_service(Path(directory) / "api.sqlite3")
+            with patch("backend.routes.agent_service", service):
+                client = TestClient(app)
+
+                def register(email: str, username: str) -> dict[str, str]:
+                    response = client.post(
+                        "/api/auth/register",
+                        json={
+                            "email": email,
+                            "username": username,
+                            "password": "password123",
+                            "display_name": username,
+                        },
+                    )
+                    return {"Authorization": f"Bearer {response.json()['token']}"}
+
+                alice = register("alice-memory@example.com", "alice-memory")
+                bob = register("bob-memory@example.com", "bob-memory")
+
+                initial = client.get("/api/memory/settings", headers=alice)
+                self.assertEqual(initial.status_code, 200)
+                self.assertFalse(initial.json()["autonomous_enabled"])
+
+                enabled = client.put(
+                    "/api/memory/settings",
+                    headers=alice,
+                    json={
+                        "autonomous_enabled": True,
+                        "health_autonomous_enabled": False,
+                    },
+                )
+                self.assertEqual(enabled.status_code, 200)
+                self.assertTrue(enabled.json()["autonomous_enabled"])
+
+                created = client.post(
+                    "/api/memory/records",
+                    headers=alice,
+                    json={
+                        "kind": "preference",
+                        "content": "Любит острый соус",
+                        "consent_granted": True,
+                        "source_type": "manual_ui",
+                    },
+                )
+                self.assertEqual(created.status_code, 200)
+
+                summary = client.post("/api/memory/summary/rebuild", headers=alice)
+                self.assertEqual(summary.status_code, 200)
+                self.assertEqual(summary.json()["record_count"], 1)
+                self.assertEqual(
+                    summary.json()["sections"]["preference"][0]["content"],
+                    "Любит острый соус",
+                )
+                self.assertFalse(summary.json()["sections"]["preference"][0]["auto_generated"])
+
+                bob_summary = client.get("/api/memory/summary", headers=bob)
+                self.assertEqual(bob_summary.status_code, 200)
+                self.assertEqual(bob_summary.json()["record_count"], 0)
+                self.assertFalse(
+                    client.get("/api/memory/settings", headers=bob).json()["autonomous_enabled"]
+                )
+
     def test_crud_requires_consent_and_logs_do_not_contain_content(self):
         with tempfile.TemporaryDirectory() as directory:
             service = temporary_service(Path(directory) / "api.sqlite3")

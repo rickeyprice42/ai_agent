@@ -18,11 +18,13 @@ import {
   downloadWorkspaceFile,
   executeNextStep,
   exportAgentMemory,
+  fetchAutonomousMemorySettings,
   fetchBootstrap,
   fetchContextCompactionReview,
   fetchContextCompactions,
   fetchMe,
   fetchMemoryOverview,
+  fetchMemorySummary,
   fetchPersonalMemory,
   fetchModelProviders,
   login as authLogin,
@@ -35,6 +37,7 @@ import {
   sendMessageStream,
   unarchiveChatThread,
   updateChatMemory,
+  updateAutonomousMemorySettings,
   updateProject,
   updateChatThread,
   updateModelSettings,
@@ -43,11 +46,13 @@ import {
 } from "./api";
 import type {
   BootstrapPayload,
+  AutonomousMemorySettings,
   ChatMessage,
   ContextCompactionItem,
   ContextCompactionReview,
   FileArtifact,
   MemoryOverview,
+  MemorySummary,
   PersonalMemoryItem,
   ModelProviderOption,
   UserProfile
@@ -118,12 +123,32 @@ const EMPTY_MEMORY_OVERVIEW: MemoryOverview = {
   notes: []
 };
 
+const EMPTY_AUTONOMOUS_MEMORY_SETTINGS: AutonomousMemorySettings = {
+  autonomous_enabled: false,
+  health_autonomous_enabled: false,
+  updated_at: ""
+};
+
+const EMPTY_MEMORY_SUMMARY: MemorySummary = {
+  generated_at: "",
+  settings: EMPTY_AUTONOMOUS_MEMORY_SETTINGS,
+  sections: { profile: [], preference: [], fact: [], episode: [] },
+  record_count: 0
+};
+
 const QUICK_ACTIONS = [
   "Сколько сейчас времени?",
   "Запомни: купить кофе и молоко",
   "Что ты помнишь обо мне?",
   "Помоги спланировать мой день"
 ];
+
+const MEMORY_SECTION_LABELS: Record<PersonalMemoryItem["kind"], string> = {
+  profile: "О пользователе",
+  preference: "Предпочтения",
+  fact: "Устойчивые факты",
+  episode: "Недавние события"
+};
 
 function formatRoleLabel(message: ChatMessage, agentName: string): string {
   if (message.role === "user") return "Ты";
@@ -196,6 +221,9 @@ function readStoredThemeMode(): ThemeMode {
 export default function App() {
   const [bootstrap, setBootstrap] = useState<BootstrapPayload>(EMPTY_BOOTSTRAP);
   const [memoryOverview, setMemoryOverview] = useState<MemoryOverview>(EMPTY_MEMORY_OVERVIEW);
+  const [autonomousMemorySettings, setAutonomousMemorySettings] = useState<AutonomousMemorySettings>(EMPTY_AUTONOMOUS_MEMORY_SETTINGS);
+  const [memorySummary, setMemorySummary] = useState<MemorySummary>(EMPTY_MEMORY_SUMMARY);
+  const [isUpdatingAutonomousMemory, setIsUpdatingAutonomousMemory] = useState(false);
   const [personalMemory, setPersonalMemory] = useState<PersonalMemoryItem[]>([]);
   const [showHealthMemory, setShowHealthMemory] = useState(false);
   const [memoryDraft, setMemoryDraft] = useState("");
@@ -327,14 +355,18 @@ export default function App() {
     }
 
     try {
-      const [data, memoryData, personalMemoryData] = await Promise.all([
+      const [data, memoryData, personalMemoryData, autonomousSettingsData, memorySummaryData] = await Promise.all([
         fetchBootstrap(token, threadId || null),
         fetchMemoryOverview(token),
-        fetchPersonalMemory(token, showHealthMemory)
+        fetchPersonalMemory(token, showHealthMemory),
+        fetchAutonomousMemorySettings(token),
+        fetchMemorySummary(token)
       ]);
       setBootstrap(data);
       setMemoryOverview(memoryData);
       setPersonalMemory(personalMemoryData);
+      setAutonomousMemorySettings(autonomousSettingsData);
+      setMemorySummary(memorySummaryData);
       setMessages(data.history);
       setActiveThreadId(data.active_thread.id);
       setActiveProjectId(data.active_thread.project_id ?? "");
@@ -691,6 +723,7 @@ export default function App() {
       setMemoryDraft("");
       setPersonalMemory(await fetchPersonalMemory(authToken, showHealthMemory || memorySensitive));
       setMemoryOverview(await fetchMemoryOverview(authToken));
+      setMemorySummary(await fetchMemorySummary(authToken, true));
       if (memorySensitive) setShowHealthMemory(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось сохранить персональную память.");
@@ -706,6 +739,7 @@ export default function App() {
     try {
       await updatePersonalMemory(authToken, memory, { content: content.trim() });
       setPersonalMemory(await fetchPersonalMemory(authToken, showHealthMemory));
+      setMemorySummary(await fetchMemorySummary(authToken, true));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось изменить персональную память.");
     }
@@ -717,6 +751,7 @@ export default function App() {
       await deletePersonalMemory(authToken, memory);
       setPersonalMemory(await fetchPersonalMemory(authToken, showHealthMemory));
       setMemoryOverview(await fetchMemoryOverview(authToken));
+      setMemorySummary(await fetchMemorySummary(authToken, true));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось удалить персональную память.");
     }
@@ -727,6 +762,7 @@ export default function App() {
     try {
       await updatePersonalMemory(authToken, memory, { status: "revoked" });
       setPersonalMemory(await fetchPersonalMemory(authToken, showHealthMemory));
+      setMemorySummary(await fetchMemorySummary(authToken, true));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось отозвать согласие.");
     }
@@ -738,6 +774,37 @@ export default function App() {
     if (next && !window.confirm("Показать чувствительные записи Health на экране?")) return;
     setShowHealthMemory(next);
     setPersonalMemory(await fetchPersonalMemory(authToken, next));
+  }
+
+  async function handleToggleAutonomousMemory() {
+    if (!authToken || isUpdatingAutonomousMemory) return;
+    const next = !autonomousMemorySettings.autonomous_enabled;
+    if (next && !window.confirm(
+      "Включить автономную память? Avelin будет анализировать завершённые сообщения, сохранять только устойчивые несекретные факты и показывать их в сводке. Health-данные автоматически не сохраняются."
+    )) return;
+    setIsUpdatingAutonomousMemory(true);
+    setError(null);
+    try {
+      const settings = await updateAutonomousMemorySettings(authToken, next);
+      setAutonomousMemorySettings(settings);
+      setMemorySummary(await fetchMemorySummary(authToken, true));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось изменить автономную память.");
+    } finally {
+      setIsUpdatingAutonomousMemory(false);
+    }
+  }
+
+  async function handleRebuildMemorySummary() {
+    if (!authToken || isUpdatingAutonomousMemory) return;
+    setIsUpdatingAutonomousMemory(true);
+    try {
+      setMemorySummary(await fetchMemorySummary(authToken, true));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось пересобрать сводку памяти.");
+    } finally {
+      setIsUpdatingAutonomousMemory(false);
+    }
   }
 
   async function handleExportMemory() {
@@ -1466,6 +1533,51 @@ export default function App() {
             </button>
           </div>
 
+          <div className="memory-rule-box autonomous-memory-box">
+            <div>
+              <strong>{autonomousMemorySettings.autonomous_enabled ? "Автономная память включена" : "Автономная память выключена"}</strong>
+              <span>
+                Анализирует только завершённые сообщения. Пароли, токены, Health, финансы и содержимое документов автоматически не сохраняются.
+              </span>
+            </div>
+            <button className="mini-button" disabled={isUpdatingAutonomousMemory} onClick={() => void handleToggleAutonomousMemory()} type="button">
+              {autonomousMemorySettings.autonomous_enabled ? "Выключить" : "Включить"}
+            </button>
+          </div>
+
+          <div className="memory-summary-card">
+            <div className="memory-summary-heading">
+              <div>
+                <strong>Сводка памяти</strong>
+                <span>
+                  {memorySummary.generated_at ? `Обновлена ${formatFileTime(memorySummary.generated_at)}` : "Ещё не сформирована"}
+                </span>
+              </div>
+              <button className="mini-button" disabled={isUpdatingAutonomousMemory} onClick={() => void handleRebuildMemorySummary()} type="button">
+                Пересобрать
+              </button>
+            </div>
+            {memorySummary.record_count === 0 ? (
+              <p className="muted">Пока нет подтверждённых записей для сводки.</p>
+            ) : (
+              (Object.keys(MEMORY_SECTION_LABELS) as PersonalMemoryItem["kind"][]).map((kind) => (
+                memorySummary.sections[kind]?.length ? (
+                  <div className="memory-summary-section" key={kind}>
+                    <span>{MEMORY_SECTION_LABELS[kind]}</span>
+                    <ul>
+                      {memorySummary.sections[kind].map((item) => (
+                        <li key={item.id}>
+                          {item.content}
+                          {item.auto_generated ? <small>Автоматически · {item.provenance.length} источник(а)</small> : <small>Добавлено вручную</small>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null
+              ))
+            )}
+          </div>
+
           <div className="memory-overview-grid">
             <div className="memory-stat">
               <span>Заметки</span>
@@ -1542,6 +1654,7 @@ export default function App() {
                       <p>{memory.content}</p>
                       <small>
                         {memory.scope} · confidence {memory.confidence.toFixed(2)} · {memory.status}
+                        {memory.auto_generated ? " · АВТОМАТИЧЕСКИ" : " · ВРУЧНУЮ"}
                         {memory.sensitive ? " · HEALTH" : ""}
                       </small>
                       <small>Источник: {memory.provenance.map((source) => source.source_type).join(", ") || "не указан"}</small>

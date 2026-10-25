@@ -13,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ai_agent.agent import Agent
+from ai_agent.autonomous_memory import AutonomousMemoryEngine
 from ai_agent.chat_output import history_for_ui
 from ai_agent.config import Settings
 from ai_agent.database import AvelinDatabase
@@ -362,6 +363,22 @@ class AgentService:
 
     def memory_retrieval_trace(self, user_id: str, thread_id: str) -> dict:
         return self.agent_for_user(user_id, thread_id).memory.last_retrieval_trace()
+
+    def memory_settings(self, user_id: str) -> dict:
+        return self.database.get_memory_settings(user_id)
+
+    def update_memory_settings(self, user_id: str, **payload) -> dict:
+        result = self.database.update_memory_settings(user_id, **payload)
+        self._drop_user_agents(user_id)
+        return result
+
+    def memory_summary(self, user_id: str, *, rebuild: bool = False) -> dict:
+        thread = self.resolve_thread(user_id)
+        engine = AutonomousMemoryEngine(self.database, user_id, thread["id"])
+        return engine.rebuild_summary() if rebuild else engine.summary()
+
+    def memory_extraction_trace(self, user_id: str, thread_id: str) -> dict:
+        return self.agent_for_user(user_id, thread_id).autonomous_memory.last_extraction_trace()
 
     def create_personal_memory(self, user_id: str, **payload) -> dict:
         record = self.database.create_memory_record(user_id, **payload)

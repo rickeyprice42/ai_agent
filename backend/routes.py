@@ -9,6 +9,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from backend.auth import hash_password, hash_token, issue_session_token, verify_password
 from backend.models import (
     ApproveStepResponse,
+    AutonomousMemorySettings,
+    AutonomousMemorySettingsRequest,
     AuthRequest,
     AuthResponse,
     BootstrapResponse,
@@ -27,7 +29,9 @@ from backend.models import (
     ContextTraceResponse,
     ExecuteStepResponse,
     MemoryOverviewResponse,
+    MemoryExtractionTraceResponse,
     MemoryRetrievalTraceResponse,
+    MemorySummaryResponse,
     PersonalMemoryCreateRequest,
     PersonalMemoryItem,
     PersonalMemoryUpdateRequest,
@@ -421,6 +425,33 @@ def memory_overview(user: dict[str, str] = Depends(current_user)) -> MemoryOverv
     return MemoryOverviewResponse(**agent_service.memory_overview(user["id"]))
 
 
+@router.get("/memory/settings", response_model=AutonomousMemorySettings)
+def memory_settings(user: dict[str, str] = Depends(current_user)) -> AutonomousMemorySettings:
+    return AutonomousMemorySettings(**agent_service.memory_settings(user["id"]))
+
+
+@router.put("/memory/settings", response_model=AutonomousMemorySettings)
+def update_memory_settings(
+    payload: AutonomousMemorySettingsRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> AutonomousMemorySettings:
+    return AutonomousMemorySettings(
+        **agent_service.update_memory_settings(user["id"], **payload.model_dump())
+    )
+
+
+@router.get("/memory/summary", response_model=MemorySummaryResponse)
+def memory_summary(user: dict[str, str] = Depends(current_user)) -> MemorySummaryResponse:
+    return MemorySummaryResponse(**agent_service.memory_summary(user["id"]))
+
+
+@router.post("/memory/summary/rebuild", response_model=MemorySummaryResponse)
+def rebuild_memory_summary(
+    user: dict[str, str] = Depends(current_user),
+) -> MemorySummaryResponse:
+    return MemorySummaryResponse(**agent_service.memory_summary(user["id"], rebuild=True))
+
+
 @router.get("/memory/records", response_model=list[PersonalMemoryItem])
 def list_personal_memory(
     include_sensitive: bool = Query(default=False),
@@ -450,6 +481,21 @@ def memory_retrieval_trace(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return MemoryRetrievalTraceResponse(**trace)
+
+
+@router.get(
+    "/chats/{thread_id}/memory-extraction-trace",
+    response_model=MemoryExtractionTraceResponse,
+)
+def memory_extraction_trace(
+    thread_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> MemoryExtractionTraceResponse:
+    try:
+        trace = agent_service.memory_extraction_trace(user["id"], thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return MemoryExtractionTraceResponse(**trace)
 
 
 @router.post("/memory/records", response_model=PersonalMemoryItem)

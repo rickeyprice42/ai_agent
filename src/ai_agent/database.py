@@ -47,6 +47,7 @@ class AvelinDatabase:
             self._migrate_chat_threads(connection)
             self._migrate_project_links(connection)
             self._migrate_messages(connection)
+            self._migrate_memory_records(connection)
             self._ensure_migrated_indexes(connection)
             self._backfill_memory_search_index(connection)
             connection.execute(
@@ -122,6 +123,20 @@ class AvelinDatabase:
             if column not in columns:
                 connection.execute(statement)
 
+    @staticmethod
+    def _migrate_memory_records(connection: sqlite3.Connection) -> None:
+        for table in ("memory_records", "health_memory_records"):
+            columns = {
+                str(row["name"])
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if "memory_key" not in columns:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN memory_key TEXT")
+            if "auto_generated" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN auto_generated INTEGER NOT NULL DEFAULT 0"
+                )
+
     def _migrate_project_links(self, connection: sqlite3.Connection) -> None:
         table_columns = {
             "notes": {
@@ -165,6 +180,7 @@ class AvelinDatabase:
             CREATE INDEX IF NOT EXISTS idx_chat_threads_status ON chat_threads(status, archived_at, deleted_at);
             CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
             CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+            CREATE INDEX IF NOT EXISTS idx_memory_records_key ON memory_records(user_id, memory_key, status);
             """
         )
 
@@ -339,6 +355,13 @@ class AvelinDatabase:
             VALUES (?, ?, ?)
             """,
             (user_id, self.default_model_provider, self.default_model_name),
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO memory_settings (user_id, autonomous_enabled, health_autonomous_enabled)
+            VALUES (?, 0, 0)
+            """,
+            (user_id,),
         )
 
     def list_chat_threads(
@@ -800,6 +823,8 @@ class AvelinDatabase:
         scope: str = "global",
         project_id: str | None = None,
         thread_id: str | None = None,
+        memory_key: str | None = None,
+        auto_generated: bool = False,
         confidence: float = 1.0,
         expires_at: str | None = None,
         sensitive: bool = False,
@@ -831,8 +856,9 @@ class AvelinDatabase:
                 f"""
                 INSERT INTO {table} (
                     id, user_id, kind, content, scope, project_id, thread_id,
-                    confidence, status, consent_status, consented_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 'granted', ?, ?)
+                    memory_key, auto_generated, confidence, status, consent_status,
+                    consented_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'granted', ?, ?)
                 """,
                 (
                     memory_id,
@@ -842,6 +868,8 @@ class AvelinDatabase:
                     normalized_scope,
                     project_id if normalized_scope == "project" else None,
                     thread_id if normalized_scope == "chat" else None,
+                    memory_key.strip() if memory_key else None,
+                    int(bool(auto_generated)),
                     normalized_confidence,
                     consented_at,
                     normalized_expiry,
@@ -859,6 +887,157 @@ class AvelinDatabase:
         if record is None:
             raise RuntimeError("Saved memory could not be loaded.")
         return record
+
+    def get_memory_settings(self, user_id: str) -> dict:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM memory_settings WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return {
+            "autonomous_enabled": bool(row["autonomous_enabled"]),
+            "health_autonomous_enabled": bool(row["health_autonomous_enabled"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def update_memory_settings(
+        self,
+        user_id: str,
+        *,
+        autonomous_enabled: bool,
+        health_autonomous_enabled: bool = False,
+    ) -> dict:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE memory_settings
+                SET autonomous_enabled = ?, health_autonomous_enabled = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+                """,
+                (int(autonomous_enabled), int(health_autonomous_enabled), user_id),
+            )
+        return self.get_memory_settings(user_id)
+
+    def observe_memory_candidate(
+        self,
+        user_id: str,
+        *,
+        memory_key: str,
+        kind: str,
+        content: str,
+        polarity: str,
+        confidence: float,
+        source_message_id: str,
+        decision: str = "pending",
+        reason: str = "",
+    ) -> dict:
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM memory_candidates
+                WHERE user_id = ? AND memory_key = ? AND polarity = ?
+                """,
+                (user_id, memory_key, polarity),
+            ).fetchone()
+            if existing is None:
+                candidate_id = str(uuid4())
+                source_ids = [source_message_id]
+                connection.execute(
+                    """
+                    INSERT INTO memory_candidates (
+                        id, user_id, memory_key, kind, content, polarity,
+                        confidence, source_message_ids_json, decision, reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        candidate_id, user_id, memory_key, kind, content, polarity,
+                        max(0.0, min(float(confidence), 1.0)),
+                        json.dumps(source_ids), decision, reason,
+                    ),
+                )
+            else:
+                candidate_id = str(existing["id"])
+                source_ids = list(json.loads(str(existing["source_message_ids_json"] or "[]")))
+                if source_message_id not in source_ids:
+                    source_ids.append(source_message_id)
+                connection.execute(
+                    """
+                    UPDATE memory_candidates
+                    SET content = ?, observation_count = observation_count + 1,
+                        confidence = MAX(confidence, ?), source_message_ids_json = ?,
+                        decision = ?, reason = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (
+                        content, max(0.0, min(float(confidence), 1.0)),
+                        json.dumps(source_ids), decision, reason, candidate_id,
+                    ),
+                )
+            row = connection.execute(
+                "SELECT * FROM memory_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        return _memory_candidate_payload(row)
+
+    def set_memory_candidate_decision(self, candidate_id: str, decision: str, reason: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE memory_candidates
+                SET decision = ?, reason = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (decision, reason, candidate_id),
+            )
+
+    def find_active_memory_by_key(self, user_id: str, memory_key: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM memory_records
+                WHERE user_id = ? AND memory_key = ? AND status = 'active'
+                  AND consent_status = 'granted'
+                ORDER BY updated_at DESC, rowid DESC LIMIT 1
+                """,
+                (user_id, memory_key),
+            ).fetchone()
+            return self._memory_record_payload(connection, row, "personal", False) if row else None
+
+    def add_memory_provenance(
+        self,
+        user_id: str,
+        memory_id: str,
+        *,
+        source_type: str,
+        source_id: str | None = None,
+        source_uri: str | None = None,
+    ) -> None:
+        with self.connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM memory_records WHERE user_id = ? AND id = ?",
+                (user_id, memory_id),
+            ).fetchone()
+            if not exists:
+                raise ValueError("Memory record not found.")
+            duplicate = connection.execute(
+                """
+                SELECT 1 FROM memory_provenance
+                WHERE user_id = ? AND memory_store = 'personal' AND memory_id = ?
+                  AND source_type = ? AND COALESCE(source_id, '') = COALESCE(?, '')
+                """,
+                (user_id, memory_id, source_type, source_id),
+            ).fetchone()
+            if not duplicate:
+                connection.execute(
+                    """
+                    INSERT INTO memory_provenance (
+                        id, user_id, memory_id, memory_store, source_type, source_id, source_uri
+                    ) VALUES (?, ?, ?, 'personal', ?, ?, ?)
+                    """,
+                    (str(uuid4()), user_id, memory_id, source_type, source_id, source_uri),
+                )
 
     def list_memory_records(
         self,
@@ -1054,6 +1233,8 @@ class AvelinDatabase:
             "scope": str(row["scope"]),
             "project_id": row["project_id"],
             "thread_id": row["thread_id"],
+            "memory_key": row["memory_key"],
+            "auto_generated": bool(row["auto_generated"]),
             "confidence": float(row["confidence"]),
             "status": str(row["status"]),
             "consent_status": str(row["consent_status"]),
@@ -2225,6 +2406,8 @@ CREATE TABLE IF NOT EXISTS memory_records (
     scope TEXT NOT NULL DEFAULT 'global',
     project_id TEXT,
     thread_id TEXT,
+    memory_key TEXT,
+    auto_generated INTEGER NOT NULL DEFAULT 0,
     confidence REAL NOT NULL DEFAULT 1.0,
     status TEXT NOT NULL DEFAULT 'active',
     consent_status TEXT NOT NULL DEFAULT 'granted',
@@ -2243,6 +2426,8 @@ CREATE TABLE IF NOT EXISTS health_memory_records (
     scope TEXT NOT NULL DEFAULT 'global',
     project_id TEXT,
     thread_id TEXT,
+    memory_key TEXT,
+    auto_generated INTEGER NOT NULL DEFAULT 0,
     confidence REAL NOT NULL DEFAULT 1.0,
     status TEXT NOT NULL DEFAULT 'active',
     consent_status TEXT NOT NULL DEFAULT 'granted',
@@ -2262,6 +2447,30 @@ CREATE TABLE IF NOT EXISTS memory_provenance (
     source_id TEXT,
     source_uri TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS memory_settings (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    autonomous_enabled INTEGER NOT NULL DEFAULT 0,
+    health_autonomous_enabled INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS memory_candidates (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    memory_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    polarity TEXT NOT NULL DEFAULT 'positive',
+    observation_count INTEGER NOT NULL DEFAULT 1,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    source_message_ids_json TEXT NOT NULL DEFAULT '[]',
+    decision TEXT NOT NULL DEFAULT 'pending',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, memory_key, polarity)
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_records_fts USING fts5(
@@ -2359,6 +2568,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_records_user_status ON memory_records(user
 CREATE INDEX IF NOT EXISTS idx_memory_records_scope ON memory_records(user_id, scope, project_id, thread_id);
 CREATE INDEX IF NOT EXISTS idx_health_memory_records_user_status ON health_memory_records(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_memory_provenance_memory ON memory_provenance(user_id, memory_store, memory_id);
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_user_decision ON memory_candidates(user_id, decision, updated_at);
 CREATE INDEX IF NOT EXISTS idx_memory_index_user_id ON memory_index(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_index_source ON memory_index(source_type, source_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
@@ -2371,6 +2581,23 @@ def _memory_search_prefix(term: str) -> str:
     if len(term) <= 4:
         return term
     return term[:5] if term.isascii() else term[:4]
+
+
+def _memory_candidate_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "memory_key": str(row["memory_key"]),
+        "kind": str(row["kind"]),
+        "content": str(row["content"]),
+        "polarity": str(row["polarity"]),
+        "observation_count": int(row["observation_count"]),
+        "confidence": float(row["confidence"]),
+        "source_message_ids": list(json.loads(str(row["source_message_ids_json"] or "[]"))),
+        "decision": str(row["decision"]),
+        "reason": str(row["reason"]),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
 
 
 def _title_from_message(content: str) -> str:
