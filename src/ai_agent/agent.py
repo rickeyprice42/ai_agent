@@ -523,7 +523,8 @@ class Agent:
             outcome.tool_names.append("research_quality_gate")
             return
         path_match = re.search(r"([\w\-./\\\u0400-\u04ff]+\.docx)\b", user_text, flags=re.IGNORECASE)
-        relative_path = path_match.group(1).replace("\\", "/") if path_match else "web_research.docx"
+        requested_path = path_match.group(1).replace("\\", "/") if path_match else "web_research.docx"
+        relative_path = self._unique_docx_path(requested_path)
         query = search_result.splitlines()[0].partition(":")[2].strip()
         paragraphs = [
             f"**{title.strip()}**\n{snippet.strip()}\nИсточник: {url.strip()}"
@@ -550,6 +551,22 @@ class Agent:
         artifact = self._artifact_from_tool("create_docx", arguments, status)
         if artifact is not None:
             outcome.artifacts.append(artifact)
+
+    def _unique_docx_path(self, relative_path: str) -> str:
+        candidate = Path(relative_path.strip().replace("\\", "/"))
+        if candidate.is_absolute() or ".." in candidate.parts:
+            return relative_path
+        target = (self.documents.workspace_dir / candidate).resolve()
+        workspace = self.documents.workspace_dir.resolve()
+        if target != workspace and workspace not in target.parents:
+            return relative_path
+        if not target.exists():
+            return candidate.as_posix()
+        for suffix in range(2, 1000):
+            next_candidate = candidate.with_name(f"{candidate.stem}_{suffix}{candidate.suffix}")
+            if not (workspace / next_candidate).exists():
+                return next_candidate.as_posix()
+        return relative_path
 
     def _artifact_from_tool(self, tool_name: str, arguments: dict, status: str) -> dict | None:
         if status != "completed" or tool_name not in {
@@ -583,20 +600,32 @@ def _tool_completion_text(outcome: ToolOutcome) -> str:
             )
         return f"Готово — создано файлов: {len(outcome.artifacts)}. Их можно скачать ниже."
     if outcome.results:
-        if outcome.results[-1].startswith("Search query:"):
+        last_result = outcome.results[-1]
+        last_tool = outcome.tool_names[-1] if outcome.tool_names else ""
+        if last_tool == "create_docx" and _tool_status(last_result) == "failed":
+            return (
+                "Исследование завершено, но не удалось создать Word-файл. "
+                "Проверь имя файла и доступность рабочей папки; результаты поиска не потеряны."
+            )
+        if "no relevant results" in last_result.lower():
+            return (
+                "Не удалось подтвердить достаточно релевантных результатов по этому запросу. "
+                "Итоговый файл не создан; уточни каталог, жанр, регион или критерии доступности."
+            )
+        if last_result.startswith("Search query:"):
             return (
                 "Поиск завершён, но не удалось корректно оформить итоговый ответ. "
                 "Попробуй уточнить тему или сократить количество результатов."
             )
-        http_error = _http_error_status(outcome.results[-1])
+        http_error = _http_error_status(last_result)
         if http_error is not None:
             return (
                 f"Не удалось получить данные с выбранного сайта: он вернул HTTP {http_error}. "
                 "Попробуй изменить запрос или использовать другой источник."
             )
-        if "не смог выполнить действие" in outcome.results[-1].lower():
+        if "не смог выполнить действие" in last_result.lower():
             return "Не удалось выполнить интернет-запрос. Попробуй изменить запрос или источник."
-        return outcome.results[-1]
+        return last_result
     return "Не смог сформировать ответ."
 
 

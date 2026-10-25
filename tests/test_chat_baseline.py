@@ -249,7 +249,7 @@ class ChatRegressionTest(unittest.TestCase):
         html = b"""<?xml version="1.0" encoding="utf-8"?>
         <rss><channel><item>
           <title>Python Essentials</title>
-          <link>https://books.apple.com/book/id1</link>
+          <link>https://books.apple.com/us/book/id1</link>
           <description>Read the Python book on &lt;b&gt;Apple Books&lt;/b&gt;.</description>
         </item></channel></rss>"""
         sandbox = HttpSandbox()
@@ -257,7 +257,7 @@ class ChatRegressionTest(unittest.TestCase):
         with patch("ai_agent.tools.http.request.urlopen", return_value=response):
             result = sandbox.search("Python books Apple Books", limit=3)
         self.assertIn("Python Essentials", result)
-        self.assertIn("https://books.apple.com/book/id1", result)
+        self.assertIn("https://books.apple.com/us/book/id1", result)
         self.assertIn("Read the Python book on Apple Books.", result)
         self.assertNotIn("<a", result)
 

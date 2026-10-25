@@ -13,7 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ai_agent.agent import Agent
+from ai_agent.agent import Agent, ToolOutcome, _tool_completion_text
 from ai_agent.config import Settings
 from ai_agent.llm.base import (
     ProviderCapabilities,
@@ -106,6 +106,28 @@ class OneResultSearchProvider(TaggedProvider):
         yield ModelStreamChunk(response=ModelResponse(text=""))
 
 
+class RepeatingSearchProvider(TaggedProvider):
+    def __init__(self):
+        super().__init__("repeating-search", "")
+        self.calls = 0
+
+    def stream(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls % 2 == 1:
+            yield ModelStreamChunk(
+                response=ModelResponse(
+                    tool_calls=[
+                        ToolCall(
+                            "web_search",
+                            {"query": "cheap fiction Apple Books", "limit": 5, "country": "us"},
+                        )
+                    ]
+                )
+            )
+            return
+        yield ModelStreamChunk(response=ModelResponse(text=""))
+
+
 class ProviderContractTest(unittest.TestCase):
     def test_public_provider_catalog_exposes_capabilities(self):
         for provider in AVAILABLE_MODELS:
@@ -175,6 +197,21 @@ class ResearchQualityTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no relevant results"):
                 sandbox.search("недорогие книги Apple Books", limit=5)
 
+    def test_apple_api_timeout_falls_back_without_leaking_raw_error(self):
+        polluted_rss = FakeHttpResponse(
+            b"""<?xml version="1.0"?><rss><channel>
+            <item><title>Mail.ru</title><link>https://mail.ru/</link><description>Mail and news</description></item>
+            </channel></rss>""",
+            {"Content-Type": "application/rss+xml; charset=utf-8"},
+        )
+        sandbox = HttpSandbox()
+        with patch(
+            "ai_agent.tools.http.request.urlopen",
+            side_effect=[TimeoutError("timed out"), polluted_rss],
+        ):
+            with self.assertRaisesRegex(ValueError, "no relevant results"):
+                sandbox.search("недорогие книги Apple Books", limit=5)
+
     def test_apple_books_api_provides_catalog_and_price_evidence(self):
         payload = {
             "resultCount": 2,
@@ -233,7 +270,7 @@ class ResearchQualityTest(unittest.TestCase):
                     "artistName": "Author B",
                     "formattedPrice": "699 ₽",
                     "price": 699.0,
-                    "trackViewUrl": "https://books.apple.com/ru/book/popular-b/id22",
+                    "trackViewUrl": "https://books.apple.com/us/book/popular-b/id22",
                     "genres": ["Fiction"],
                 },
                 {
@@ -243,7 +280,7 @@ class ResearchQualityTest(unittest.TestCase):
                     "artistName": "Author A",
                     "formattedPrice": "199 ₽",
                     "price": 199.0,
-                    "trackViewUrl": "https://books.apple.com/ru/book/popular-a/id11",
+                    "trackViewUrl": "https://books.apple.com/us/book/popular-a/id11",
                     "genres": ["Fiction"],
                 },
             ],
@@ -260,11 +297,187 @@ class ResearchQualityTest(unittest.TestCase):
             )
 
         urls = [call.args[0].full_url for call in urlopen.call_args_list]
-        self.assertIn("/books/top-paid/", urls[0])
+        self.assertIn("/us/books/top-paid/", urls[0])
         self.assertIn("/lookup?", urls[1])
         self.assertLess(result.index("Popular A"), result.index("Popular B"))
         self.assertIn("199 ₽", result)
         self.assertIn("Top Paid", result)
+
+    def test_apple_books_filters_adult_catalog_items(self):
+        payload = {
+            "resultCount": 3,
+            "results": [
+                {
+                    "kind": "ebook",
+                    "trackName": "Python for Beginners",
+                    "artistName": "Safe Author",
+                    "formattedPrice": "$4.99",
+                    "price": 4.99,
+                    "trackViewUrl": "https://books.apple.com/us/book/python-for-beginners/id1",
+                    "genres": ["Computers"],
+                },
+                {
+                    "kind": "ebook",
+                    "trackName": "Python Adult Adventures",
+                    "artistName": "Unsafe Author",
+                    "formattedPrice": "$1.99",
+                    "price": 1.99,
+                    "trackViewUrl": "https://books.apple.com/us/book/python-adult/id2",
+                    "genres": ["Erotica"],
+                    "trackExplicitness": "explicit",
+                },
+                {
+                    "kind": "ebook",
+                    "trackName": "Unrelated Cooking",
+                    "artistName": "Other Author",
+                    "formattedPrice": "$2.99",
+                    "price": 2.99,
+                    "trackViewUrl": "https://books.apple.com/us/book/cooking/id3",
+                    "genres": ["Cooking"],
+                },
+            ],
+        }
+        sandbox = HttpSandbox()
+        with patch(
+            "ai_agent.tools.http.request.urlopen",
+            return_value=FakeHttpResponse(json.dumps(payload).encode()),
+        ):
+            result = sandbox.search("Python Apple Books", limit=5, country="us")
+
+        self.assertIn("Python for Beginners", result)
+        self.assertNotIn("Adult Adventures", result)
+        self.assertNotIn("Unrelated Cooking", result)
+        self.assertIn("topic_mismatch=1", result)
+
+    def test_apple_tv_rejects_homepage_login_and_support_results(self):
+        polluted_rss = FakeHttpResponse(
+            b"""<?xml version="1.0"?><rss><channel>
+            <item><title>Apple</title><link>https://www.apple.com/</link><description>Apple homepage</description></item>
+            <item><title>Apple Account</title><link>https://account.apple.com/login</link><description>Sign in</description></item>
+            <item><title>Apple Support</title><link>https://support.apple.com/apple-tv</link><description>Support</description></item>
+            <item><title>Apple TV</title><link>https://tv.apple.com/</link><description>Apple TV homepage</description></item>
+            </channel></rss>""",
+            {"Content-Type": "application/rss+xml; charset=utf-8"},
+        )
+        sandbox = HttpSandbox()
+        with patch("ai_agent.tools.http.request.urlopen", return_value=polluted_rss):
+            with self.assertRaisesRegex(ValueError, "no relevant results") as raised:
+                sandbox.search(
+                    "топ гангстерских фильмов доступных по подписке Apple TV",
+                    limit=5,
+                )
+
+        self.assertIn("wrong_catalog", str(raised.exception))
+        self.assertIn("generic_homepage", str(raised.exception))
+
+    def test_apple_tv_accepts_only_direct_subscription_evidence(self):
+        rss = FakeHttpResponse(
+            b"""<?xml version="1.0"?><rss><channel>
+            <item><title>Crime Movie - Apple TV+</title><link>https://tv.apple.com/us/movie/crime-movie/umc.cmc.1</link><description>Gangster crime movie available with Apple TV+ subscription.</description></item>
+            <item><title>Apple TV</title><link>https://tv.apple.com/</link><description>Watch shows and movies.</description></item>
+            </channel></rss>""",
+            {"Content-Type": "application/rss+xml; charset=utf-8"},
+        )
+        sandbox = HttpSandbox()
+        with patch("ai_agent.tools.http.request.urlopen", return_value=rss) as urlopen:
+            result = sandbox.search(
+                "gangster crime movies available with Apple TV subscription",
+                limit=5,
+                country="us",
+            )
+
+        requested_url = urlopen.call_args.args[0].full_url
+        self.assertIn("site%3Atv.apple.com", requested_url)
+        self.assertIn("Search intent: apple_tv_plus", result)
+        self.assertIn("Crime Movie", result)
+        self.assertNotIn("2. Apple TV", result)
+
+    def test_apple_tv_rejects_a_different_storefront(self):
+        rss = FakeHttpResponse(
+            b"""<?xml version="1.0"?><rss><channel>
+            <item><title>Crime Movie - Apple TV+</title><link>https://tv.apple.com/gb/movie/crime-movie/umc.cmc.1</link><description>Gangster crime movie included with Apple TV+.</description></item>
+            </channel></rss>""",
+            {"Content-Type": "application/rss+xml; charset=utf-8"},
+        )
+        sandbox = HttpSandbox()
+        with patch("ai_agent.tools.http.request.urlopen", return_value=rss):
+            with self.assertRaisesRegex(ValueError, "storefront_mismatch"):
+                sandbox.search(
+                    "gangster crime movies available with Apple TV subscription",
+                    limit=5,
+                    country="us",
+                )
+
+    def test_russian_apple_tv_query_adds_english_genre_terms(self):
+        rss = FakeHttpResponse(
+            b"""<?xml version="1.0"?><rss><channel>
+            <item><title>Crime Movie - Apple TV+</title><link>https://tv.apple.com/us/movie/crime-movie/umc.cmc.1</link><description>Gangster crime movie included with Apple TV+.</description></item>
+            </channel></rss>""",
+            {"Content-Type": "application/rss+xml; charset=utf-8"},
+        )
+        sandbox = HttpSandbox()
+        with patch("ai_agent.tools.http.request.urlopen", return_value=rss) as urlopen:
+            result = sandbox.search(
+                "топ гангстерских фильмов доступных по подписке Apple TV",
+                limit=5,
+            )
+
+        requested_url = urlopen.call_args.args[0].full_url
+        self.assertIn("gangster", requested_url)
+        self.assertIn("Crime Movie", result)
+
+    def test_docx_failure_is_not_reported_as_an_internet_failure(self):
+        outcome = ToolOutcome(
+            results=["Инструмент 'create_docx' не смог выполнить действие: access denied"],
+            tool_names=["create_docx"],
+        )
+
+        message = _tool_completion_text(outcome)
+
+        self.assertIn("не удалось создать Word-файл", message)
+        self.assertNotIn("интернет-запрос", message)
+
+    def test_repeated_research_request_creates_unique_docx_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = replace(
+                Settings.load(ROOT),
+                model_provider="mock",
+                model_name="mock-local",
+                llm_max_retries=0,
+                database_file=root / "avelin.sqlite3",
+                memory_file=root / "memory.json",
+                tool_workspace_dir=root / "workspace",
+            )
+            agent = Agent(settings)
+            agent.provider = RepeatingSearchProvider()
+            search_result = (
+                "Search query: cheap fiction Apple Books\n"
+                "Search intent: apple_books\n"
+                "Search provider: apple_search_api\n"
+                "Storefront: us\n"
+                "Quality: accepted=2; rejected=0\n"
+                "Rejected reasons: none\nResults:\n"
+                "1. Book One\n"
+                "   URL: https://books.apple.com/us/book/book-one/id1\n"
+                "   Snippet: Catalog: Apple Books. Price: $1.99. Genres: Fiction\n"
+                "2. Book Two\n"
+                "   URL: https://books.apple.com/us/book/book-two/id2\n"
+                "   Snippet: Catalog: Apple Books. Price: $2.99. Genres: Fiction"
+            )
+            with patch.object(agent.http, "search", return_value=search_result):
+                first = list(agent.respond_stream("Найди книги и создай Word-файл books.docx"))
+                second = list(agent.respond_stream("Найди книги и создай Word-файл books.docx"))
+
+            self.assertEqual(first[-1]["type"], "done")
+            self.assertEqual(second[-1]["type"], "done")
+            self.assertTrue((root / "workspace" / "books.docx").is_file())
+            self.assertTrue((root / "workspace" / "books_2.docx").is_file())
+            assistants = [
+                item for item in agent.memory.snapshot().history if item["role"] == "assistant"
+            ]
+            self.assertEqual(assistants[-2]["artifacts"][0]["path"], "books.docx")
+            self.assertEqual(assistants[-1]["artifacts"][0]["path"], "books_2.docx")
 
     def test_docx_quality_gate_refuses_a_single_source(self):
         with tempfile.TemporaryDirectory() as directory:

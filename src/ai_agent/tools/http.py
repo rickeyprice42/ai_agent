@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib import error, parse, request
 from xml.etree import ElementTree
@@ -7,6 +8,7 @@ from collections import Counter
 import gzip
 import ipaddress
 import json
+import logging
 import re
 import socket
 import zlib
@@ -21,11 +23,27 @@ APPLE_SEARCH_ENDPOINT = "https://itunes.apple.com/search"
 APPLE_LOOKUP_ENDPOINT = "https://itunes.apple.com/lookup"
 APPLE_CHART_ENDPOINT = "https://rss.applemarketingtools.com/api/v2/{country}/books/top-paid/{limit}/books.json"
 SEARCH_STOP_WORDS = {
-    "a", "affordable", "an", "and", "best", "budget", "buy", "cheap", "for", "good", "in", "of", "on", "or", "recommendation", "recommendations", "the", "to",
+    "a", "affordable", "an", "and", "app", "best", "budget", "buy", "catalog", "catalogue", "cheap", "for", "good", "in", "of", "on", "or", "recommendation", "recommendations", "store", "the", "to",
     "актуальные", "в", "для", "и", "которые", "купить", "лучшие", "мог", "на", "недорогие",
-    "несколько", "по", "рекомендации", "с", "хорошие", "я",
+    "несколько", "по", "подписка", "подписке", "рекомендации", "с", "хорошие", "я",
 }
 JUNK_PATH_PARTS = {"account", "auth", "help", "login", "mail", "signin", "support"}
+ADULT_BOOK_MARKERS = {
+    "adult", "adults only", "erotic", "erotica", "explicit", "porn", "pornography",
+    "sex", "sexual", "эротика", "эротический", "порно",
+}
+logger = logging.getLogger("avelin.research")
+
+
+@dataclass(frozen=True, slots=True)
+class SearchPlan:
+    original_query: str
+    provider_query: str
+    intent: str
+    storefront: str
+    subject_terms: frozenset[str]
+    price_required: bool = False
+    subscription_required: bool = False
 
 
 class HttpSandbox:
@@ -67,7 +85,7 @@ class HttpSandbox:
             status = exc.code
             response_headers = dict(exc.headers.items())
             raw_body = b"" if normalized_method == "HEAD" else exc.read(self.max_response_chars + 1)
-        except error.URLError as exc:
+        except (error.URLError, TimeoutError) as exc:
             raise ValueError(f"HTTP request failed: {exc}") from exc
 
         body, truncated = _decode_body(
@@ -89,24 +107,22 @@ class HttpSandbox:
         if len(normalized_query) < 2:
             raise ValueError("Search query must contain at least 2 characters.")
         normalized_limit = max(1, min(int(limit), 10))
-        apple_books_intent = "apple books" in normalized_query.lower()
-        storefront = _normalize_storefront(country, normalized_query)
+        plan = _plan_search(normalized_query, country)
         provider = SEARCH_PROVIDER
         candidates: list[dict[str, str]] = []
-        if apple_books_intent:
+        if plan.intent == "apple_books":
             try:
                 candidates = self._search_apple_books(
                     normalized_query,
                     max(normalized_limit * 4, 10),
-                    storefront,
+                    plan.storefront,
                 )
             except ValueError:
                 candidates = []
             if candidates:
                 provider = "apple_search_api"
 
-        provider_query = _provider_query(normalized_query)
-        search_url = f"{SEARCH_ENDPOINT}?{parse.urlencode({'q': provider_query, 'format': 'rss'})}"
+        search_url = f"{SEARCH_ENDPOINT}?{parse.urlencode({'q': plan.provider_query, 'format': 'rss'})}"
         search_request = request.Request(
             search_url,
             headers={
@@ -123,25 +139,41 @@ class HttpSandbox:
                     raw_body = response.read(self.max_response_chars * 8)
             except error.HTTPError as exc:
                 raise ValueError(f"Web search returned HTTP {exc.code}.") from exc
-            except error.URLError as exc:
+            except (error.URLError, TimeoutError) as exc:
                 raise ValueError("Web search is temporarily unavailable.") from exc
 
             body, _ = _decode_body(raw_body, self.max_response_chars * 4, headers)
             candidates = _parse_search_results(body, max(normalized_limit * 4, 10))
         if not candidates:
             raise ValueError("Web search returned no readable results.")
-        results, rejected = _rank_search_results(normalized_query, candidates, normalized_limit)
+        results, rejected = _rank_search_results(plan, candidates, normalized_limit)
         if not results:
             reasons = ", ".join(f"{key}={value}" for key, value in sorted(rejected.items()))
             suffix = f" ({reasons})" if reasons else ""
+            logger.info(
+                "research rejected all candidates intent=%s storefront=%s candidates=%s reasons=%s",
+                plan.intent,
+                plan.storefront,
+                len(candidates),
+                reasons or "none",
+            )
             raise ValueError(f"Web search found no relevant results for the request{suffix}.")
 
         rejected_count = sum(rejected.values())
         reason_summary = ", ".join(f"{key}={value}" for key, value in sorted(rejected.items())) or "none"
+        logger.info(
+            "research quality intent=%s provider=%s storefront=%s accepted=%s rejected=%s",
+            plan.intent,
+            provider,
+            plan.storefront,
+            len(results),
+            rejected_count,
+        )
         lines = [
             f"Search query: {normalized_query}",
+            f"Search intent: {plan.intent}",
             f"Search provider: {provider}",
-            *( [f"Storefront: {storefront}"] if provider == "apple_search_api" else [] ),
+            *( [f"Storefront: {plan.storefront}"] if plan.intent.startswith("apple_") else [] ),
             f"Quality: accepted={len(results)}; rejected={rejected_count}",
             f"Rejected reasons: {reason_summary}",
             "Results:",
@@ -192,7 +224,7 @@ class HttpSandbox:
                 raw_body = response.read(self.max_response_chars * 8)
         except error.HTTPError as exc:
             raise ValueError(f"{label} returned HTTP {exc.code}.") from exc
-        except error.URLError as exc:
+        except (error.URLError, TimeoutError) as exc:
             raise ValueError(f"{label} is temporarily unavailable.") from exc
         body, _ = _decode_body(raw_body, self.max_response_chars * 4, headers)
         try:
@@ -374,11 +406,44 @@ def _parse_search_results(body: str, limit: int) -> list[dict[str, str]]:
     return parser.results[:limit]
 
 
-def _provider_query(query: str) -> str:
+def _plan_search(query: str, country: str | None = None) -> SearchPlan:
     lowered = query.lower()
-    if "apple books" in lowered and "site:" not in lowered:
-        return f"{query} site:books.apple.com"
-    return query
+    storefront = _normalize_storefront(country, query)
+    price_required = bool(re.search(r"недорог|дешев|цен[аыу]|cheap|budget|price|affordable", lowered))
+    subscription_required = bool(
+        re.search(r"подписк|subscription|included|available\s+(?:on|with)|доступн", lowered)
+    )
+    if _is_apple_books_query(lowered):
+        terms = frozenset(_apple_books_terms(query))
+        subject = " ".join(sorted(terms)) or "books"
+        return SearchPlan(
+            original_query=query,
+            provider_query=f"{subject} site:books.apple.com",
+            intent="apple_books",
+            storefront=storefront,
+            subject_terms=terms,
+            price_required=price_required,
+        )
+    if _is_apple_tv_query(lowered):
+        terms = frozenset(_apple_tv_terms(query))
+        subject = " ".join(sorted(terms)) or "movies"
+        catalog = "Apple TV+" if subscription_required or "apple tv+" in lowered or "apple tv plus" in lowered else "Apple TV"
+        return SearchPlan(
+            original_query=query,
+            provider_query=f"{subject} {catalog} site:tv.apple.com",
+            intent="apple_tv_plus" if catalog == "Apple TV+" else "apple_tv_catalog",
+            storefront=storefront,
+            subject_terms=terms,
+            subscription_required=subscription_required,
+        )
+    return SearchPlan(
+        original_query=query,
+        provider_query=query,
+        intent="generic",
+        storefront=storefront,
+        subject_terms=frozenset(_meaningful_terms(query)),
+        price_required=price_required,
+    )
 
 
 def _normalize_storefront(country: str | None, query: str) -> str:
@@ -394,23 +459,24 @@ def _normalize_storefront(country: str | None, query: str) -> str:
 
 
 def _rank_search_results(
-    query: str,
+    plan: SearchPlan,
     candidates: list[dict[str, str]],
     limit: int,
 ) -> tuple[list[dict[str, str]], Counter[str]]:
-    query_terms = _meaningful_terms(query)
-    apple_books_intent = "apple books" in query.lower()
-    price_requested = bool(re.search(r"недорог|дешев|цен[аыу]|cheap|budget|price", query.lower()))
+    query_terms = set(plan.subject_terms)
+    apple_books_intent = plan.intent == "apple_books"
+    apple_tv_intent = plan.intent in {"apple_tv_catalog", "apple_tv_plus"}
     ranked: list[tuple[int, int, dict[str, str]]] = []
     rejected: Counter[str] = Counter()
     seen_urls: set[str] = set()
 
     for position, item in enumerate(candidates):
         normalized_url = item["url"].strip()
-        if normalized_url in seen_urls:
+        canonical_url = _canonical_result_url(normalized_url)
+        if canonical_url in seen_urls:
             rejected["duplicate"] += 1
             continue
-        seen_urls.add(normalized_url)
+        seen_urls.add(canonical_url)
         parsed_url = parse.urlparse(normalized_url)
         hostname = (parsed_url.hostname or "").lower().removeprefix("www.")
         path_parts = {part.lower() for part in parsed_url.path.split("/") if part}
@@ -418,29 +484,60 @@ def _rank_search_results(
         result_terms = _meaningful_terms(searchable)
         overlap = query_terms & result_terms
         preferred_apple_source = hostname == "books.apple.com" or hostname.endswith(".books.apple.com")
+        preferred_tv_source = hostname == "tv.apple.com" or hostname.endswith(".tv.apple.com")
         apple_evidence = "apple books" in searchable or preferred_apple_source
         book_evidence = bool({"book", "books", "ebook", "книга", "книги", "книг"} & result_terms)
 
+        if path_parts & JUNK_PATH_PARTS:
+            rejected["login_or_support"] += 1
+            continue
         if apple_books_intent and not (preferred_apple_source or (apple_evidence and book_evidence)):
             rejected["wrong_catalog"] += 1
             continue
-        if price_requested and not _has_price_evidence(item):
+        if apple_books_intent and preferred_apple_source and not _storefront_matches(
+            parsed_url, plan.storefront
+        ):
+            rejected["storefront_mismatch"] += 1
+            continue
+        if apple_books_intent and _contains_adult_markers(searchable):
+            rejected["unsafe_or_adult"] += 1
+            continue
+        if apple_books_intent and query_terms and not overlap:
+            rejected["topic_mismatch"] += 1
+            continue
+        if apple_tv_intent and not preferred_tv_source:
+            rejected["wrong_catalog"] += 1
+            continue
+        if apple_tv_intent and parsed_url.path in {"", "/"}:
+            rejected["generic_homepage"] += 1
+            continue
+        if apple_tv_intent and not _storefront_matches(parsed_url, plan.storefront):
+            rejected["storefront_mismatch"] += 1
+            continue
+        if apple_tv_intent and query_terms and not overlap:
+            rejected["topic_mismatch"] += 1
+            continue
+        if apple_tv_intent and plan.subscription_required and not _has_apple_tv_plus_evidence(item):
+            rejected["subscription_not_verified"] += 1
+            continue
+        if plan.price_required and not _has_price_evidence(item):
             rejected["price_not_verified"] += 1
             continue
-        if path_parts & JUNK_PATH_PARTS and not preferred_apple_source:
-            rejected["login_or_support"] += 1
-            continue
-        if not overlap and not preferred_apple_source:
+        if not overlap and not preferred_apple_source and not preferred_tv_source:
             rejected["irrelevant"] += 1
             continue
-        if parsed_url.path in {"", "/"} and len(overlap) < 2 and not preferred_apple_source:
+        if parsed_url.path in {"", "/"} and len(overlap) < 2 and not preferred_apple_source and not preferred_tv_source:
             rejected["generic_homepage"] += 1
             continue
 
         score = len(overlap) * 3
         if preferred_apple_source:
             score += 12
+        if preferred_tv_source:
+            score += 12
         if "apple books" in searchable:
+            score += 5
+        if _has_apple_tv_plus_evidence(item):
             score += 5
         if book_evidence:
             score += 2
@@ -451,7 +548,7 @@ def _rank_search_results(
     per_domain: Counter[str] = Counter()
     for _, _, item in ranked:
         hostname = (parse.urlparse(item["url"]).hostname or "").lower().removeprefix("www.")
-        if not apple_books_intent and per_domain[hostname] >= 3:
+        if not apple_books_intent and not apple_tv_intent and per_domain[hostname] >= 3:
             rejected["domain_duplicate"] += 1
             continue
         accepted.append(item)
@@ -471,9 +568,42 @@ def _meaningful_terms(value: str) -> set[str]:
 
 
 def _apple_books_term(query: str) -> str:
-    without_catalog = re.sub(r"apple\s+books", " ", query, flags=re.IGNORECASE)
-    terms = [term for term in _meaningful_terms(without_catalog) if term not in {"book", "books", "ebook", "книга", "книги", "книг"}]
-    return " ".join(sorted(terms))
+    return " ".join(sorted(_apple_books_terms(query)))
+
+
+def _apple_books_terms(query: str) -> set[str]:
+    without_catalog = re.sub(r"apple\s+books|эппл\s+букс", " ", query, flags=re.IGNORECASE)
+    return {
+        term
+        for term in _meaningful_terms(without_catalog)
+        if term not in {"book", "books", "ebook", "книга", "книги", "книг", "магазин", "каталог"}
+    }
+
+
+def _apple_tv_terms(query: str) -> set[str]:
+    without_catalog = re.sub(
+        r"apple\s*tv(?:\s*\+|\s+plus)?|эппл\s+тв",
+        " ",
+        query,
+        flags=re.IGNORECASE,
+    )
+    terms = {
+        term
+        for term in _meaningful_terms(without_catalog)
+        if term not in {"film", "films", "movie", "movies", "stream", "streaming", "фильм", "фильмы", "фильмов", "топ"}
+    }
+    lowered = query.lower()
+    if re.search(r"гангстер|мафи", lowered):
+        terms.update({"gangster", "crime"})
+    return terms
+
+
+def _is_apple_books_query(lowered: str) -> bool:
+    return bool(re.search(r"apple\s+books|эппл\s+букс", lowered, flags=re.IGNORECASE))
+
+
+def _is_apple_tv_query(lowered: str) -> bool:
+    return bool(re.search(r"apple\s*tv(?:\s*\+|\s+plus)?|эппл\s+тв", lowered, flags=re.IGNORECASE))
 
 
 def _apple_book_candidates(
@@ -495,6 +625,10 @@ def _apple_book_candidates(
         price = str(item.get("formattedPrice") or "").strip()
         genres = item.get("genres") or []
         genre_text = ", ".join(str(value) for value in genres[:3]) if isinstance(genres, list) else ""
+        explicitness = str(item.get("trackExplicitness") or item.get("contentAdvisoryRating") or "").strip()
+        safety_text = " ".join((title, genre_text, explicitness)).lower()
+        if _contains_adult_markers(safety_text):
+            continue
         item_id = str(item.get("trackId") or item.get("collectionId") or "")
         rank = (ranks or {}).get(item_id)
         evidence = [
@@ -534,6 +668,28 @@ def _book_price_sort_key(item: dict[str, str]) -> tuple[float, str]:
     price = item.get("price")
     numeric = float(price) if isinstance(price, (int, float)) else float("inf")
     return numeric, item.get("title", "").lower()
+
+
+def _canonical_result_url(url: str) -> str:
+    parsed_url = parse.urlparse(url.strip())
+    hostname = (parsed_url.hostname or "").lower().removeprefix("www.")
+    path = re.sub(r"/+", "/", parsed_url.path or "/").rstrip("/") or "/"
+    return parse.urlunparse((parsed_url.scheme.lower(), hostname, path, "", "", ""))
+
+
+def _storefront_matches(parsed_url: parse.ParseResult, storefront: str) -> bool:
+    path_parts = [part.lower() for part in parsed_url.path.split("/") if part]
+    return bool(path_parts and re.fullmatch(r"[a-z]{2}", path_parts[0]) and path_parts[0] == storefront)
+
+
+def _contains_adult_markers(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in ADULT_BOOK_MARKERS)
+
+
+def _has_apple_tv_plus_evidence(item: dict[str, str]) -> bool:
+    text = " ".join((str(item.get("title", "")), str(item.get("snippet", "")))).lower()
+    return bool(re.search(r"apple\s*tv\s*(?:\+|plus)|included\s+with\s+apple\s*tv|доступн\w*\s+по\s+подписк", text))
 
 
 def _strip_html(value: str) -> str:
