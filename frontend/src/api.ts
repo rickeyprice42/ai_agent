@@ -5,6 +5,7 @@ import type {
   ContextCompactionItem,
   ContextCompactionReview,
   MemoryOverview,
+  PersonalMemoryItem,
   ModelProviderOption,
   ModelSettings,
   ProjectItem,
@@ -237,8 +238,59 @@ export async function fetchMemoryOverview(token: string): Promise<MemoryOverview
   return response.json();
 }
 
-export async function exportAgentMemory(token: string): Promise<Blob> {
-  const response = await fetch("/api/memory/export", {
+export async function fetchPersonalMemory(token: string, includeSensitive = false): Promise<PersonalMemoryItem[]> {
+  const response = await fetch(`/api/memory/records?include_sensitive=${includeSensitive}`, {
+    headers: authHeaders(token)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось загрузить персональную память.");
+  return response.json();
+}
+
+export async function createPersonalMemory(
+  token: string,
+  payload: {
+    kind: PersonalMemoryItem["kind"];
+    content: string;
+    scope: PersonalMemoryItem["scope"];
+    project_id?: string | null;
+    thread_id?: string | null;
+    sensitive: boolean;
+    consent_granted: boolean;
+  }
+): Promise<PersonalMemoryItem> {
+  const response = await fetch("/api/memory/records", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders(token) },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось сохранить персональную память.");
+  return response.json();
+}
+
+export async function updatePersonalMemory(
+  token: string,
+  memory: PersonalMemoryItem,
+  payload: { content?: string; status?: PersonalMemoryItem["status"] }
+): Promise<PersonalMemoryItem> {
+  const response = await fetch(`/api/memory/records/${encodeURIComponent(memory.id)}?sensitive=${memory.sensitive}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeaders(token) },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось изменить персональную память.");
+  return response.json();
+}
+
+export async function deletePersonalMemory(token: string, memory: PersonalMemoryItem): Promise<void> {
+  const response = await fetch(`/api/memory/records/${encodeURIComponent(memory.id)}?sensitive=${memory.sensitive}`, {
+    method: "DELETE",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось удалить персональную память.");
+}
+
+export async function exportAgentMemory(token: string, includeSensitive = false): Promise<Blob> {
+  const response = await fetch(`/api/memory/export?include_sensitive=${includeSensitive}`, {
     headers: authHeaders(token)
   });
   if (!response.ok) {

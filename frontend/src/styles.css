@@ -707,6 +707,36 @@ button {
   margin-bottom: 0.75rem;
 }
 
+.memory-editor {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.memory-editor textarea {
+  min-height: 92px;
+  resize: vertical;
+}
+
+.memory-editor-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.memory-editor-controls select {
+  min-height: 36px;
+}
+
+.memory-sensitive-toggle {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
 .memory-scope-list span {
   padding: 0.28rem 0.5rem;
   border: 1px solid var(--line);

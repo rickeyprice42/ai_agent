@@ -85,6 +85,9 @@ python -c "from fastapi.testclient import TestClient; from backend.main import a
 - `GET /api/chats/{thread_id}/compactions/{id}` - summary вместе с исходными сообщениями для проверки.
 - `POST /api/chats/{thread_id}/compactions/{id}/verify` - подтвердить summary для использования в контексте.
 - `POST /api/chats/{thread_id}/compactions/{id}/rollback` - исключить summary и вернуться к оригиналам.
+- `GET/POST /api/memory/records` - просмотр и сохранение персональной памяти с явным согласием.
+- `PATCH/DELETE /api/memory/records/{id}` - изменение, отзыв и удаление записи владельцем.
+- `GET /api/memory/export?include_sensitive=false` - экспорт; Health-данные по умолчанию исключены.
 
 Ответы ассистента сохраняются вместе со статусом (`pending`, `complete`, `cancelled`,
 `failed`), provider-ом и моделью. Ошибки Ollama не записываются как обычные ответы и
@@ -164,6 +167,21 @@ Context Engine создаёт детерминированный extractive-сн
 пока пользователь не вызовет `verify`. Одновременно может ожидать проверки только один
 цикл. `rollback` исключает снимок из prompt, но не удаляет исходные сообщения или файлы.
 Получить оригиналы для ручной сверки можно через detail endpoint compaction.
+
+## Персональная память
+
+Память разделена на `profile`, `preference`, `episode` и `fact`, содержит scope,
+confidence, status, TTL/timestamps и provenance. Сохранение через API невозможно без
+`consent_granted=true`. Истёкшие и отозванные записи не возвращаются в активном списке.
+Все CRUD-запросы дополнительно ограничены владельцем записи.
+
+Чувствительные Health-записи физически хранятся в отдельной таблице и не попадают в
+обычное чтение или экспорт. Их просмотр и экспорт требуют отдельного явного действия в
+интерфейсе. Тела запросов и содержимое памяти не записываются в backend-логи.
+
+Локальный desktop runtime остаётся на SQLite. Эквивалентный production-контракт
+PostgreSQL с row-level security находится в
+`migrations/postgresql/0001_personal_memory.sql`.
 
 ## Локальный лаунчер
 

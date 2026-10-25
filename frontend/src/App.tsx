@@ -8,9 +8,11 @@ import {
   approveBlockedStep,
   clearChatMessages,
   clearAgentMemory,
+  createPersonalMemory,
   createProject,
   createChatThread,
   deleteMemoryNote,
+  deletePersonalMemory,
   deleteProject,
   deleteChatThread,
   downloadWorkspaceFile,
@@ -21,6 +23,7 @@ import {
   fetchContextCompactions,
   fetchMe,
   fetchMemoryOverview,
+  fetchPersonalMemory,
   fetchModelProviders,
   login as authLogin,
   logout as authLogout,
@@ -35,6 +38,7 @@ import {
   updateProject,
   updateChatThread,
   updateModelSettings,
+  updatePersonalMemory,
   verifyContextCompaction
 } from "./api";
 import type {
@@ -44,6 +48,7 @@ import type {
   ContextCompactionReview,
   FileArtifact,
   MemoryOverview,
+  PersonalMemoryItem,
   ModelProviderOption,
   UserProfile
 } from "./types";
@@ -106,7 +111,9 @@ const EMPTY_MEMORY_OVERVIEW: MemoryOverview = {
     memory_index: 0,
     chat_messages: 0,
     tasks: 0,
-    action_logs: 0
+    action_logs: 0,
+    personal_records: 0,
+    health_records: 0
   },
   notes: []
 };
@@ -189,6 +196,13 @@ function readStoredThemeMode(): ThemeMode {
 export default function App() {
   const [bootstrap, setBootstrap] = useState<BootstrapPayload>(EMPTY_BOOTSTRAP);
   const [memoryOverview, setMemoryOverview] = useState<MemoryOverview>(EMPTY_MEMORY_OVERVIEW);
+  const [personalMemory, setPersonalMemory] = useState<PersonalMemoryItem[]>([]);
+  const [showHealthMemory, setShowHealthMemory] = useState(false);
+  const [memoryDraft, setMemoryDraft] = useState("");
+  const [memoryKind, setMemoryKind] = useState<PersonalMemoryItem["kind"]>("fact");
+  const [memoryScope, setMemoryScope] = useState<PersonalMemoryItem["scope"]>("global");
+  const [memorySensitive, setMemorySensitive] = useState(false);
+  const [isSavingPersonalMemory, setIsSavingPersonalMemory] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -313,12 +327,14 @@ export default function App() {
     }
 
     try {
-      const [data, memoryData] = await Promise.all([
+      const [data, memoryData, personalMemoryData] = await Promise.all([
         fetchBootstrap(token, threadId || null),
-        fetchMemoryOverview(token)
+        fetchMemoryOverview(token),
+        fetchPersonalMemory(token, showHealthMemory)
       ]);
       setBootstrap(data);
       setMemoryOverview(memoryData);
+      setPersonalMemory(personalMemoryData);
       setMessages(data.history);
       setActiveThreadId(data.active_thread.id);
       setActiveProjectId(data.active_thread.project_id ?? "");
@@ -653,12 +669,84 @@ export default function App() {
     }
   }
 
+  async function handleCreatePersonalMemory(event: FormEvent) {
+    event.preventDefault();
+    if (!authToken || !memoryDraft.trim() || isSavingPersonalMemory) return;
+    const consentText = memorySensitive
+      ? "Сохранить эту запись в отдельной памяти Health? Она может содержать чувствительные данные."
+      : "Разрешить Avelin сохранить эту персональную запись?";
+    if (!window.confirm(consentText)) return;
+    setIsSavingPersonalMemory(true);
+    setError(null);
+    try {
+      await createPersonalMemory(authToken, {
+        kind: memoryKind,
+        content: memoryDraft.trim(),
+        scope: memoryScope,
+        project_id: memoryScope === "project" ? activeProjectId || null : null,
+        thread_id: memoryScope === "chat" ? activeThreadId || null : null,
+        sensitive: memorySensitive,
+        consent_granted: true
+      });
+      setMemoryDraft("");
+      setPersonalMemory(await fetchPersonalMemory(authToken, showHealthMemory || memorySensitive));
+      setMemoryOverview(await fetchMemoryOverview(authToken));
+      if (memorySensitive) setShowHealthMemory(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось сохранить персональную память.");
+    } finally {
+      setIsSavingPersonalMemory(false);
+    }
+  }
+
+  async function handleEditPersonalMemory(memory: PersonalMemoryItem) {
+    if (!authToken) return;
+    const content = window.prompt("Изменить запись памяти:", memory.content);
+    if (content === null || !content.trim() || content.trim() === memory.content) return;
+    try {
+      await updatePersonalMemory(authToken, memory, { content: content.trim() });
+      setPersonalMemory(await fetchPersonalMemory(authToken, showHealthMemory));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось изменить персональную память.");
+    }
+  }
+
+  async function handleDeletePersonalMemory(memory: PersonalMemoryItem) {
+    if (!authToken || !window.confirm("Удалить эту запись памяти без возможности восстановления?")) return;
+    try {
+      await deletePersonalMemory(authToken, memory);
+      setPersonalMemory(await fetchPersonalMemory(authToken, showHealthMemory));
+      setMemoryOverview(await fetchMemoryOverview(authToken));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось удалить персональную память.");
+    }
+  }
+
+  async function handleRevokePersonalMemory(memory: PersonalMemoryItem) {
+    if (!authToken || !window.confirm("Отозвать согласие? Запись перестанет использоваться агентом.")) return;
+    try {
+      await updatePersonalMemory(authToken, memory, { status: "revoked" });
+      setPersonalMemory(await fetchPersonalMemory(authToken, showHealthMemory));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось отозвать согласие.");
+    }
+  }
+
+  async function handleToggleHealthMemory() {
+    if (!authToken) return;
+    const next = !showHealthMemory;
+    if (next && !window.confirm("Показать чувствительные записи Health на экране?")) return;
+    setShowHealthMemory(next);
+    setPersonalMemory(await fetchPersonalMemory(authToken, next));
+  }
+
   async function handleExportMemory() {
     if (!authToken || isExportingMemory) return;
     setIsExportingMemory(true);
     setError(null);
     try {
-      const blob = await exportAgentMemory(authToken);
+      const includeSensitive = showHealthMemory && window.confirm("Включить чувствительные Health-данные в экспорт?");
+      const blob = await exportAgentMemory(authToken, includeSensitive);
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
       const stamp = new Date().toISOString().slice(0, 10);
@@ -678,7 +766,7 @@ export default function App() {
   async function handleClearMemory(scope: "all" | "global" | "current_chat" | "current_project") {
     if (!authToken || isClearingMemory) return;
     const labels = {
-      all: "всю долгосрочную память агента",
+      all: "всю долгосрочную память агента, включая отдельные Health-записи",
       global: "глобальную память агента",
       current_chat: "память текущего чата",
       current_project: "память текущего проекта"
@@ -1402,6 +1490,71 @@ export default function App() {
             <span>Проектные: {memoryOverview.counts.project_notes}</span>
             <span>Из чатов: {memoryOverview.counts.chat_notes}</span>
             <span>Индекс: {memoryOverview.counts.memory_index}</span>
+            <span>Персональные: {memoryOverview.counts.personal_records}</span>
+            <span>Health: {memoryOverview.counts.health_records}</span>
+          </div>
+
+          <form className="memory-editor" onSubmit={(event) => void handleCreatePersonalMemory(event)}>
+            <textarea
+              aria-label="Новая запись персональной памяти"
+              maxLength={8000}
+              onChange={(event) => setMemoryDraft(event.target.value)}
+              placeholder="Что Avelin должна помнить? Сохранение произойдет только после подтверждения."
+              value={memoryDraft}
+            />
+            <div className="memory-editor-controls">
+              <select value={memoryKind} onChange={(event) => setMemoryKind(event.target.value as PersonalMemoryItem["kind"])}>
+                <option value="fact">Факт</option>
+                <option value="preference">Предпочтение</option>
+                <option value="profile">Профиль</option>
+                <option value="episode">Эпизод</option>
+              </select>
+              <select value={memoryScope} onChange={(event) => setMemoryScope(event.target.value as PersonalMemoryItem["scope"])}>
+                <option value="global">Глобально</option>
+                <option value="project" disabled={!activeProjectId}>Текущий проект</option>
+                <option value="chat">Текущий чат</option>
+              </select>
+              <label className="memory-sensitive-toggle">
+                <input checked={memorySensitive} onChange={(event) => setMemorySensitive(event.target.checked)} type="checkbox" />
+                Health
+              </label>
+              <button className="mini-button" disabled={!memoryDraft.trim() || isSavingPersonalMemory} type="submit">
+                {isSavingPersonalMemory ? "Сохраняю..." : "Сохранить с согласием"}
+              </button>
+            </div>
+          </form>
+
+          <div className="memory-actions">
+            <button className="mini-button" onClick={() => void handleToggleHealthMemory()} type="button">
+              {showHealthMemory ? "Скрыть Health" : "Показать Health"}
+            </button>
+          </div>
+
+          <div className="notes">
+            {personalMemory.length === 0 ? (
+              <p className="muted">Персональных записей пока нет.</p>
+            ) : (
+              personalMemory.map((memory) => (
+                <article className="note" key={`${memory.sensitive ? "health" : "personal"}-${memory.id}`}>
+                  <span className="note-index">{memory.kind.slice(0, 2).toUpperCase()}</span>
+                  <div className="note-body">
+                    <div>
+                      <p>{memory.content}</p>
+                      <small>
+                        {memory.scope} · confidence {memory.confidence.toFixed(2)} · {memory.status}
+                        {memory.sensitive ? " · HEALTH" : ""}
+                      </small>
+                      <small>Источник: {memory.provenance.map((source) => source.source_type).join(", ") || "не указан"}</small>
+                    </div>
+                    <div className="memory-actions">
+                      <button className="mini-button" onClick={() => void handleEditPersonalMemory(memory)} type="button">Изменить</button>
+                      <button className="mini-button" onClick={() => void handleRevokePersonalMemory(memory)} type="button">Отозвать</button>
+                      <button className="mini-button mini-button-danger" onClick={() => void handleDeletePersonalMemory(memory)} type="button">Удалить</button>
+                    </div>
+                  </div>
+                </article>
+              ))
+            )}
           </div>
 
           <div className="memory-actions">

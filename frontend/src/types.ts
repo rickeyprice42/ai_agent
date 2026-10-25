@@ -112,6 +112,8 @@ export type MemoryCounts = {
   chat_messages: number;
   tasks: number;
   action_logs: number;
+  personal_records: number;
+  health_records: number;
 };
 
 export type MemoryNoteItem = {
@@ -126,6 +128,31 @@ export type MemoryNoteItem = {
 export type MemoryOverview = {
   counts: MemoryCounts;
   notes: MemoryNoteItem[];
+};
+
+export type PersonalMemoryItem = {
+  id: string;
+  kind: "profile" | "preference" | "episode" | "fact";
+  content: string;
+  scope: "global" | "project" | "chat";
+  project_id?: string | null;
+  thread_id?: string | null;
+  confidence: number;
+  status: "active" | "superseded" | "revoked" | "expired";
+  consent_status: "granted" | "revoked";
+  consented_at?: string | null;
+  revoked_at?: string | null;
+  expires_at?: string | null;
+  sensitive: boolean;
+  created_at: string;
+  updated_at: string;
+  provenance: Array<{
+    id: string;
+    source_type: string;
+    source_id?: string | null;
+    source_uri?: string | null;
+    created_at: string;
+  }>;
 };
 
 export type UserProfile = {

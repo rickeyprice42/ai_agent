@@ -129,6 +129,8 @@ class MemoryCounts(BaseModel):
     chat_messages: int = 0
     tasks: int = 0
     action_logs: int = 0
+    personal_records: int = 0
+    health_records: int = 0
 
 
 class MemoryNoteItem(BaseModel):
@@ -143,6 +145,56 @@ class MemoryNoteItem(BaseModel):
 class MemoryOverviewResponse(BaseModel):
     counts: MemoryCounts
     notes: list[MemoryNoteItem]
+
+
+class MemorySourceItem(BaseModel):
+    id: str
+    source_type: str
+    source_id: str | None = None
+    source_uri: str | None = None
+    created_at: str
+
+
+class PersonalMemoryItem(BaseModel):
+    id: str
+    kind: str
+    content: str
+    scope: str
+    project_id: str | None = None
+    thread_id: str | None = None
+    confidence: float
+    status: str
+    consent_status: str
+    consented_at: str | None = None
+    revoked_at: str | None = None
+    expires_at: str | None = None
+    sensitive: bool = False
+    created_at: str
+    updated_at: str
+    provenance: list[MemorySourceItem] = Field(default_factory=list)
+
+
+class PersonalMemoryCreateRequest(BaseModel):
+    kind: str = Field(..., max_length=40)
+    content: str = Field(..., min_length=1, max_length=8000)
+    scope: str = Field(default="global", max_length=40)
+    project_id: str | None = Field(default=None, max_length=120)
+    thread_id: str | None = Field(default=None, max_length=120)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    expires_at: str | None = Field(default=None, max_length=80)
+    sensitive: bool = False
+    consent_granted: bool = False
+    source_type: str = Field(default="user", max_length=80)
+    source_id: str | None = Field(default=None, max_length=240)
+    source_uri: str | None = Field(default=None, max_length=2000)
+
+
+class PersonalMemoryUpdateRequest(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=8000)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    status: str | None = Field(default=None, max_length=40)
+    expires_at: str | None = Field(default=None, max_length=80)
+    clear_expiry: bool = False
 
 
 class ClearMemoryRequest(BaseModel):

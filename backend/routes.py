@@ -27,6 +27,9 @@ from backend.models import (
     ContextTraceResponse,
     ExecuteStepResponse,
     MemoryOverviewResponse,
+    PersonalMemoryCreateRequest,
+    PersonalMemoryItem,
+    PersonalMemoryUpdateRequest,
     ModelProviderOption,
     ModelSettings,
     ModelSettingsRequest,
@@ -417,9 +420,70 @@ def memory_overview(user: dict[str, str] = Depends(current_user)) -> MemoryOverv
     return MemoryOverviewResponse(**agent_service.memory_overview(user["id"]))
 
 
+@router.get("/memory/records", response_model=list[PersonalMemoryItem])
+def list_personal_memory(
+    include_sensitive: bool = Query(default=False),
+    include_inactive: bool = Query(default=False),
+    user: dict[str, str] = Depends(current_user),
+) -> list[PersonalMemoryItem]:
+    return [
+        PersonalMemoryItem(**item)
+        for item in agent_service.list_personal_memory(
+            user["id"],
+            include_sensitive=include_sensitive,
+            include_inactive=include_inactive,
+        )
+    ]
+
+
+@router.post("/memory/records", response_model=PersonalMemoryItem)
+def create_personal_memory(
+    payload: PersonalMemoryCreateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> PersonalMemoryItem:
+    try:
+        record = agent_service.create_personal_memory(user["id"], **payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return PersonalMemoryItem(**record)
+
+
+@router.patch("/memory/records/{memory_id}", response_model=PersonalMemoryItem)
+def update_personal_memory(
+    memory_id: str,
+    payload: PersonalMemoryUpdateRequest,
+    sensitive: bool = Query(default=False),
+    user: dict[str, str] = Depends(current_user),
+) -> PersonalMemoryItem:
+    try:
+        record = agent_service.update_personal_memory(
+            user["id"], memory_id, sensitive=sensitive, **payload.model_dump()
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail="Запись памяти не найдена.")
+    return PersonalMemoryItem(**record)
+
+
+@router.delete("/memory/records/{memory_id}", status_code=204)
+def delete_personal_memory(
+    memory_id: str,
+    sensitive: bool = Query(default=False),
+    user: dict[str, str] = Depends(current_user),
+) -> Response:
+    deleted = agent_service.delete_personal_memory(user["id"], memory_id, sensitive=sensitive)
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Запись памяти не найдена.")
+    return Response(status_code=204)
+
+
 @router.get("/memory/export")
-def export_memory(user: dict[str, str] = Depends(current_user)) -> Response:
-    payload = agent_service.export_memory(user["id"])
+def export_memory(
+    include_sensitive: bool = Query(default=False),
+    user: dict[str, str] = Depends(current_user),
+) -> Response:
+    payload = agent_service.export_memory(user["id"], include_sensitive=include_sensitive)
     filename = f"avelin-memory-{user['id']}.json"
     return Response(
         content=json.dumps(payload, ensure_ascii=False, indent=2),

@@ -728,16 +728,18 @@ class AvelinDatabase:
         user_id: str = DEFAULT_USER_ID,
         project_id: str | None = None,
         source_thread_id: str | None = None,
-    ) -> None:
+    ) -> str:
         self.ensure_user_defaults(user_id)
+        note_id = str(uuid4())
         with self.connect() as connection:
             connection.execute(
                 """
                 INSERT INTO notes (id, user_id, content, project_id, source_thread_id)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (str(uuid4()), user_id, note, project_id, source_thread_id),
+                (note_id, user_id, note, project_id, source_thread_id),
             )
+        return note_id
 
     def list_notes(self, user_id: str = DEFAULT_USER_ID) -> list[str]:
         with self.connect() as connection:
@@ -751,6 +753,229 @@ class AvelinDatabase:
                 (user_id,),
             ).fetchall()
             return [str(row["content"]) for row in rows]
+
+    def create_memory_record(
+        self,
+        user_id: str,
+        *,
+        kind: str,
+        content: str,
+        scope: str = "global",
+        project_id: str | None = None,
+        thread_id: str | None = None,
+        confidence: float = 1.0,
+        expires_at: str | None = None,
+        sensitive: bool = False,
+        consent_granted: bool = False,
+        source_type: str = "user",
+        source_id: str | None = None,
+        source_uri: str | None = None,
+    ) -> dict:
+        self.ensure_user_defaults(user_id)
+        normalized_kind = _normalize_memory_kind(kind)
+        normalized_scope = _normalize_memory_scope(scope)
+        normalized_content = content.strip()
+        if not normalized_content:
+            raise ValueError("Memory content cannot be empty.")
+        if not consent_granted:
+            raise ValueError("Explicit consent is required before saving personal memory.")
+        if normalized_scope == "project" and not project_id:
+            raise ValueError("project_id is required for project memory.")
+        if normalized_scope == "chat" and not thread_id:
+            raise ValueError("thread_id is required for chat memory.")
+        normalized_confidence = max(0.0, min(float(confidence), 1.0))
+        normalized_expiry = _normalize_optional_datetime(expires_at)
+        table = _memory_table(sensitive)
+        store = "health" if sensitive else "personal"
+        memory_id = str(uuid4())
+        consented_at = datetime.now(timezone.utc).isoformat()
+        with self.connect() as connection:
+            connection.execute(
+                f"""
+                INSERT INTO {table} (
+                    id, user_id, kind, content, scope, project_id, thread_id,
+                    confidence, status, consent_status, consented_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 'granted', ?, ?)
+                """,
+                (
+                    memory_id,
+                    user_id,
+                    normalized_kind,
+                    normalized_content,
+                    normalized_scope,
+                    project_id if normalized_scope == "project" else None,
+                    thread_id if normalized_scope == "chat" else None,
+                    normalized_confidence,
+                    consented_at,
+                    normalized_expiry,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO memory_provenance (
+                    id, user_id, memory_id, memory_store, source_type, source_id, source_uri
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (str(uuid4()), user_id, memory_id, store, source_type.strip() or "user", source_id, source_uri),
+            )
+        record = self.get_memory_record(user_id, memory_id, sensitive=sensitive)
+        if record is None:
+            raise RuntimeError("Saved memory could not be loaded.")
+        return record
+
+    def list_memory_records(
+        self,
+        user_id: str,
+        *,
+        include_sensitive: bool = False,
+        include_inactive: bool = False,
+    ) -> list[dict]:
+        self._expire_due_memory(user_id)
+        stores = [("memory_records", "personal", False)]
+        if include_sensitive:
+            stores.append(("health_memory_records", "health", True))
+        records: list[dict] = []
+        with self.connect() as connection:
+            for table, store, sensitive in stores:
+                clauses = ["user_id = ?"]
+                params: list[object] = [user_id]
+                if not include_inactive:
+                    clauses.extend(["status = 'active'", "consent_status = 'granted'"])
+                rows = connection.execute(
+                    f"SELECT * FROM {table} WHERE {' AND '.join(clauses)} ORDER BY created_at DESC, rowid DESC",
+                    params,
+                ).fetchall()
+                for row in rows:
+                    records.append(self._memory_record_payload(connection, row, store, sensitive))
+        records.sort(key=lambda item: (item["created_at"], item["id"]), reverse=True)
+        return records
+
+    def get_memory_record(self, user_id: str, memory_id: str, *, sensitive: bool = False) -> dict | None:
+        self._expire_due_memory(user_id)
+        table = _memory_table(sensitive)
+        store = "health" if sensitive else "personal"
+        with self.connect() as connection:
+            row = connection.execute(
+                f"SELECT * FROM {table} WHERE user_id = ? AND id = ?",
+                (user_id, memory_id),
+            ).fetchone()
+            return self._memory_record_payload(connection, row, store, sensitive) if row else None
+
+    def update_memory_record(
+        self,
+        user_id: str,
+        memory_id: str,
+        *,
+        sensitive: bool = False,
+        content: str | None = None,
+        confidence: float | None = None,
+        status: str | None = None,
+        expires_at: str | None = None,
+        clear_expiry: bool = False,
+    ) -> dict | None:
+        table = _memory_table(sensitive)
+        existing = self.get_memory_record(user_id, memory_id, sensitive=sensitive)
+        if existing is None:
+            return None
+        updates = ["updated_at = CURRENT_TIMESTAMP"]
+        params: list[object] = []
+        if content is not None:
+            normalized_content = content.strip()
+            if not normalized_content:
+                raise ValueError("Memory content cannot be empty.")
+            updates.append("content = ?")
+            params.append(normalized_content)
+        if confidence is not None:
+            updates.append("confidence = ?")
+            params.append(max(0.0, min(float(confidence), 1.0)))
+        if status is not None:
+            normalized_status = _normalize_memory_status(status)
+            if normalized_status == "active" and existing["consent_status"] != "granted":
+                raise ValueError("Revoked memory requires new explicit consent before activation.")
+            updates.append("status = ?")
+            params.append(normalized_status)
+            if normalized_status == "revoked":
+                updates.extend(["consent_status = 'revoked'", "revoked_at = ?"])
+                params.append(datetime.now(timezone.utc).isoformat())
+        if clear_expiry:
+            updates.append("expires_at = NULL")
+        elif expires_at is not None:
+            updates.append("expires_at = ?")
+            params.append(_normalize_optional_datetime(expires_at))
+        params.extend([user_id, memory_id])
+        with self.connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE {table} SET {', '.join(updates)} WHERE user_id = ? AND id = ?",
+                params,
+            )
+        if cursor.rowcount == 0:
+            return None
+        return self.get_memory_record(user_id, memory_id, sensitive=sensitive)
+
+    def delete_memory_record(self, user_id: str, memory_id: str, *, sensitive: bool = False) -> int:
+        table = _memory_table(sensitive)
+        store = "health" if sensitive else "personal"
+        with self.connect() as connection:
+            cursor = connection.execute(
+                f"DELETE FROM {table} WHERE user_id = ? AND id = ?",
+                (user_id, memory_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    "DELETE FROM memory_provenance WHERE user_id = ? AND memory_store = ? AND memory_id = ?",
+                    (user_id, store, memory_id),
+                )
+            return int(cursor.rowcount)
+
+    def _expire_due_memory(self, user_id: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as connection:
+            for table in ("memory_records", "health_memory_records"):
+                connection.execute(
+                    f"""
+                    UPDATE {table}
+                    SET status = 'expired', updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ? AND status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?
+                    """,
+                    (user_id, now),
+                )
+
+    def _memory_record_payload(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        store: str,
+        sensitive: bool,
+    ) -> dict:
+        provenance = _rows_to_dicts(
+            connection.execute(
+                """
+                SELECT id, source_type, source_id, source_uri, created_at
+                FROM memory_provenance
+                WHERE user_id = ? AND memory_store = ? AND memory_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (str(row["user_id"]), store, str(row["id"])),
+            ).fetchall()
+        )
+        return {
+            "id": str(row["id"]),
+            "kind": str(row["kind"]),
+            "content": str(row["content"]),
+            "scope": str(row["scope"]),
+            "project_id": row["project_id"],
+            "thread_id": row["thread_id"],
+            "confidence": float(row["confidence"]),
+            "status": str(row["status"]),
+            "consent_status": str(row["consent_status"]),
+            "consented_at": row["consented_at"],
+            "revoked_at": row["revoked_at"],
+            "expires_at": row["expires_at"],
+            "sensitive": sensitive,
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "provenance": provenance,
+        }
 
     def memory_overview(self, user_id: str = DEFAULT_USER_ID) -> dict:
         self.ensure_user_defaults(user_id)
@@ -830,6 +1055,18 @@ class AvelinDatabase:
                         (user_id,),
                     ).fetchone()["count"]
                 ),
+                "personal_records": int(
+                    connection.execute(
+                        "SELECT COUNT(*) AS count FROM memory_records WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchone()["count"]
+                ),
+                "health_records": int(
+                    connection.execute(
+                        "SELECT COUNT(*) AS count FROM health_memory_records WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchone()["count"]
+                ),
             }
         return {
             "counts": counts,
@@ -846,7 +1083,7 @@ class AvelinDatabase:
             ],
         }
 
-    def export_agent_memory(self, user_id: str = DEFAULT_USER_ID) -> dict:
+    def export_agent_memory(self, user_id: str = DEFAULT_USER_ID, *, include_sensitive: bool = False) -> dict:
         self.ensure_user_defaults(user_id)
         with self.connect() as connection:
             user_row = connection.execute(
@@ -953,10 +1190,16 @@ class AvelinDatabase:
             )
 
         return {
-            "format": "avelin-memory-export-v1",
+            "format": "avelin-memory-export-v2",
             "exported_at": datetime.now(timezone.utc).isoformat(),
+            "includes_sensitive_health_data": include_sensitive,
             "user": dict(user_row) if user_row else {"id": user_id},
             "overview": self.memory_overview(user_id),
+            "memory_records": self.list_memory_records(
+                user_id,
+                include_sensitive=include_sensitive,
+                include_inactive=True,
+            ),
             "notes": notes,
             "memory_index": memory_index,
             "chat_threads": chat_threads,
@@ -969,6 +1212,16 @@ class AvelinDatabase:
 
     def delete_note(self, user_id: str, note_id: str) -> int:
         with self.connect() as connection:
+            linked_ids = [
+                str(row["memory_id"])
+                for row in connection.execute(
+                    """
+                    SELECT memory_id FROM memory_provenance
+                    WHERE user_id = ? AND memory_store = 'personal' AND source_id = ?
+                    """,
+                    (user_id, note_id),
+                ).fetchall()
+            ]
             cursor = connection.execute(
                 "DELETE FROM notes WHERE user_id = ? AND id = ?",
                 (user_id, note_id),
@@ -980,6 +1233,16 @@ class AvelinDatabase:
                 """,
                 (user_id, note_id),
             )
+            if linked_ids:
+                placeholders = ",".join("?" for _ in linked_ids)
+                connection.execute(
+                    f"DELETE FROM memory_records WHERE user_id = ? AND id IN ({placeholders})",
+                    [user_id, *linked_ids],
+                )
+                connection.execute(
+                    f"DELETE FROM memory_provenance WHERE user_id = ? AND memory_store = 'personal' AND memory_id IN ({placeholders})",
+                    [user_id, *linked_ids],
+                )
             return int(cursor.rowcount)
 
     def clear_agent_memory(
@@ -1051,6 +1314,38 @@ class AvelinDatabase:
             if normalized_scope == "all":
                 cursor = connection.execute("DELETE FROM memory_index WHERE user_id = ?", (user_id,))
                 deleted_memory_index += int(cursor.rowcount)
+
+            memory_scope = {"global": "global", "current_chat": "chat", "current_project": "project"}.get(
+                normalized_scope
+            )
+            for table, store in (("memory_records", "personal"), ("health_memory_records", "health")):
+                record_params: list[object] = [user_id]
+                record_where = "user_id = ?"
+                if normalized_scope != "all" and memory_scope:
+                    record_where += " AND scope = ?"
+                    record_params.append(memory_scope)
+                    if normalized_scope == "current_chat" and thread_id:
+                        record_where += " AND thread_id = ?"
+                        record_params.append(thread_id)
+                    elif normalized_scope == "current_project" and project_id:
+                        record_where += " AND project_id = ?"
+                        record_params.append(project_id)
+                record_ids = [
+                    str(row["id"])
+                    for row in connection.execute(
+                        f"SELECT id FROM {table} WHERE {record_where}", record_params
+                    ).fetchall()
+                ]
+                if record_ids:
+                    placeholders = ",".join("?" for _ in record_ids)
+                    connection.execute(
+                        f"DELETE FROM {table} WHERE user_id = ? AND id IN ({placeholders})",
+                        [user_id, *record_ids],
+                    )
+                    connection.execute(
+                        f"DELETE FROM memory_provenance WHERE user_id = ? AND memory_store = ? AND memory_id IN ({placeholders})",
+                        [user_id, store, *record_ids],
+                    )
 
             if normalized_scope == "current_chat" and thread_id:
                 cursor = connection.execute(
@@ -1145,11 +1440,22 @@ class AvelinDatabase:
         title = str(thread["title"] or "Chat")
         summary = "; ".join(user_messages[-6:])
         content = f"Chat memory [{title}]: {summary}"
-        self.add_note(
+        note_id = self.add_note(
             content,
             user_id=user_id,
             project_id=thread["project_id"],
             source_thread_id=thread_id,
+        )
+        self.create_memory_record(
+            user_id,
+            kind="episode",
+            content=content,
+            scope="project" if thread["project_id"] else "chat",
+            project_id=thread["project_id"],
+            thread_id=thread_id,
+            consent_granted=True,
+            source_type="chat_summary",
+            source_id=note_id,
         )
         with self.connect() as connection:
             connection.execute(
@@ -1822,6 +2128,53 @@ CREATE TABLE IF NOT EXISTS notes (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS memory_records (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'global',
+    project_id TEXT,
+    thread_id TEXT,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    status TEXT NOT NULL DEFAULT 'active',
+    consent_status TEXT NOT NULL DEFAULT 'granted',
+    consented_at TEXT,
+    revoked_at TEXT,
+    expires_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS health_memory_records (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    content TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'global',
+    project_id TEXT,
+    thread_id TEXT,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    status TEXT NOT NULL DEFAULT 'active',
+    consent_status TEXT NOT NULL DEFAULT 'granted',
+    consented_at TEXT,
+    revoked_at TEXT,
+    expires_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS memory_provenance (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL,
+    memory_store TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    source_id TEXT,
+    source_uri TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS memory_index (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1888,6 +2241,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_context_compactions_thread_id ON context_compactions(thread_id, cycle_number);
 CREATE INDEX IF NOT EXISTS idx_context_compactions_status ON context_compactions(thread_id, status);
 CREATE INDEX IF NOT EXISTS idx_notes_user_id ON notes(user_id);
+CREATE INDEX IF NOT EXISTS idx_memory_records_user_status ON memory_records(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_memory_records_scope ON memory_records(user_id, scope, project_id, thread_id);
+CREATE INDEX IF NOT EXISTS idx_health_memory_records_user_status ON health_memory_records(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_memory_provenance_memory ON memory_provenance(user_id, memory_store, memory_id);
 CREATE INDEX IF NOT EXISTS idx_memory_index_user_id ON memory_index(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_index_source ON memory_index(source_type, source_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
@@ -1902,6 +2259,46 @@ def _title_from_message(content: str) -> str:
         return ""
     title = normalized[:48].rstrip(".,!?;:")
     return f"{title}..." if len(normalized) > len(title) else title
+
+
+def _memory_table(sensitive: bool) -> str:
+    return "health_memory_records" if sensitive else "memory_records"
+
+
+def _normalize_memory_kind(kind: str) -> str:
+    normalized = kind.strip().lower()
+    if normalized not in {"profile", "preference", "episode", "fact"}:
+        raise ValueError("Unsupported memory kind.")
+    return normalized
+
+
+def _normalize_memory_scope(scope: str) -> str:
+    normalized = scope.strip().lower()
+    aliases = {"current_project": "project", "current_chat": "chat"}
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"global", "project", "chat"}:
+        raise ValueError("Unsupported memory scope.")
+    return normalized
+
+
+def _normalize_memory_status(status: str) -> str:
+    normalized = status.strip().lower()
+    if normalized not in {"active", "superseded", "revoked", "expired"}:
+        raise ValueError("Unsupported memory status.")
+    return normalized
+
+
+def _normalize_optional_datetime(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError("expires_at must be an ISO 8601 datetime.") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def _context_compaction_from_row(row: sqlite3.Row) -> dict:

@@ -347,8 +347,49 @@ class AgentService:
     def memory_overview(self, user_id: str) -> dict:
         return self.database.memory_overview(user_id)
 
-    def export_memory(self, user_id: str) -> dict:
-        return self.database.export_agent_memory(user_id)
+    def list_personal_memory(
+        self,
+        user_id: str,
+        *,
+        include_sensitive: bool = False,
+        include_inactive: bool = False,
+    ) -> list[dict]:
+        return self.database.list_memory_records(
+            user_id,
+            include_sensitive=include_sensitive,
+            include_inactive=include_inactive,
+        )
+
+    def create_personal_memory(self, user_id: str, **payload) -> dict:
+        record = self.database.create_memory_record(user_id, **payload)
+        self._drop_user_agents(user_id)
+        return record
+
+    def update_personal_memory(
+        self,
+        user_id: str,
+        memory_id: str,
+        *,
+        sensitive: bool = False,
+        **payload,
+    ) -> dict | None:
+        record = self.database.update_memory_record(
+            user_id,
+            memory_id,
+            sensitive=sensitive,
+            **payload,
+        )
+        self._drop_user_agents(user_id)
+        return record
+
+    def delete_personal_memory(self, user_id: str, memory_id: str, *, sensitive: bool = False) -> int:
+        deleted = self.database.delete_memory_record(user_id, memory_id, sensitive=sensitive)
+        if deleted:
+            self._drop_user_agents(user_id)
+        return deleted
+
+    def export_memory(self, user_id: str, *, include_sensitive: bool = False) -> dict:
+        return self.database.export_agent_memory(user_id, include_sensitive=include_sensitive)
 
     def delete_memory_note(self, user_id: str, note_id: str) -> int:
         deleted = self.database.delete_note(user_id, note_id)

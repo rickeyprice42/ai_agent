@@ -79,11 +79,25 @@ class MemoryStore:
         thread = self.current_thread()
         project_id = thread.get("project_id") if thread else None
         normalized_scope = scope.strip().lower()
-        self.database.add_note(
+        note_id = self.database.add_note(
             note,
             user_id=self.user_id,
             project_id=str(project_id) if normalized_scope == "current_project" and project_id else None,
             source_thread_id=self.thread_id if normalized_scope == "current_chat" else None,
+        )
+        record_scope = "chat" if normalized_scope == "current_chat" else (
+            "project" if normalized_scope == "current_project" and project_id else "global"
+        )
+        self.database.create_memory_record(
+            self.user_id,
+            kind="fact",
+            content=note,
+            scope=record_scope,
+            project_id=str(project_id) if normalized_scope == "current_project" and project_id else None,
+            thread_id=self.thread_id if normalized_scope == "current_chat" else None,
+            consent_granted=True,
+            source_type="remember_note_tool",
+            source_id=note_id,
         )
         return f"Запомнил: {note}"
 
