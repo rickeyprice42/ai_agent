@@ -34,6 +34,7 @@ class ToolOutcome:
     results: list[str] = field(default_factory=list)
     artifacts: list[dict] = field(default_factory=list)
     tool_names: list[str] = field(default_factory=list)
+    statuses: list[str] = field(default_factory=list)
 
 
 MIN_RESEARCH_RESULTS = 2
@@ -422,8 +423,9 @@ class Agent:
                         tool_result = safety_block
                         status = "blocked"
                     else:
-                        tool_result = self.tools.execute(tool_call.name, arguments)
-                        status = _tool_status(tool_result)
+                        invocation = self.tools.invoke(tool_call.name, arguments)
+                        tool_result = invocation.text()
+                        status = invocation.status
             self.action_log.record(
                 tool_name=tool_call.name,
                 status=status,
@@ -435,6 +437,7 @@ class Agent:
             )
             outcome.results.append(tool_result)
             outcome.tool_names.append(tool_call.name)
+            outcome.statuses.append(status)
             artifact = self._artifact_from_tool(tool_call.name, arguments, status)
             if artifact is not None:
                 outcome.artifacts.append(artifact)
@@ -465,7 +468,7 @@ class Agent:
             self.memory.append_message(
                 Message(role="tool", content=validation_error, name=decision.tool_name)
             )
-            return ToolOutcome(results=[validation_error])
+            return ToolOutcome(results=[validation_error], statuses=["validation_error"])
 
         arguments = self._normalize_new_file_overwrite(decision.tool_name, arguments)
         safety_block = tool_safety_block_reason(decision.tool_name, arguments, user_text)
@@ -479,10 +482,11 @@ class Agent:
             self.memory.append_message(
                 Message(role="tool", content=safety_block, name=decision.tool_name)
             )
-            return ToolOutcome(results=[safety_block])
+            return ToolOutcome(results=[safety_block], statuses=["blocked"])
 
-        tool_result = self.tools.execute(decision.tool_name, arguments)
-        status = _tool_status(tool_result)
+        invocation = self.tools.invoke(decision.tool_name, arguments)
+        tool_result = invocation.text()
+        status = invocation.status
         self.action_log.record(
             tool_name=decision.tool_name,
             status=status,
@@ -497,6 +501,7 @@ class Agent:
             results=[tool_result],
             artifacts=[artifact] if artifact is not None else [],
             tool_names=[decision.tool_name],
+            statuses=[status],
         )
 
     def _normalize_new_file_overwrite(self, tool_name: str, arguments: dict) -> dict:
@@ -542,6 +547,7 @@ class Agent:
                 "Файл не создан; уточни запрос или источник."
             )
             outcome.tool_names.append("research_quality_gate")
+            outcome.statuses.append("failed")
             return
         path_match = re.search(r"([\w\-./\\\u0400-\u04ff]+\.docx)\b", user_text, flags=re.IGNORECASE)
         requested_path = path_match.group(1).replace("\\", "/") if path_match else "web_research.docx"
@@ -558,8 +564,9 @@ class Agent:
             "bullets": [],
             "overwrite": False,
         }
-        tool_result = self.tools.execute("create_docx", arguments)
-        status = _tool_status(tool_result)
+        invocation = self.tools.invoke("create_docx", arguments)
+        tool_result = invocation.text()
+        status = invocation.status
         self.action_log.record(
             tool_name="create_docx",
             status=status,
@@ -569,6 +576,7 @@ class Agent:
         self.memory.append_message(Message(role="tool", content=tool_result, name="create_docx"))
         outcome.results.append(tool_result)
         outcome.tool_names.append("create_docx")
+        outcome.statuses.append(status)
         artifact = self._artifact_from_tool("create_docx", arguments, status)
         if artifact is not None:
             outcome.artifacts.append(artifact)
@@ -623,7 +631,8 @@ def _tool_completion_text(outcome: ToolOutcome) -> str:
     if outcome.results:
         last_result = outcome.results[-1]
         last_tool = outcome.tool_names[-1] if outcome.tool_names else ""
-        if last_tool == "create_docx" and _tool_status(last_result) == "failed":
+        last_status = outcome.statuses[-1] if outcome.statuses else _tool_status(last_result)
+        if last_tool == "create_docx" and last_status == "failed":
             return (
                 "Исследование завершено, но не удалось создать Word-файл. "
                 "Проверь имя файла и доступность рабочей папки; результаты поиска не потеряны."

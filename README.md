@@ -78,6 +78,7 @@ python -c "from fastapi.testclient import TestClient; from backend.main import a
 - `POST /api/auth/logout` - удаление текущей сессии.
 - `GET /api/auth/oauth/google` и `/api/auth/oauth/vk` - подготовленные OAuth-контракты.
 - `GET /api/models` - список доступных provider-ов и моделей.
+- `GET /api/tools`, `/api/tools/{name}` и `/api/tools/capabilities` - discovery production-контрактов инструментов.
 - `GET /api/model-settings` и `PUT /api/model-settings` - чтение и смена активной модели пользователя.
 - `POST /api/chat/stream` - поток NDJSON с событиями `delta`, `status`, `done` и `error`.
 - `GET /api/chats/{thread_id}/context-trace` - последний воспроизводимый trace состава контекста.
@@ -147,6 +148,21 @@ Avelin также может искать публичную информаци�
 LLM-провайдеры подключаются через общий registry/runtime-контракт с описанием capabilities,
 едиными ошибками, потоковой очисткой при отмене и повтором временных ошибок до
 `LLM_MAX_RETRIES`. Локальная Ollama, Ollama Cloud и mock не требуют изменений frontend.
+
+## Tool Registry
+
+Каждый built-in регистрируется через версионируемый manifest: SemVer, описание,
+строгие input/output JSON Schema, capabilities, permissions, timeout, retry policy и
+признак idempotency. Объектные схемы по умолчанию закрыты через
+`additionalProperties=false`; nested objects, arrays, enum, строковые и числовые
+ограничения проверяются до вызова handler.
+
+Orchestrator получает единый `ToolResult` со status, typed error и событиями выполнения,
+поэтому success/failure не определяется разбором пользовательского текста. Registry
+поддерживает timeout, cooperative cancellation, retry только для явно retryable ошибок и
+защищённый idempotency cache. Старые строковые built-ins подключены через ограниченный
+compatibility adapter. Structured-логи содержат только имя, версию, статус, попытки и
+latency; content, заметки, ключи и токены редактируются до сохранения action log.
 
 ## Context Engine
 

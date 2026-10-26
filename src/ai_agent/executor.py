@@ -11,9 +11,6 @@ from ai_agent.tools.base import ToolRegistry
 from ai_agent.types import Task, TaskStep
 
 
-MAX_TOOL_ATTEMPTS = 2
-
-
 @dataclass(slots=True)
 class ExecutionDecision:
     tool_name: str | None
@@ -74,7 +71,11 @@ class ExecutionEngine:
             updated = self.tasks.fail_running_step(validation_error)
             return _format_task_state(validation_error, updated)
 
-        tool_result, status, attempts = self._execute_tool_with_retries(decision.tool_name, arguments)
+        invocation = self.tools.invoke(decision.tool_name, arguments)
+        tool_result = invocation.text()
+        status = invocation.status
+        attempts = invocation.attempts
+        self.action_log.record(decision.tool_name, status, arguments, tool_result)
 
         if status == "failed":
             updated = self.tasks.fail_running_step(tool_result)
@@ -98,33 +99,6 @@ class ExecutionEngine:
             result=f"Пользователь подтвердил выполнение шага в задаче {task.id}.",
         )
         return self.execute_next_step(approved_step_id=step_id)
-
-    def _execute_tool_with_retries(self, tool_name: str, arguments: dict) -> tuple[str, str, int]:
-        last_result = ""
-        last_status = "failed"
-
-        for attempt in range(1, MAX_TOOL_ATTEMPTS + 1):
-            tool_result = self.tools.execute(tool_name, arguments)
-            status = _tool_status(tool_result)
-            log_result = tool_result
-            if attempt > 1:
-                log_result = f"retry attempt {attempt}/{MAX_TOOL_ATTEMPTS}\n{tool_result}"
-            self.action_log.record(tool_name, status, arguments, log_result)
-
-            last_result = tool_result
-            last_status = status
-            if status != "failed" or not _should_retry_tool_failure(tool_name, tool_result, attempt):
-                return tool_result, status, attempt
-
-            self.action_log.record(
-                tool_name,
-                "retrying",
-                arguments,
-                f"retry attempt {attempt + 1}/{MAX_TOOL_ATTEMPTS} scheduled after recoverable failure:\n{tool_result}",
-            )
-
-        return last_result, last_status, MAX_TOOL_ATTEMPTS
-
 
 def decide_step_action(step: TaskStep) -> ExecutionDecision:
     text = step.description.strip()
@@ -460,35 +434,8 @@ def _safety_block_reason(step: TaskStep, decision: ExecutionDecision) -> str | N
     return step_safety_block_reason(step.description, decision.tool_name, decision.arguments)
 
 
-def _should_retry_tool_failure(tool_name: str, tool_result: str, attempt: int) -> bool:
-    if attempt >= MAX_TOOL_ATTEMPTS:
-        return False
-
-    lowered = tool_result.lower()
-    transient_markers = (
-        "timed out",
-        "timeout",
-        "temporarily unavailable",
-        "connection reset",
-        "connection aborted",
-        "remote end closed",
-        "http request failed",
-    )
-    if any(marker in lowered for marker in transient_markers):
-        return True
-
-    if tool_name == "http_request":
-        match = re.search(r"^Status:\s*(\d{3})", tool_result, flags=re.MULTILINE)
-        if match and int(match.group(1)) >= 500:
-            return True
-
-    if tool_name == "run_shell" and "Код возврата: -1" in tool_result:
-        return True
-
-    return False
-
-
 def _tool_status(tool_result: str) -> str:
+    """Legacy display adapter; execution paths use ToolResult.status."""
     http_status = re.search(r"^Status:\s*(\d{3})", tool_result, flags=re.MULTILINE)
     if http_status and int(http_status.group(1)) >= 400:
         return "failed"

@@ -132,6 +132,18 @@ class AgentService:
     def model_settings(self, user_id: str) -> dict[str, str]:
         return self._normalized_model_settings(user_id)
 
+    def tool_manifests(self, user_id: str) -> list[dict]:
+        return self.agent_for_user(user_id).tools.list_manifests()
+
+    def tool_manifest(self, user_id: str, tool_name: str) -> dict:
+        agent = self.agent_for_user(user_id)
+        if tool_name not in {item["name"] for item in agent.tools.list_manifests()}:
+            raise ValueError(f"Инструмент '{tool_name}' не найден.")
+        return agent.tools.get_manifest(tool_name)
+
+    def tool_capabilities(self, user_id: str) -> dict[str, list[str]]:
+        return self.agent_for_user(user_id).tools.capabilities()
+
     def _normalized_model_settings(self, user_id: str) -> dict[str, str]:
         settings = self.database.get_model_settings(user_id)
         if (

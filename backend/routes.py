@@ -143,6 +143,24 @@ def models(user: dict[str, str] = Depends(current_user)) -> list[ModelProviderOp
     return [ModelProviderOption(**item) for item in agent_service.available_models()]
 
 
+@router.get("/tools", response_model=list[dict])
+def tools(user: dict[str, str] = Depends(current_user)) -> list[dict]:
+    return agent_service.tool_manifests(user["id"])
+
+
+@router.get("/tools/capabilities", response_model=dict[str, list[str]])
+def tool_capabilities(user: dict[str, str] = Depends(current_user)) -> dict[str, list[str]]:
+    return agent_service.tool_capabilities(user["id"])
+
+
+@router.get("/tools/{tool_name}", response_model=dict)
+def tool_manifest(tool_name: str, user: dict[str, str] = Depends(current_user)) -> dict:
+    try:
+        return agent_service.tool_manifest(user["id"], tool_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/model-settings", response_model=ModelSettings)
 def model_settings(user: dict[str, str] = Depends(current_user)) -> ModelSettings:
     return ModelSettings(**agent_service.model_settings(user["id"]))
