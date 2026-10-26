@@ -8,6 +8,7 @@ import {
   approveBlockedStep,
   clearChatMessages,
   clearAgentMemory,
+  controlTask,
   createPersonalMemory,
   createProject,
   createChatThread,
@@ -99,6 +100,7 @@ const EMPTY_BOOTSTRAP: BootstrapPayload = {
   deleted_projects: [],
   active_project: null,
   tasks: [],
+  task_runs: [],
   action_logs: [],
   approval_requests: [],
   permission_grants: [],
@@ -939,6 +941,20 @@ export default function App() {
       await refreshBootstrap(false, true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось выполнить следующий шаг.");
+    } finally {
+      setIsExecutingStep(false);
+    }
+  }
+
+  async function handleTaskControl(taskId: string, action: "pause" | "resume" | "cancel") {
+    if (!authToken || isExecutingStep) return;
+    setIsExecutingStep(true);
+    setError(null);
+    try {
+      await controlTask(taskId, action, authToken);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось изменить состояние задачи.");
     } finally {
       setIsExecutingStep(false);
     }
@@ -1856,7 +1872,20 @@ export default function App() {
                 <article className="task-item" key={task.id}>
                   <div className="task-item-head">
                     <strong>{task.description}</strong>
-                    <span className={`state-badge state-${task.status}`}>{task.status}</span>
+                    <span className={`state-badge state-${bootstrap.task_runs.find((run) => run.task_id === task.id)?.state ?? task.status}`}>
+                      {bootstrap.task_runs.find((run) => run.task_id === task.id)?.state ?? task.status}
+                    </span>
+                  </div>
+                  <div className="task-step-row">
+                    {(["queued", "running", "waiting_approval"].includes(bootstrap.task_runs.find((run) => run.task_id === task.id)?.state ?? "")) ? (
+                      <button className="mini-button" onClick={() => void handleTaskControl(task.id, "pause")} type="button">Пауза</button>
+                    ) : null}
+                    {bootstrap.task_runs.find((run) => run.task_id === task.id)?.state === "paused" ? (
+                      <button className="mini-button" onClick={() => void handleTaskControl(task.id, "resume")} type="button">Продолжить</button>
+                    ) : null}
+                    {!(["completed", "failed", "cancelled"].includes(bootstrap.task_runs.find((run) => run.task_id === task.id)?.state ?? "")) ? (
+                      <button className="mini-button mini-button-danger" onClick={() => void handleTaskControl(task.id, "cancel")} type="button">Отменить</button>
+                    ) : null}
                   </div>
                   <div className="task-steps">
                     {task.steps.slice(0, 4).map((step) => (

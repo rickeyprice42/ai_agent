@@ -199,6 +199,20 @@ Project inspection не запускает код. Тесты, lint, typecheck �
 покрывают status, diff, log, branches и ref inspection. `stage`, `commit` и создание
 локальной ветки требуют exact approval; автоматического `push` в tool pack нет.
 
+## Durable task execution
+
+Каждая задача получает отдельный `task_run` со стабильными состояниями `queued`,
+`running`, `waiting_approval`, `paused`, `failed`, `completed` и `cancelled`. Worker
+захватывает run атомарно, обновляет heartbeat и lease; просроченный lease возвращается
+в очередь после перезапуска процесса. До и после tool-call сохраняется checkpoint с
+версией плана, redacted-вызовом, observation, artifacts, evidence и следующим действием.
+
+Deduplication key не позволяет повторить уже подтверждённый шаг. Если внешний или
+high-risk вызов мог завершиться прямо перед сбоем, Avelin не запускает его повторно без
+ручной проверки. Бюджеты ограничивают шаги, ошибки, время, токены и стоимость. Очередью
+можно управлять через `GET /api/task-runs`, checkpoint API и действия
+`POST /api/tasks/{task_id}/pause|resume|cancel`.
+
 ## Context Engine
 
 Перед каждым обращением к модели Context Engine собирает prompt в явный токен-бюджет:

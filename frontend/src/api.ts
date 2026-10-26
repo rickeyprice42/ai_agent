@@ -500,6 +500,20 @@ export async function executeNextStep(token: string): Promise<{ result: string }
   return response.json();
 }
 
+export async function controlTask(
+  taskId: string,
+  action: "pause" | "resume" | "cancel",
+  token: string
+): Promise<void> {
+  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось изменить состояние задачи.");
+  }
+}
+
 export async function approveBlockedStep(stepId: string, token: string): Promise<{ result: string }> {
   const response = await fetch(`/api/tasks/steps/${encodeURIComponent(stepId)}/approve`, {
     method: "POST",

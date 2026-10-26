@@ -61,6 +61,7 @@ export type BootstrapPayload = {
   deleted_projects: ProjectItem[];
   active_project?: ProjectItem | null;
   tasks: TaskItem[];
+  task_runs: TaskRunItem[];
   action_logs: ActionLogItem[];
   approval_requests: ApprovalRequestItem[];
   permission_grants: PermissionGrantItem[];
@@ -113,6 +114,19 @@ export type TaskItem = {
   priority: number;
   result?: string | null;
   steps: TaskStepItem[];
+};
+
+export type TaskRunItem = {
+  id: string;
+  task_id: string;
+  state: string;
+  worker_id?: string | null;
+  lease_expires_at?: string | null;
+  heartbeat_at?: string | null;
+  plan_version: number;
+  budget: Record<string, number>;
+  usage: Record<string, number>;
+  failure_reason?: string | null;
 };
 
 export type ActionLogItem = {

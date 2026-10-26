@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 import json
@@ -46,6 +46,7 @@ class AvelinDatabase:
             connection.executescript(SCHEMA)
             self._migrate_chat_threads(connection)
             self._migrate_project_links(connection)
+            self._migrate_durable_tasks(connection)
             self._migrate_messages(connection)
             self._migrate_memory_records(connection)
             self._ensure_migrated_indexes(connection)
@@ -154,6 +155,34 @@ class AvelinDatabase:
             connection.execute("ALTER TABLE notes ADD COLUMN source_thread_id TEXT")
         if "project_id" not in table_columns["tasks"]:
             connection.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT")
+
+    @staticmethod
+    def _migrate_durable_tasks(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO task_runs (
+                id, task_id, user_id, state, plan_version, deduplication_key,
+                budget_json, usage_json
+            )
+            SELECT lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
+                   substr(lower(hex(randomblob(2))), 2) || '-a' ||
+                   substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
+                   tasks.id,
+                   tasks.user_id,
+                   CASE tasks.status
+                       WHEN 'executing' THEN 'queued'
+                       WHEN 'blocked' THEN 'waiting_approval'
+                       WHEN 'completed' THEN 'completed'
+                       WHEN 'failed' THEN 'failed'
+                       ELSE 'queued'
+                   END,
+                   1,
+                   tasks.id,
+                   '{"max_steps":50,"max_failures":3,"max_seconds":3600,"max_tokens":100000,"max_cost_micros":0}',
+                   '{"steps":0,"failures":0,"tokens":0,"cost_micros":0}'
+            FROM tasks
+            """
+        )
 
     def _migrate_chat_threads(self, connection: sqlite3.Connection) -> None:
         columns = {
@@ -2043,6 +2072,22 @@ class AvelinDatabase:
                     """,
                     (str(uuid4()), task_id, position, step),
                 )
+            connection.execute(
+                """
+                INSERT INTO task_runs (
+                    id, task_id, user_id, state, plan_version, deduplication_key,
+                    budget_json, usage_json
+                ) VALUES (?, ?, ?, 'queued', 1, ?, ?, ?)
+                """,
+                (
+                    str(uuid4()),
+                    task_id,
+                    user_id,
+                    task_id,
+                    json.dumps(_default_task_budget(), sort_keys=True),
+                    json.dumps(_default_task_usage(), sort_keys=True),
+                ),
+            )
         return self.get_task(task_id) or {
             "id": task_id,
             "user_id": user_id,
@@ -2210,6 +2255,288 @@ class AvelinDatabase:
                 (status, result, step_id),
             )
         return self.get_task(task_id)
+
+    def get_task_run(self, user_id: str, run_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_runs WHERE id = ? AND user_id = ?",
+                (run_id, user_id),
+            ).fetchone()
+        return _task_run_payload(row) if row is not None else None
+
+    def get_task_run_for_task(self, user_id: str, task_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_runs WHERE task_id = ? AND user_id = ?",
+                (task_id, user_id),
+            ).fetchone()
+        return _task_run_payload(row) if row is not None else None
+
+    def list_task_runs(self, user_id: str, limit: int = 50) -> list[dict]:
+        safe_limit = max(1, min(int(limit), 100))
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM task_runs
+                WHERE user_id = ?
+                ORDER BY
+                    CASE state
+                        WHEN 'running' THEN 1 WHEN 'waiting_approval' THEN 2
+                        WHEN 'queued' THEN 3 WHEN 'paused' THEN 4 ELSE 5
+                    END,
+                    created_at ASC
+                LIMIT ?
+                """,
+                (user_id, safe_limit),
+            ).fetchall()
+        return [_task_run_payload(row) for row in rows]
+
+    def acquire_task_run(self, user_id: str, worker_id: str, lease_seconds: int = 120) -> dict | None:
+        now = datetime.now(timezone.utc)
+        expires_at = (now + timedelta(seconds=max(5, min(int(lease_seconds), 900)))).isoformat()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE task_runs
+                SET state = 'queued', worker_id = NULL, lease_expires_at = NULL,
+                    failure_reason = 'Recovered after expired worker lease.',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ? AND state = 'running'
+                  AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+                """,
+                (user_id, now.isoformat()),
+            )
+            row = connection.execute(
+                """
+                SELECT task_runs.id
+                FROM task_runs
+                JOIN tasks ON tasks.id = task_runs.task_id
+                WHERE task_runs.user_id = ? AND task_runs.state = 'queued'
+                ORDER BY tasks.priority ASC, task_runs.created_at ASC
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            run_id = str(row["id"])
+            updated = connection.execute(
+                """
+                UPDATE task_runs
+                SET state = 'running', worker_id = ?, lease_expires_at = ?,
+                    heartbeat_at = ?, started_at = COALESCE(started_at, ?),
+                    failure_reason = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_id = ? AND state = 'queued'
+                """,
+                (worker_id, expires_at, now.isoformat(), now.isoformat(), run_id, user_id),
+            )
+            if updated.rowcount != 1:
+                return None
+            claimed = connection.execute("SELECT * FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+        return _task_run_payload(claimed) if claimed is not None else None
+
+    def heartbeat_task_run(
+        self,
+        user_id: str,
+        run_id: str,
+        worker_id: str,
+        lease_seconds: int = 120,
+    ) -> dict | None:
+        now = datetime.now(timezone.utc)
+        expires_at = (now + timedelta(seconds=max(5, min(int(lease_seconds), 900)))).isoformat()
+        with self.connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE task_runs
+                SET heartbeat_at = ?, lease_expires_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_id = ? AND state = 'running' AND worker_id = ?
+                """,
+                (now.isoformat(), expires_at, run_id, user_id, worker_id),
+            )
+            if updated.rowcount != 1:
+                return None
+        return self.get_task_run(user_id, run_id)
+
+    def set_task_run_state(
+        self,
+        user_id: str,
+        run_id: str,
+        state: str,
+        *,
+        worker_id: str | None = None,
+        failure_reason: str | None = None,
+    ) -> dict | None:
+        allowed = {"queued", "running", "waiting_approval", "paused", "failed", "completed", "cancelled"}
+        if state not in allowed:
+            raise ValueError(f"Unsupported durable run state: {state}")
+        terminal = state in {"failed", "completed", "cancelled"}
+        with self.connect() as connection:
+            params: list[object] = [state, failure_reason]
+            owner_clause = ""
+            if worker_id is not None:
+                owner_clause = " AND (worker_id = ? OR worker_id IS NULL)"
+                params.append(worker_id)
+            params.extend([run_id, user_id])
+            updated = connection.execute(
+                f"""
+                UPDATE task_runs
+                SET state = ?, failure_reason = ?,
+                    worker_id = CASE WHEN ? IN ('running') THEN worker_id ELSE NULL END,
+                    lease_expires_at = CASE WHEN ? IN ('running') THEN lease_expires_at ELSE NULL END,
+                    finished_at = CASE WHEN ? THEN COALESCE(finished_at, CURRENT_TIMESTAMP) ELSE finished_at END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_id = ?{owner_clause}
+                """,
+                [state, failure_reason, state, state, 1 if terminal else 0, run_id, user_id]
+                + ([worker_id] if worker_id is not None else []),
+            )
+            if updated.rowcount != 1:
+                return None
+        return self.get_task_run(user_id, run_id)
+
+    def update_task_run_usage(
+        self,
+        user_id: str,
+        run_id: str,
+        *,
+        steps: int = 0,
+        failures: int = 0,
+        tokens: int = 0,
+        cost_micros: int = 0,
+    ) -> dict | None:
+        current = self.get_task_run(user_id, run_id)
+        if current is None:
+            return None
+        usage = dict(current["usage"])
+        for key, delta in {
+            "steps": steps, "failures": failures, "tokens": tokens, "cost_micros": cost_micros,
+        }.items():
+            usage[key] = max(0, int(usage.get(key, 0)) + int(delta))
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE task_runs SET usage_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?",
+                (json.dumps(usage, sort_keys=True), run_id, user_id),
+            )
+        return self.get_task_run(user_id, run_id)
+
+    def create_task_checkpoint(
+        self,
+        user_id: str,
+        *,
+        run_id: str,
+        task_id: str,
+        step_id: str | None,
+        plan_version: int,
+        status: str,
+        risk: str,
+        tool_name: str | None,
+        arguments_digest: str | None,
+        deduplication_key: str,
+        tool_call: dict,
+        observation: str = "",
+        artifacts: list[dict] | None = None,
+        evidence: dict | None = None,
+        next_action: str | None = None,
+    ) -> dict:
+        run = self.get_task_run(user_id, run_id)
+        if run is None or run["task_id"] != task_id:
+            raise ValueError("Durable task run not found.")
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM task_checkpoints WHERE run_id = ? AND deduplication_key = ?",
+                (run_id, deduplication_key),
+            ).fetchone()
+            if existing is not None:
+                return _task_checkpoint_payload(existing)
+            sequence = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 AS value FROM task_checkpoints WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()["value"]
+            )
+            checkpoint_id = str(uuid4())
+            connection.execute(
+                """
+                INSERT INTO task_checkpoints (
+                    id, run_id, task_id, step_id, sequence, plan_version, status, risk,
+                    tool_name, arguments_digest, deduplication_key, tool_call_json,
+                    observation, artifacts_json, evidence_json, next_action
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    checkpoint_id, run_id, task_id, step_id, sequence, plan_version, status, risk,
+                    tool_name, arguments_digest, deduplication_key,
+                    json.dumps(tool_call, ensure_ascii=False, sort_keys=True),
+                    observation,
+                    json.dumps(artifacts or [], ensure_ascii=False, sort_keys=True),
+                    json.dumps(evidence or {}, ensure_ascii=False, sort_keys=True),
+                    next_action,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM task_checkpoints WHERE id = ?", (checkpoint_id,)
+            ).fetchone()
+        return _task_checkpoint_payload(row)
+
+    def update_task_checkpoint(
+        self,
+        user_id: str,
+        checkpoint_id: str,
+        *,
+        status: str,
+        observation: str,
+        artifacts: list[dict] | None = None,
+        evidence: dict | None = None,
+        next_action: str | None = None,
+    ) -> dict | None:
+        with self.connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE task_checkpoints
+                SET status = ?, observation = ?, artifacts_json = ?, evidence_json = ?,
+                    next_action = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND run_id IN (SELECT id FROM task_runs WHERE user_id = ?)
+                """,
+                (
+                    status, observation,
+                    json.dumps(artifacts or [], ensure_ascii=False, sort_keys=True),
+                    json.dumps(evidence or {}, ensure_ascii=False, sort_keys=True),
+                    next_action, checkpoint_id, user_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM task_checkpoints WHERE id = ?", (checkpoint_id,)
+            ).fetchone()
+        return _task_checkpoint_payload(row) if row is not None else None
+
+    def find_task_checkpoint(self, user_id: str, run_id: str, deduplication_key: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT checkpoint.* FROM task_checkpoints AS checkpoint
+                JOIN task_runs AS run ON run.id = checkpoint.run_id
+                WHERE checkpoint.run_id = ? AND checkpoint.deduplication_key = ? AND run.user_id = ?
+                """,
+                (run_id, deduplication_key, user_id),
+            ).fetchone()
+        return _task_checkpoint_payload(row) if row is not None else None
+
+    def list_task_checkpoints(self, user_id: str, run_id: str, limit: int = 100) -> list[dict]:
+        safe_limit = max(1, min(int(limit), 500))
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT checkpoint.* FROM task_checkpoints AS checkpoint
+                JOIN task_runs AS run ON run.id = checkpoint.run_id
+                WHERE checkpoint.run_id = ? AND run.user_id = ?
+                ORDER BY checkpoint.sequence ASC LIMIT ?
+                """,
+                (run_id, user_id, safe_limit),
+            ).fetchall()
+        return [_task_checkpoint_payload(row) for row in rows]
 
     def add_action_log(
         self,
@@ -2804,6 +3131,48 @@ CREATE TABLE IF NOT EXISTS task_steps (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS task_runs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    state TEXT NOT NULL DEFAULT 'queued',
+    worker_id TEXT,
+    lease_expires_at TEXT,
+    heartbeat_at TEXT,
+    plan_version INTEGER NOT NULL DEFAULT 1,
+    deduplication_key TEXT NOT NULL UNIQUE,
+    budget_json TEXT NOT NULL DEFAULT '{}',
+    usage_json TEXT NOT NULL DEFAULT '{}',
+    failure_reason TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS task_checkpoints (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    step_id TEXT REFERENCES task_steps(id) ON DELETE SET NULL,
+    sequence INTEGER NOT NULL,
+    plan_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    risk TEXT NOT NULL DEFAULT 'read',
+    tool_name TEXT,
+    arguments_digest TEXT,
+    deduplication_key TEXT NOT NULL,
+    tool_call_json TEXT NOT NULL DEFAULT '{}',
+    observation TEXT NOT NULL DEFAULT '',
+    artifacts_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    next_action TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(run_id, sequence),
+    UNIQUE(run_id, deduplication_key)
+);
+
 CREATE TABLE IF NOT EXISTS action_logs (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -2879,6 +3248,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_index_user_id ON memory_index(user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_index_source ON memory_index(source_type, source_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_task_steps_task_id ON task_steps(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_runs_queue ON task_runs(user_id, state, lease_expires_at);
+CREATE INDEX IF NOT EXISTS idx_task_checkpoints_run ON task_checkpoints(run_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_task_checkpoints_step ON task_checkpoints(task_id, step_id, status);
 CREATE INDEX IF NOT EXISTS idx_action_logs_user_id ON action_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_user_status ON approval_requests(user_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_approvals_step ON approval_requests(user_id, step_id, status);
@@ -2922,6 +3294,64 @@ def _permission_grant_payload(row: sqlite3.Row) -> dict:
         "expires_at": str(row["expires_at"]),
         "revoked_at": row["revoked_at"],
         "created_at": str(row["created_at"]),
+    }
+
+
+def _default_task_budget() -> dict[str, int]:
+    return {
+        "max_steps": 50,
+        "max_failures": 3,
+        "max_seconds": 3600,
+        "max_tokens": 100000,
+        "max_cost_micros": 0,
+    }
+
+
+def _default_task_usage() -> dict[str, int]:
+    return {"steps": 0, "failures": 0, "tokens": 0, "cost_micros": 0}
+
+
+def _task_run_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "task_id": str(row["task_id"]),
+        "user_id": str(row["user_id"]),
+        "state": str(row["state"]),
+        "worker_id": row["worker_id"],
+        "lease_expires_at": row["lease_expires_at"],
+        "heartbeat_at": row["heartbeat_at"],
+        "plan_version": int(row["plan_version"]),
+        "deduplication_key": str(row["deduplication_key"]),
+        "budget": {**_default_task_budget(), **_load_json_dict(row["budget_json"])},
+        "usage": {**_default_task_usage(), **_load_json_dict(row["usage_json"])},
+        "failure_reason": row["failure_reason"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def _task_checkpoint_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "run_id": str(row["run_id"]),
+        "task_id": str(row["task_id"]),
+        "step_id": row["step_id"],
+        "sequence": int(row["sequence"]),
+        "plan_version": int(row["plan_version"]),
+        "status": str(row["status"]),
+        "risk": str(row["risk"]),
+        "tool_name": row["tool_name"],
+        "arguments_digest": row["arguments_digest"],
+        "deduplication_key": str(row["deduplication_key"]),
+        "tool_call": _load_json_dict(row["tool_call_json"]),
+        "observation": str(row["observation"] or ""),
+        "artifacts": _load_json_list(row["artifacts_json"]),
+        "evidence": _load_json_dict(row["evidence_json"]),
+        "next_action": row["next_action"],
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
     }
 
 

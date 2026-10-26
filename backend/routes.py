@@ -51,6 +51,9 @@ from backend.models import (
     ProjectUpdateRequest,
     RegisterRequest,
     SecuritySettingsResponse,
+    TaskCheckpointItem,
+    TaskControlResponse,
+    TaskRunItem,
     UserProfile,
 )
 from backend.service import CompactionConflictError, agent_service
@@ -683,6 +686,37 @@ def delete_project(
 @router.post("/tasks/execute-next", response_model=ExecuteStepResponse)
 def execute_next_step(user: dict[str, str] = Depends(current_user)) -> ExecuteStepResponse:
     return ExecuteStepResponse(result=agent_service.execute_next_step(user["id"]))
+
+
+@router.get("/task-runs", response_model=list[TaskRunItem])
+def task_runs(user: dict[str, str] = Depends(current_user)) -> list[TaskRunItem]:
+    return [TaskRunItem(**item) for item in agent_service.task_runs(user["id"])]
+
+
+@router.get("/task-runs/{run_id}/checkpoints", response_model=list[TaskCheckpointItem])
+def task_checkpoints(
+    run_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> list[TaskCheckpointItem]:
+    try:
+        return [
+            TaskCheckpointItem(**item)
+            for item in agent_service.task_checkpoints(user["id"], run_id)
+        ]
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/tasks/{task_id}/{action}", response_model=TaskControlResponse)
+def control_task(
+    task_id: str,
+    action: str,
+    user: dict[str, str] = Depends(current_user),
+) -> TaskControlResponse:
+    try:
+        return TaskControlResponse(**agent_service.control_task(user["id"], task_id, action))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/tasks/steps/{step_id}/approve", response_model=ApproveStepResponse)

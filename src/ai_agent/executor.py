@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
+from typing import Protocol
+from uuid import uuid4
 import re
 
 from ai_agent.action_log import ActionLogStore
-from ai_agent.security import ToolPolicyEngine
+from ai_agent.security import (
+    ToolPolicyEngine,
+    arguments_digest,
+    redact_for_audit,
+    tool_risk,
+)
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import ToolRegistry
 from ai_agent.types import Task, TaskStep
@@ -18,6 +27,18 @@ class ExecutionDecision:
     reason: str = ""
 
 
+class StepActionPlanner(Protocol):
+    def decide(self, task: Task, step: TaskStep, checkpoints: list[dict]) -> ExecutionDecision: ...
+
+
+class HeuristicStepActionPlanner:
+    """Compatibility planner behind an explicit executor interface."""
+
+    def decide(self, task: Task, step: TaskStep, checkpoints: list[dict]) -> ExecutionDecision:
+        del task, checkpoints
+        return decide_step_action(step)
+
+
 class ExecutionEngine:
     def __init__(
         self,
@@ -25,45 +46,122 @@ class ExecutionEngine:
         tools: ToolRegistry,
         action_log: ActionLogStore,
         policy: ToolPolicyEngine,
+        action_planner: StepActionPlanner | None = None,
     ) -> None:
         self.tasks = tasks
         self.tools = tools
         self.action_log = action_log
         self.policy = policy
+        self.action_planner = action_planner or HeuristicStepActionPlanner()
+        self.worker_id = f"worker-{uuid4()}"
+        self.lease_seconds = 180
+        self._cancellations: dict[str, Event] = {}
+
+    def interrupt_run(self, run_id: str) -> bool:
+        cancellation = self._cancellations.get(run_id)
+        if cancellation is None:
+            return False
+        cancellation.set()
+        return True
 
     def execute_next_step(self, approved_step_id: str | None = None) -> str:
-        task = self.tasks.ensure_running_task()
-        if task is None:
+        del approved_step_id
+        run = self.tasks.acquire_durable_run(self.worker_id, self.lease_seconds)
+        if run is None:
             return "В очереди нет задач для выполнения."
+        task = self.tasks.ensure_task_running(run["task_id"])
+        budget_error = _budget_exhausted(run)
+        if budget_error:
+            self.tasks.set_run_state(
+                run["id"], "failed", worker_id=self.worker_id, failure_reason=budget_error
+            )
+            failed = self.tasks.update_task(task.id, "failed", budget_error)
+            return _format_task_state(budget_error, failed)
 
         step = self.tasks.running_step(task)
         if step is None:
             completed = self.tasks.update_task(task.id, "completed", "Задача не содержит шагов.")
+            self.tasks.set_run_state(run["id"], "completed", worker_id=self.worker_id)
             return _format_task_state("Задача завершена без отдельных шагов.", completed)
 
-        decision = decide_step_action(step)
+        checkpoints = self.tasks.checkpoints(run["id"])
+        decision = self.action_planner.decide(task, step, checkpoints)
         if decision.tool_name is None:
             result = (
                 "Шаг остановлен: executor не смог выбрать безопасное действие.\n"
                 f"Причина: {decision.reason or step.description}"
             )
-            updated = self.tasks.block_running_step(result)
+            updated = self.tasks.update_step(step.id, "blocked", result)
+            updated = self.tasks.update_task(updated.id, "blocked", result)
+            self.tasks.set_run_state(
+                run["id"], "waiting_approval", worker_id=self.worker_id, failure_reason=result
+            )
             return _format_task_state(result, updated)
 
         if not self.tools.has(decision.tool_name):
             result = f"Инструмент недоступен для шага: {decision.tool_name}"
             self.action_log.record(decision.tool_name, "not_found", decision.arguments, result)
-            updated = self.tasks.fail_running_step(result)
+            updated = self.tasks.update_step(step.id, "failed", result)
+            updated = self.tasks.update_task(updated.id, "failed", result)
+            self.tasks.set_run_state(run["id"], "failed", worker_id=self.worker_id, failure_reason=result)
             return _format_task_state(result, updated)
 
         arguments, validation_error = self.tools.validate_arguments(decision.tool_name, decision.arguments)
         if validation_error:
             self.action_log.record(decision.tool_name, "validation_error", decision.arguments, validation_error)
-            updated = self.tasks.fail_running_step(validation_error)
+            updated = self.tasks.update_step(step.id, "failed", validation_error)
+            updated = self.tasks.update_task(updated.id, "failed", validation_error)
+            self.tasks.set_run_state(
+                run["id"], "failed", worker_id=self.worker_id, failure_reason=validation_error
+            )
             return _format_task_state(validation_error, updated)
 
+        tool = self.tools.get(decision.tool_name)
+        digest = arguments_digest(arguments)
+        deduplication_key = f"plan:{run['plan_version']}:step:{step.id}:{decision.tool_name}:{digest}"
+        checkpoint = self.tasks.database.find_task_checkpoint(
+            self.tasks.user_id, run["id"], deduplication_key
+        )
+        risk = tool_risk(tool, arguments)
+        if checkpoint is not None and checkpoint["status"] == "completed":
+            evidence = checkpoint.get("evidence", {})
+            if not evidence.get("verified"):
+                reason = "Checkpoint найден без проверяемого evidence; автоматическое завершение запрещено."
+                updated = self.tasks.update_step(step.id, "blocked", reason)
+                updated = self.tasks.update_task(updated.id, "blocked", reason)
+                self.tasks.set_run_state(run["id"], "waiting_approval", failure_reason=reason)
+                return _format_task_state(reason, updated)
+            updated = self._complete_step(task, step, checkpoint["observation"])
+            self._finish_or_requeue_run(run["id"], updated)
+            return _format_task_state("Шаг восстановлен из проверенного checkpoint без повторного вызова.", updated)
+        if checkpoint is not None and checkpoint["status"] == "started" and risk in {"external", "high"}:
+            reason = (
+                "Опасное действие могло выполниться до остановки процесса. Повторный запуск заблокирован; "
+                "нужна ручная проверка evidence."
+            )
+            updated = self.tasks.update_step(step.id, "blocked", reason)
+            updated = self.tasks.update_task(updated.id, "blocked", reason)
+            self.tasks.set_run_state(run["id"], "waiting_approval", failure_reason=reason)
+            return _format_task_state(reason, updated)
+
+        if checkpoint is None:
+            checkpoint = self.tasks.database.create_task_checkpoint(
+                self.tasks.user_id,
+                run_id=run["id"],
+                task_id=task.id,
+                step_id=step.id,
+                plan_version=run["plan_version"],
+                status="prepared",
+                risk=risk,
+                tool_name=decision.tool_name,
+                arguments_digest=digest,
+                deduplication_key=deduplication_key,
+                tool_call={"name": decision.tool_name, "arguments": redact_for_audit(arguments)},
+                next_action="authorize",
+            )
+
         policy = self.policy.authorize(
-            self.tools.get(decision.tool_name),
+            tool,
             arguments,
             task_id=task.id,
             step_id=step.id,
@@ -72,31 +170,113 @@ class ExecutionEngine:
             suffix = f" Approval ID: {policy.approval_id}." if policy.approval_id else ""
             blocked = f"{policy.reason}{suffix}"
             self.action_log.record(decision.tool_name, "blocked", arguments, blocked)
-            updated = self.tasks.block_running_step(blocked)
+            self.tasks.database.update_task_checkpoint(
+                self.tasks.user_id,
+                checkpoint["id"],
+                status="waiting_approval",
+                observation=blocked,
+                evidence={"verified": False, "policy": policy.outcome},
+                next_action="await_user_approval",
+            )
+            updated = self.tasks.update_step(step.id, "blocked", blocked)
+            updated = self.tasks.update_task(updated.id, "blocked", blocked)
+            self.tasks.set_run_state(
+                run["id"], "waiting_approval", worker_id=self.worker_id, failure_reason=blocked
+            )
             return _format_task_state(blocked, updated)
 
-        invocation = self.tools.invoke(decision.tool_name, arguments)
+        self.tasks.heartbeat_run(run["id"], self.worker_id, self.lease_seconds)
+        self.tasks.database.update_task_checkpoint(
+            self.tasks.user_id,
+            checkpoint["id"],
+            status="started",
+            observation="Tool invocation started.",
+            evidence={"verified": False},
+            next_action="record_result",
+        )
+        cancellation = Event()
+        self._cancellations[run["id"]] = cancellation
+        try:
+            invocation = self.tools.invoke(
+                decision.tool_name,
+                arguments,
+                idempotency_key=deduplication_key if tool.idempotent else None,
+                cancellation=cancellation,
+            )
+        finally:
+            self._cancellations.pop(run["id"], None)
         tool_result = invocation.text()
         status = invocation.status
         attempts = invocation.attempts
         self.action_log.record(decision.tool_name, status, arguments, tool_result)
 
-        if status == "failed":
-            updated = self.tasks.fail_running_step(tool_result)
+        artifacts = _checkpoint_artifacts(invocation.output)
+        evidence = {
+            "verified": invocation.status == "completed",
+            "tool_status": invocation.status,
+            "attempts": invocation.attempts,
+            "events": [event.type for event in invocation.events],
+        }
+        self.tasks.database.update_task_checkpoint(
+            self.tasks.user_id,
+            checkpoint["id"],
+            status=invocation.status,
+            observation=tool_result,
+            artifacts=artifacts,
+            evidence=evidence,
+            next_action="advance_step" if invocation.status == "completed" else "stop",
+        )
+        run = self.tasks.database.update_task_run_usage(
+            self.tasks.user_id,
+            run["id"],
+            steps=1,
+            failures=0 if invocation.status == "completed" else 1,
+        ) or run
+
+        current_run = self.tasks.database.get_task_run(self.tasks.user_id, run["id"])
+        if current_run is not None and current_run["state"] in {"paused", "cancelled"}:
+            state_label = "приостановлено" if current_run["state"] == "paused" else "отменено"
+            current_task = self.tasks.get_task(task.id) or task
+            return _format_task_state(
+                f"Выполнение {state_label} пользователем; состояние worker не перезаписано.",
+                current_task,
+            )
+
+        if status != "completed":
+            updated = self.tasks.update_step(step.id, "failed", tool_result)
+            updated = self.tasks.update_task(updated.id, "failed", tool_result)
+            self.tasks.set_run_state(
+                run["id"], "failed", worker_id=self.worker_id, failure_reason=tool_result
+            )
             return _format_task_state(f"Шаг завершился ошибкой.\n{tool_result}", updated)
 
         if attempts > 1:
             tool_result = f"{tool_result}\nRetry attempts: {attempts}"
 
-        updated = self.tasks.complete_running_step(tool_result)
+        updated = self._complete_step(task, step, tool_result)
+        self._finish_or_requeue_run(run["id"], updated)
         return _format_task_state(
             f"Шаг выполнен через {decision.tool_name}.\n{tool_result}",
             updated,
         )
 
+    def _complete_step(self, task: Task, step: TaskStep, result: str) -> Task:
+        updated = self.tasks.update_step(step.id, "completed", result)
+        for next_step in updated.steps:
+            if next_step.status == "pending":
+                return self.tasks.update_step(next_step.id, "running")
+        return self.tasks.update_task(task.id, "completed", "Все шаги выполнены с evidence.")
+
+    def _finish_or_requeue_run(self, run_id: str, task: Task) -> None:
+        state = "completed" if task.status == "completed" else "queued"
+        self.tasks.set_run_state(run_id, state, worker_id=self.worker_id)
+
     def approve_blocked_step(self, step_id: str) -> str:
         approval = self.policy.approve_step(step_id)
         task = self.tasks.approve_blocked_step(step_id)
+        run = self.tasks.task_run(task.id)
+        if run is not None:
+            self.tasks.set_run_state(run["id"], "queued")
         self.action_log.record(
             tool_name="user_approval",
             status="completed",
@@ -449,6 +629,53 @@ def _tool_status(tool_result: str) -> str:
     if "Код возврата: " in tool_result and "Код возврата: 0" not in tool_result:
         return "failed"
     return "completed"
+
+
+def _budget_exhausted(run: dict) -> str | None:
+    budget = run.get("budget", {})
+    usage = run.get("usage", {})
+    checks = (
+        ("steps", "max_steps", "лимит шагов"),
+        ("failures", "max_failures", "лимит ошибок"),
+        ("tokens", "max_tokens", "лимит токенов"),
+        ("cost_micros", "max_cost_micros", "лимит стоимости"),
+    )
+    for usage_key, budget_key, label in checks:
+        limit = int(budget.get(budget_key, 0) or 0)
+        if limit > 0 and int(usage.get(usage_key, 0) or 0) >= limit:
+            return f"Выполнение остановлено: исчерпан {label} ({limit})."
+
+    max_seconds = int(budget.get("max_seconds", 0) or 0)
+    started_at = run.get("started_at")
+    if max_seconds > 0 and started_at:
+        try:
+            started = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - started).total_seconds() >= max_seconds:
+                return f"Выполнение остановлено: исчерпан лимит времени ({max_seconds} сек.)."
+        except ValueError:
+            pass
+    return None
+
+
+def _checkpoint_artifacts(output: object) -> list[dict]:
+    """Keep only compact, durable artifact references from a tool result."""
+    candidates: list[dict] = []
+    values = output if isinstance(output, list) else [output]
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        path = value.get("path") or value.get("file_path")
+        if path:
+            candidates.append(
+                {
+                    "path": str(path),
+                    "name": str(value.get("name") or Path(str(path)).name),
+                    "sha256": str(value.get("sha256") or ""),
+                }
+            )
+    return candidates
 
 
 def _format_task_state(message: str, task: Task) -> str:

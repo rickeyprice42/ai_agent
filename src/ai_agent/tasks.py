@@ -4,7 +4,10 @@ from ai_agent.database import AvelinDatabase
 from ai_agent.types import Task, TaskStep
 
 
-TASK_STATUSES = {"created", "planned", "executing", "completed", "failed", "blocked"}
+TASK_STATUSES = {
+    "created", "planned", "executing", "completed", "failed", "blocked",
+    "paused", "cancelled",
+}
 STEP_STATUSES = {"pending", "running", "completed", "failed", "skipped", "blocked"}
 
 
@@ -35,11 +38,94 @@ class TaskManager:
         limit = max(1, min(int(limit), 100))
         return [_task_from_row(item) for item in self.database.list_tasks(self.user_id, limit=limit)]
 
+    def acquire_durable_run(self, worker_id: str, lease_seconds: int = 120) -> dict | None:
+        return self.database.acquire_task_run(self.user_id, worker_id, lease_seconds)
+
+    def heartbeat_run(self, run_id: str, worker_id: str, lease_seconds: int = 120) -> dict:
+        run = self.database.heartbeat_task_run(
+            self.user_id, run_id, worker_id, lease_seconds
+        )
+        if run is None:
+            raise ValueError("Worker lease потерян или принадлежит другому worker.")
+        return run
+
+    def set_run_state(
+        self,
+        run_id: str,
+        state: str,
+        *,
+        worker_id: str | None = None,
+        failure_reason: str | None = None,
+    ) -> dict:
+        run = self.database.set_task_run_state(
+            self.user_id,
+            run_id,
+            state,
+            worker_id=worker_id,
+            failure_reason=failure_reason,
+        )
+        if run is None:
+            raise ValueError("Durable task run не найден или lease потерян.")
+        return run
+
+    def task_run(self, task_id: str) -> dict | None:
+        return self.database.get_task_run_for_task(self.user_id, task_id)
+
+    def task_runs(self, limit: int = 50) -> list[dict]:
+        return self.database.list_task_runs(self.user_id, limit)
+
+    def checkpoints(self, run_id: str, limit: int = 100) -> list[dict]:
+        return self.database.list_task_checkpoints(self.user_id, run_id, limit)
+
+    def pause_task(self, task_id: str) -> Task:
+        run = self.task_run(task_id)
+        if run is None or run["state"] in {"completed", "failed", "cancelled"}:
+            raise ValueError("Активный durable run не найден.")
+        self.set_run_state(run["id"], "paused")
+        return self.update_task(task_id, "paused", "Задача приостановлена пользователем.")
+
+    def resume_task(self, task_id: str) -> Task:
+        run = self.task_run(task_id)
+        if run is None or run["state"] not in {"paused", "waiting_approval"}:
+            raise ValueError("Возобновить можно только paused/waiting_approval задачу.")
+        self.set_run_state(run["id"], "queued")
+        task = self.update_task(task_id, "planned")
+        cleared = self.database.clear_task_result(task.id)
+        return _task_from_row(cleared) if cleared is not None else task
+
+    def cancel_task(self, task_id: str) -> Task:
+        run = self.task_run(task_id)
+        if run is None or run["state"] in {"completed", "failed", "cancelled"}:
+            raise ValueError("Задача уже завершена или не найдена.")
+        self.set_run_state(run["id"], "cancelled", failure_reason="Cancelled by user.")
+        return self.update_task(task_id, "cancelled", "Задача отменена пользователем.")
+
     def active_task(self) -> Task | None:
         for task in self.list_tasks(limit=50):
             if task.status == "executing":
                 return task
         return self.next_runnable_task()
+
+    def get_task(self, task_id: str) -> Task | None:
+        row = self.database.get_task(task_id)
+        if row is None or str(row["user_id"]) != self.user_id:
+            return None
+        return _task_from_row(row)
+
+    def ensure_task_running(self, task_id: str) -> Task:
+        task = self.get_task(task_id)
+        if task is None:
+            raise ValueError("Задача не найдена.")
+        if task.status in {"created", "planned", "paused"}:
+            task = self.update_task(task.id, "executing")
+        if task.status != "executing":
+            return task
+        if self.running_step(task) is not None:
+            return task
+        for step in task.steps:
+            if step.status == "pending":
+                return self.update_step(step.id, "running")
+        return task
 
     def next_runnable_task(self) -> Task | None:
         for task in self.list_tasks(limit=50):

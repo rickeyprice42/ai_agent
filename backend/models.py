@@ -364,6 +364,51 @@ class TaskItem(BaseModel):
     steps: list[TaskStepItem] = Field(default_factory=list)
 
 
+class TaskRunItem(BaseModel):
+    id: str
+    task_id: str
+    user_id: str
+    state: str
+    worker_id: str | None = None
+    lease_expires_at: str | None = None
+    heartbeat_at: str | None = None
+    plan_version: int
+    deduplication_key: str
+    budget: dict = Field(default_factory=dict)
+    usage: dict = Field(default_factory=dict)
+    failure_reason: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class TaskCheckpointItem(BaseModel):
+    id: str
+    run_id: str
+    task_id: str
+    step_id: str | None = None
+    sequence: int
+    plan_version: int
+    status: str
+    risk: str
+    tool_name: str | None = None
+    arguments_digest: str | None = None
+    deduplication_key: str
+    tool_call: dict = Field(default_factory=dict)
+    observation: str = ""
+    artifacts: list[dict] = Field(default_factory=list)
+    evidence: dict = Field(default_factory=dict)
+    next_action: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class TaskControlResponse(BaseModel):
+    task: TaskItem
+    run: TaskRunItem
+
+
 class ActionLogItem(BaseModel):
     id: str
     user_id: str
@@ -475,6 +520,7 @@ class BootstrapResponse(BaseModel):
     deleted_projects: list[ProjectItem]
     active_project: ProjectItem | None = None
     tasks: list[TaskItem]
+    task_runs: list[TaskRunItem] = Field(default_factory=list)
     action_logs: list[ActionLogItem]
     approval_requests: list[ApprovalRequestItem] = Field(default_factory=list)
     permission_grants: list[PermissionGrantItem] = Field(default_factory=list)

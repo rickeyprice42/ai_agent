@@ -262,6 +262,33 @@ class AgentService:
     def execute_next_step(self, user_id: str) -> str:
         return self.agent_for_user(user_id).executor.execute_next_step()
 
+    def task_runs(self, user_id: str) -> list[dict]:
+        return self.agent_for_user(user_id).tasks.task_runs()
+
+    def task_checkpoints(self, user_id: str, run_id: str) -> list[dict]:
+        run = self.database.get_task_run(user_id, run_id)
+        if run is None:
+            raise ValueError("Durable task run не найден.")
+        return self.database.list_task_checkpoints(user_id, run_id)
+
+    def control_task(self, user_id: str, task_id: str, action: str) -> dict:
+        agent = self.agent_for_user(user_id)
+        manager = agent.tasks
+        handlers = {
+            "pause": manager.pause_task,
+            "resume": manager.resume_task,
+            "cancel": manager.cancel_task,
+        }
+        if action not in handlers:
+            raise ValueError("Неизвестное действие над задачей.")
+        task = handlers[action](task_id)
+        run = manager.task_run(task_id)
+        if run is None:
+            raise ValueError("Durable task run не найден.")
+        if action in {"pause", "cancel"}:
+            agent.executor.interrupt_run(run["id"])
+        return {"task": _task_to_payload(task), "run": run}
+
     def approve_blocked_step(self, user_id: str, step_id: str) -> str:
         return self.agent_for_user(user_id).executor.approve_blocked_step(step_id)
 
@@ -565,6 +592,7 @@ class AgentService:
             "deleted_projects": self.database.list_projects(user_id, status="deleted"),
             "active_project": active_project,
             "tasks": [_task_to_payload(task) for task in agent.tasks.list_tasks()],
+            "task_runs": agent.tasks.task_runs(),
             "action_logs": [_action_log_to_payload(log) for log in agent.action_log.recent(limit=20)],
             "approval_requests": self.database.list_approval_requests(user_id, status="pending"),
             "permission_grants": self.database.list_permission_grants(user_id, active_only=True),
