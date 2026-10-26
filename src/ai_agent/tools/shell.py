@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import re
 import shlex
 import subprocess
 
@@ -40,6 +42,7 @@ class ShellSandbox:
                 shell=False,
                 encoding="utf-8",
                 errors="replace",
+                env=_sandbox_environment(),
             )
         except FileNotFoundError as exc:
             raise ValueError(f"Команда недоступна в системе: {args[0]}") from exc
@@ -111,7 +114,13 @@ def _starts_with(value: tuple[str, ...], prefix: tuple[str, ...]) -> bool:
 
 def _looks_like_path_escape(argument: str) -> bool:
     normalized = argument.replace("\\", "/")
-    return normalized.startswith("/") or normalized.startswith("../") or "/../" in normalized
+    return (
+        normalized.startswith("/")
+        or normalized.startswith("//")
+        or normalized.startswith("../")
+        or "/../" in normalized
+        or bool(re.search(r"(?i)(?:^|=)[a-z]:/", normalized))
+    )
 
 
 def _format_shell_result(args: list[str], return_code: int, stdout: str, stderr: str) -> str:
@@ -132,3 +141,23 @@ def _shorten(text: str, limit: int = 6000) -> str:
     if len(text) <= limit:
         return text
     return f"{text[: limit - 3]}..."
+
+
+def _sandbox_environment() -> dict[str, str]:
+    safe_names = {
+        "COMSPEC", "PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "TMP",
+        "WINDIR", "LANG", "LC_ALL", "PYTHONIOENCODING",
+    }
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in safe_names
+    }
+    environment.update(
+        {
+            "AVELIN_SANDBOX": "1",
+            "AVELIN_NETWORK_POLICY": "deny",
+            "NO_PROXY": "*",
+        }
+    )
+    return environment

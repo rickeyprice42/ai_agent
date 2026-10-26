@@ -16,7 +16,7 @@ from ai_agent.llm.base import ProviderError
 from ai_agent.llm.registry import build_provider
 from ai_agent.memory import MemoryStore
 from ai_agent.planner import Planner
-from ai_agent.safety import tool_safety_block_reason
+from ai_agent.security import ToolPolicyEngine, mark_untrusted_tool_output
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import ToolRegistry
 from ai_agent.tools.builtin import register_builtin_tools
@@ -93,7 +93,8 @@ class Agent:
             allow_private_networks=settings.allow_private_http,
         )
         self.tools = ToolRegistry()
-        self.executor = ExecutionEngine(self.tasks, self.tools, self.action_log)
+        self.policy = ToolPolicyEngine(self.memory.database, user_id)
+        self.executor = ExecutionEngine(self.tasks, self.tools, self.action_log, self.policy)
         register_builtin_tools(
             self.tools,
             self.memory,
@@ -418,9 +419,9 @@ class Agent:
                     status = "validation_error"
                 else:
                     arguments = self._normalize_new_file_overwrite(tool_call.name, arguments)
-                    safety_block = tool_safety_block_reason(tool_call.name, arguments, user_text)
-                    if safety_block:
-                        tool_result = safety_block
+                    policy = self.policy.authorize(self.tools.get(tool_call.name), arguments)
+                    if policy.outcome != "allow":
+                        tool_result = _policy_message(policy.reason, policy.approval_id)
                         status = "blocked"
                     else:
                         invocation = self.tools.invoke(tool_call.name, arguments)
@@ -433,7 +434,11 @@ class Agent:
                 result=tool_result,
             )
             self.memory.append_message(
-                Message(role="tool", content=tool_result, name=tool_call.name)
+                Message(
+                    role="tool",
+                    content=mark_untrusted_tool_output(tool_call.name, tool_result),
+                    name=tool_call.name,
+                )
             )
             outcome.results.append(tool_result)
             outcome.tool_names.append(tool_call.name)
@@ -471,18 +476,19 @@ class Agent:
             return ToolOutcome(results=[validation_error], statuses=["validation_error"])
 
         arguments = self._normalize_new_file_overwrite(decision.tool_name, arguments)
-        safety_block = tool_safety_block_reason(decision.tool_name, arguments, user_text)
-        if safety_block:
+        policy = self.policy.authorize(self.tools.get(decision.tool_name), arguments)
+        if policy.outcome != "allow":
+            policy_message = _policy_message(policy.reason, policy.approval_id)
             self.action_log.record(
                 tool_name=decision.tool_name,
                 status="blocked",
                 arguments=arguments,
-                result=safety_block,
+                result=policy_message,
             )
             self.memory.append_message(
-                Message(role="tool", content=safety_block, name=decision.tool_name)
+                Message(role="tool", content=policy_message, name=decision.tool_name)
             )
-            return ToolOutcome(results=[safety_block], statuses=["blocked"])
+            return ToolOutcome(results=[policy_message], statuses=["blocked"])
 
         invocation = self.tools.invoke(decision.tool_name, arguments)
         tool_result = invocation.text()
@@ -494,7 +500,11 @@ class Agent:
             result=tool_result,
         )
         self.memory.append_message(
-            Message(role="tool", content=tool_result, name=decision.tool_name)
+            Message(
+                role="tool",
+                content=mark_untrusted_tool_output(decision.tool_name, tool_result),
+                name=decision.tool_name,
+            )
         )
         artifact = self._artifact_from_tool(decision.tool_name, arguments, status)
         return ToolOutcome(
@@ -657,6 +667,11 @@ def _tool_completion_text(outcome: ToolOutcome) -> str:
             return "Не удалось выполнить интернет-запрос. Попробуй изменить запрос или источник."
         return last_result
     return "Не смог сформировать ответ."
+
+
+def _policy_message(reason: str, approval_id: str | None) -> str:
+    suffix = f" Approval ID: {approval_id}." if approval_id else ""
+    return f"{reason}{suffix}"
 
 
 def _http_error_status(result: str) -> int | None:

@@ -78,10 +78,14 @@ class HttpSandbox:
 
         try:
             with request.urlopen(http_request, timeout=self.timeout_seconds) as response:
+                final_url = getattr(response, "geturl", lambda: parsed.geturl())()
+                self._validate_url(str(final_url))
                 status = getattr(response, "status", response.getcode())
                 response_headers = dict(response.headers.items())
                 raw_body = b"" if normalized_method == "HEAD" else response.read(self.max_response_chars + 1)
         except error.HTTPError as exc:
+            final_url = getattr(exc, "geturl", lambda: parsed.geturl())()
+            self._validate_url(str(final_url))
             status = exc.code
             response_headers = dict(exc.headers.items())
             raw_body = b"" if normalized_method == "HEAD" else exc.read(self.max_response_chars + 1)

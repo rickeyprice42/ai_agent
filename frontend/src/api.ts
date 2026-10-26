@@ -511,6 +511,42 @@ export async function approveBlockedStep(stepId: string, token: string): Promise
   return response.json();
 }
 
+export async function decideApproval(
+  approvalId: string,
+  decision: "approved" | "denied" | "revoked",
+  token: string
+): Promise<void> {
+  const response = await fetch(`/api/approvals/${encodeURIComponent(approvalId)}/decision`, {
+    method: "POST",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ decision })
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось сохранить решение по разрешению.");
+  }
+}
+
+export async function setEmergencyStop(enabled: boolean, token: string): Promise<void> {
+  const response = await fetch("/api/security/emergency-stop", {
+    method: "PUT",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled })
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось изменить аварийную остановку.");
+  }
+}
+
+export async function revokePermissionGrant(grantId: string, token: string): Promise<void> {
+  const response = await fetch(`/api/permission-grants/${encodeURIComponent(grantId)}`, {
+    method: "DELETE",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось отозвать разрешение.");
+  }
+}
+
 export async function openWorkspaceFolder(token: string): Promise<{ result: string }> {
   const response = await fetch("/api/workspace/open", {
     method: "POST",

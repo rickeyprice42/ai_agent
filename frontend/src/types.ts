@@ -62,8 +62,38 @@ export type BootstrapPayload = {
   active_project?: ProjectItem | null;
   tasks: TaskItem[];
   action_logs: ActionLogItem[];
+  approval_requests: ApprovalRequestItem[];
+  permission_grants: PermissionGrantItem[];
+  security: SecuritySettings;
   workspace_files: WorkspaceFileItem[];
   user: UserProfile;
+};
+
+export type ApprovalRequestItem = {
+  id: string;
+  task_id?: string | null;
+  step_id?: string | null;
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  scope: Record<string, unknown>;
+  risk: "read" | "write" | "external" | "high" | string;
+  status: string;
+  expires_at: string;
+  created_at: string;
+};
+
+export type PermissionGrantItem = {
+  id: string;
+  permission: string;
+  scope: Record<string, unknown>;
+  status: string;
+  expires_at: string;
+  created_at: string;
+};
+
+export type SecuritySettings = {
+  emergency_stop: boolean;
+  updated_at: string;
 };
 
 export type TaskStepItem = {

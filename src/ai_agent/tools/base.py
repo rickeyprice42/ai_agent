@@ -546,7 +546,7 @@ def _permission_for_name(name: str) -> ToolPermission:
     if name in {"write_file", "create_docx", "append_docx", "create_presentation"}:
         return ToolPermission("workspace.write", "write")
     if name in {"web_search", "http_request"}:
-        return ToolPermission("network.read", "external")
+        return ToolPermission("network.read", "read")
     if name == "run_shell":
         return ToolPermission("process.execute", "high")
     if name == "open_workspace_folder":

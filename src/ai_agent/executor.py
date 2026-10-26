@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 from ai_agent.action_log import ActionLogStore
-from ai_agent.safety import step_safety_block_reason
+from ai_agent.security import ToolPolicyEngine
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import ToolRegistry
 from ai_agent.types import Task, TaskStep
@@ -24,10 +24,12 @@ class ExecutionEngine:
         tasks: TaskManager,
         tools: ToolRegistry,
         action_log: ActionLogStore,
+        policy: ToolPolicyEngine,
     ) -> None:
         self.tasks = tasks
         self.tools = tools
         self.action_log = action_log
+        self.policy = policy
 
     def execute_next_step(self, approved_step_id: str | None = None) -> str:
         task = self.tasks.ensure_running_task()
@@ -40,17 +42,6 @@ class ExecutionEngine:
             return _format_task_state("Задача завершена без отдельных шагов.", completed)
 
         decision = decide_step_action(step)
-        safety_block = None if step.id == approved_step_id else _safety_block_reason(step, decision)
-        if safety_block:
-            self.action_log.record(
-                decision.tool_name or "execution_safety",
-                "blocked",
-                decision.arguments,
-                safety_block,
-            )
-            updated = self.tasks.block_running_step(safety_block)
-            return _format_task_state(safety_block, updated)
-
         if decision.tool_name is None:
             result = (
                 "Шаг остановлен: executor не смог выбрать безопасное действие.\n"
@@ -70,6 +61,19 @@ class ExecutionEngine:
             self.action_log.record(decision.tool_name, "validation_error", decision.arguments, validation_error)
             updated = self.tasks.fail_running_step(validation_error)
             return _format_task_state(validation_error, updated)
+
+        policy = self.policy.authorize(
+            self.tools.get(decision.tool_name),
+            arguments,
+            task_id=task.id,
+            step_id=step.id,
+        )
+        if policy.outcome != "allow":
+            suffix = f" Approval ID: {policy.approval_id}." if policy.approval_id else ""
+            blocked = f"{policy.reason}{suffix}"
+            self.action_log.record(decision.tool_name, "blocked", arguments, blocked)
+            updated = self.tasks.block_running_step(blocked)
+            return _format_task_state(blocked, updated)
 
         invocation = self.tools.invoke(decision.tool_name, arguments)
         tool_result = invocation.text()
@@ -91,11 +95,12 @@ class ExecutionEngine:
         )
 
     def approve_blocked_step(self, step_id: str) -> str:
+        approval = self.policy.approve_step(step_id)
         task = self.tasks.approve_blocked_step(step_id)
         self.action_log.record(
             tool_name="user_approval",
             status="completed",
-            arguments={"step_id": step_id},
+            arguments={"step_id": step_id, "approval_id": approval["id"]},
             result=f"Пользователь подтвердил выполнение шага в задаче {task.id}.",
         )
         return self.execute_next_step(approved_step_id=step_id)
@@ -428,10 +433,6 @@ def _extract_url(text: str) -> str | None:
 
 def _split_paragraphs(content: str) -> list[str]:
     return [part.strip() for part in re.split(r"(?:\r?\n|;\s*)", content) if part.strip()]
-
-
-def _safety_block_reason(step: TaskStep, decision: ExecutionDecision) -> str | None:
-    return step_safety_block_reason(step.description, decision.tool_name, decision.arguments)
 
 
 def _tool_status(tool_result: str) -> str:

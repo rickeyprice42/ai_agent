@@ -21,6 +21,54 @@ class ApproveStepResponse(BaseModel):
     result: str
 
 
+class ApprovalRequestItem(BaseModel):
+    id: str
+    user_id: str
+    task_id: str | None = None
+    step_id: str | None = None
+    tool_name: str
+    arguments_digest: str
+    arguments: dict = Field(default_factory=dict)
+    scope: dict = Field(default_factory=dict)
+    risk: str
+    status: str
+    expires_at: str
+    approved_at: str | None = None
+    decided_at: str | None = None
+    consumed_at: str | None = None
+    created_at: str
+
+
+class ApprovalDecisionRequest(BaseModel):
+    decision: str = Field(..., pattern="^(approved|denied|revoked)$")
+
+
+class SecuritySettingsResponse(BaseModel):
+    emergency_stop: bool
+    updated_at: str
+
+
+class EmergencyStopRequest(BaseModel):
+    enabled: bool
+
+
+class PermissionGrantItem(BaseModel):
+    id: str
+    user_id: str
+    permission: str
+    scope: dict = Field(default_factory=dict)
+    status: str
+    expires_at: str
+    revoked_at: str | None = None
+    created_at: str
+
+
+class PermissionGrantCreateRequest(BaseModel):
+    permission: str = Field(..., min_length=1, max_length=120)
+    scope: dict = Field(default_factory=dict)
+    expires_in_minutes: int = Field(default=30, ge=1, le=1440)
+
+
 class OpenWorkspaceResponse(BaseModel):
     result: str
 
@@ -428,5 +476,8 @@ class BootstrapResponse(BaseModel):
     active_project: ProjectItem | None = None
     tasks: list[TaskItem]
     action_logs: list[ActionLogItem]
+    approval_requests: list[ApprovalRequestItem] = Field(default_factory=list)
+    permission_grants: list[PermissionGrantItem] = Field(default_factory=list)
+    security: SecuritySettingsResponse
     workspace_files: list[WorkspaceFileItem]
     user: UserProfile

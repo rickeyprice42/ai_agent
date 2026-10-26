@@ -164,6 +164,27 @@ Orchestrator получает единый `ToolResult` со status, typed error
 compatibility adapter. Structured-логи содержат только имя, версию, статус, попытки и
 latency; content, заметки, ключи и токены редактируются до сохранения action log.
 
+## Security Policy и approvals
+
+Центральный policy layer классифицирует каждый вызов инструмента как `read`, `write`,
+`external` или `high`. Чтение и создание новых файлов внутри workspace разрешены
+автоматически; перезапись, запуск процессов и внешние side effects требуют отдельного
+подтверждения с точными аргументами, scope и TTL. Изменение аргументов, отказ или
+истечение подтверждения всегда создают новый запрос и не исполняют исходное действие.
+
+Панель Security показывает ожидающие approvals и активные ограниченные grants. Кнопка
+Emergency stop немедленно блокирует инструменты и отзывает все незавершённые approvals
+и grants. Внешний web-контент маркируется как недоверенные данные, а SSRF, traversal,
+symlink escape, shell chaining и попытки передать секреты во внешние инструменты
+блокируются до handler. Дочерний процесс получает минимальный allowlist окружения без
+ключей и токенов; это локальный isolation prototype, а production-контейнеризация и
+OS-level network namespace остаются отдельным deployment layer.
+
+API управления: `GET /api/approvals`, `POST /api/approvals/{id}/decision`,
+`GET /api/security`, `PUT /api/security/emergency-stop`, `GET/POST
+/api/permission-grants` и `DELETE /api/permission-grants/{id}`. Решения, emergency stop
+и grants записываются в redacted action log и изолированы по пользователю.
+
 ## Context Engine
 
 Перед каждым обращением к модели Context Engine собирает prompt в явный токен-бюджет:

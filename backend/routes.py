@@ -9,6 +9,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from backend.auth import hash_password, hash_token, issue_session_token, verify_password
 from backend.models import (
     ApproveStepResponse,
+    ApprovalDecisionRequest,
+    ApprovalRequestItem,
     AutonomousMemorySettings,
     AutonomousMemorySettingsRequest,
     AuthRequest,
@@ -28,6 +30,7 @@ from backend.models import (
     ContextCompactionReviewResponse,
     ContextTraceResponse,
     ExecuteStepResponse,
+    EmergencyStopRequest,
     MemoryOverviewResponse,
     MemoryExtractionTraceResponse,
     MemoryRetrievalTraceResponse,
@@ -35,6 +38,8 @@ from backend.models import (
     PersonalMemoryCreateRequest,
     PersonalMemoryItem,
     PersonalMemoryUpdateRequest,
+    PermissionGrantCreateRequest,
+    PermissionGrantItem,
     ModelProviderOption,
     ModelSettings,
     ModelSettingsRequest,
@@ -45,6 +50,7 @@ from backend.models import (
     ProjectItem,
     ProjectUpdateRequest,
     RegisterRequest,
+    SecuritySettingsResponse,
     UserProfile,
 )
 from backend.service import CompactionConflictError, agent_service
@@ -689,6 +695,72 @@ def approve_blocked_step(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ApproveStepResponse(result=result)
+
+
+@router.get("/approvals", response_model=list[ApprovalRequestItem])
+def approval_requests(
+    status: str | None = Query(default="pending"),
+    user: dict[str, str] = Depends(current_user),
+) -> list[ApprovalRequestItem]:
+    return [
+        ApprovalRequestItem(**item)
+        for item in agent_service.approval_requests(user["id"], status=status)
+    ]
+
+
+@router.post("/approvals/{approval_id}/decision", response_model=ApprovalRequestItem)
+def decide_approval(
+    approval_id: str,
+    payload: ApprovalDecisionRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ApprovalRequestItem:
+    try:
+        return ApprovalRequestItem(
+            **agent_service.decide_approval(user["id"], approval_id, payload.decision)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/security", response_model=SecuritySettingsResponse)
+def security_settings(user: dict[str, str] = Depends(current_user)) -> SecuritySettingsResponse:
+    return SecuritySettingsResponse(**agent_service.security_settings(user["id"]))
+
+
+@router.put("/security/emergency-stop", response_model=SecuritySettingsResponse)
+def set_emergency_stop(
+    payload: EmergencyStopRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> SecuritySettingsResponse:
+    return SecuritySettingsResponse(
+        **agent_service.set_emergency_stop(user["id"], payload.enabled)
+    )
+
+
+@router.get("/permission-grants", response_model=list[PermissionGrantItem])
+def permission_grants(user: dict[str, str] = Depends(current_user)) -> list[PermissionGrantItem]:
+    return [PermissionGrantItem(**item) for item in agent_service.permission_grants(user["id"])]
+
+
+@router.post("/permission-grants", response_model=PermissionGrantItem)
+def create_permission_grant(
+    payload: PermissionGrantCreateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> PermissionGrantItem:
+    return PermissionGrantItem(
+        **agent_service.create_permission_grant(user["id"], **payload.model_dump())
+    )
+
+
+@router.delete("/permission-grants/{grant_id}", response_model=PermissionGrantItem)
+def revoke_permission_grant(
+    grant_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> PermissionGrantItem:
+    try:
+        return PermissionGrantItem(**agent_service.revoke_permission_grant(user["id"], grant_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/workspace/open", response_model=OpenWorkspaceResponse)

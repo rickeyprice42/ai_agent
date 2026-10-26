@@ -11,6 +11,7 @@ import {
   createPersonalMemory,
   createProject,
   createChatThread,
+  decideApproval,
   deleteMemoryNote,
   deletePersonalMemory,
   deleteProject,
@@ -34,7 +35,9 @@ import {
   rememberChat,
   rollbackContextCompaction,
   restoreProject,
+  revokePermissionGrant,
   sendMessageStream,
+  setEmergencyStop,
   unarchiveChatThread,
   updateChatMemory,
   updateAutonomousMemorySettings,
@@ -97,6 +100,9 @@ const EMPTY_BOOTSTRAP: BootstrapPayload = {
   active_project: null,
   tasks: [],
   action_logs: [],
+  approval_requests: [],
+  permission_grants: [],
+  security: { emergency_stop: false, updated_at: "" },
   workspace_files: [],
   user: {
     id: "",
@@ -954,6 +960,46 @@ export default function App() {
     }
   }
 
+  async function handleApprovalDecision(approvalId: string, decision: "approved" | "denied", stepId?: string | null) {
+    if (!authToken || approvingStepId) return;
+    setApprovingStepId(approvalId);
+    setError(null);
+    try {
+      if (decision === "approved" && stepId) {
+        await approveBlockedStep(stepId, authToken);
+      } else {
+        await decideApproval(approvalId, decision, authToken);
+      }
+      await refreshBootstrap(false, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось сохранить решение.");
+    } finally {
+      setApprovingStepId(null);
+    }
+  }
+
+  async function handleEmergencyStop() {
+    if (!authToken) return;
+    const enabled = !bootstrap.security.emergency_stop;
+    if (enabled && !window.confirm("Остановить все инструменты и отозвать активные разрешения?")) return;
+    try {
+      await setEmergencyStop(enabled, authToken);
+      await refreshBootstrap(false, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось изменить аварийную остановку.");
+    }
+  }
+
+  async function handleRevokeGrant(grantId: string) {
+    if (!authToken) return;
+    try {
+      await revokePermissionGrant(grantId, authToken);
+      await refreshBootstrap(false, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось отозвать разрешение.");
+    }
+  }
+
   async function handleOpenWorkspaceFolder() {
     if (!authToken || isOpeningWorkspace) return;
     setIsOpeningWorkspace(true);
@@ -1718,6 +1764,78 @@ export default function App() {
               ))
             )}
           </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Security</p>
+              <h3>Разрешения инструментов</h3>
+            </div>
+            <button
+              className={`ghost-button ${bootstrap.security.emergency_stop ? "" : "mini-button-danger"}`}
+              onClick={() => void handleEmergencyStop()}
+              type="button"
+            >
+              {bootstrap.security.emergency_stop ? "Возобновить" : "Emergency stop"}
+            </button>
+          </div>
+          {bootstrap.security.emergency_stop ? (
+            <div className="memory-rule-box security-stop-banner">
+              <strong>Инструменты остановлены</strong>
+              <span>Активные approval и длительные grants отозваны.</span>
+            </div>
+          ) : null}
+          <div className="task-list">
+            {bootstrap.approval_requests.length === 0 ? (
+              <p className="muted">Нет действий, ожидающих решения.</p>
+            ) : (
+              bootstrap.approval_requests.map((approval) => (
+                <article className="task-item" key={approval.id}>
+                  <div className="task-item-head">
+                    <strong>{approval.tool_name}</strong>
+                    <span className={`state-badge state-${approval.risk}`}>{approval.risk}</span>
+                  </div>
+                  <p className="muted">Область: {JSON.stringify(approval.scope)}</p>
+                  <p className="muted">Аргументы: {JSON.stringify(approval.arguments)}</p>
+                  <small>Истекает: {formatFileTime(approval.expires_at)}</small>
+                  <div className="memory-actions">
+                    <button
+                      className="mini-button"
+                      disabled={approvingStepId === approval.id}
+                      onClick={() => void handleApprovalDecision(approval.id, "approved", approval.step_id)}
+                      type="button"
+                    >
+                      Разрешить один раз
+                    </button>
+                    <button
+                      className="mini-button mini-button-danger"
+                      disabled={approvingStepId === approval.id}
+                      onClick={() => void handleApprovalDecision(approval.id, "denied")}
+                      type="button"
+                    >
+                      Запретить
+                    </button>
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+          {bootstrap.permission_grants.length > 0 ? (
+            <div className="task-list security-grants">
+              <strong>Длительные разрешения</strong>
+              {bootstrap.permission_grants.map((grant) => (
+                <article className="task-item" key={grant.id}>
+                  <div className="task-item-head">
+                    <span>{grant.permission} · {JSON.stringify(grant.scope)}</span>
+                    <button className="mini-button mini-button-danger" onClick={() => void handleRevokeGrant(grant.id)} type="button">
+                      Отозвать
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : null}
         </section>
 
         <section className="panel">

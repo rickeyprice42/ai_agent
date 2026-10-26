@@ -363,6 +363,13 @@ class AvelinDatabase:
             """,
             (user_id,),
         )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO security_settings (user_id, emergency_stop)
+            VALUES (?, 0)
+            """,
+            (user_id,),
+        )
 
     def list_chat_threads(
         self,
@@ -2261,6 +2268,270 @@ class AvelinDatabase:
             )
         return logs
 
+    def create_approval_request(
+        self,
+        user_id: str,
+        *,
+        tool_name: str,
+        arguments_digest: str,
+        arguments: dict,
+        scope: dict,
+        risk: str,
+        expires_at: str,
+        task_id: str | None = None,
+        step_id: str | None = None,
+    ) -> dict:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM approval_requests
+                WHERE user_id = ? AND tool_name = ? AND arguments_digest = ?
+                  AND status IN ('pending', 'approved')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (user_id, tool_name, arguments_digest),
+            ).fetchone()
+            if existing is not None and not _approval_is_expired(existing):
+                return _approval_request_payload(existing)
+            approval_id = str(uuid4())
+            connection.execute(
+                """
+                INSERT INTO approval_requests (
+                    id, user_id, task_id, step_id, tool_name, arguments_digest,
+                    arguments_json, scope_json, risk, status, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    approval_id,
+                    user_id,
+                    task_id,
+                    step_id,
+                    tool_name,
+                    arguments_digest,
+                    json.dumps(arguments, ensure_ascii=False, sort_keys=True),
+                    json.dumps(scope, ensure_ascii=False, sort_keys=True),
+                    risk,
+                    expires_at,
+                ),
+            )
+        return self.get_approval_request(user_id, approval_id) or {}
+
+    def get_approval_request(self, user_id: str, approval_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM approval_requests WHERE id = ? AND user_id = ?",
+                (approval_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if _approval_is_expired(row) and str(row["status"]) in {"pending", "approved"}:
+                connection.execute(
+                    "UPDATE approval_requests SET status = 'expired', decided_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (approval_id,),
+                )
+                row = connection.execute(
+                    "SELECT * FROM approval_requests WHERE id = ?", (approval_id,)
+                ).fetchone()
+        return _approval_request_payload(row) if row is not None else None
+
+    def list_approval_requests(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        self.ensure_user_defaults(user_id)
+        safe_limit = max(1, min(int(limit), 100))
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM approval_requests
+                WHERE user_id = ?
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (user_id, safe_limit),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = self.get_approval_request(user_id, str(row["id"]))
+            if item is not None and (status is None or item["status"] == status):
+                items.append(item)
+        return items
+
+    def decide_approval_request(self, user_id: str, approval_id: str, decision: str) -> dict | None:
+        if decision not in {"approved", "denied", "revoked"}:
+            raise ValueError("Unsupported approval decision.")
+        current = self.get_approval_request(user_id, approval_id)
+        if current is None:
+            return None
+        allowed = {"pending"} if decision in {"approved", "denied"} else {"pending", "approved"}
+        if current["status"] not in allowed:
+            raise ValueError(f"Approval request is already {current['status']}.")
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE approval_requests
+                SET status = ?, decided_at = CURRENT_TIMESTAMP,
+                    approved_at = CASE WHEN ? = 'approved' THEN CURRENT_TIMESTAMP ELSE approved_at END
+                WHERE id = ? AND user_id = ?
+                """,
+                (decision, decision, approval_id, user_id),
+            )
+        return self.get_approval_request(user_id, approval_id)
+
+    def consume_approval_request(
+        self,
+        user_id: str,
+        *,
+        tool_name: str,
+        arguments_digest: str,
+        step_id: str | None = None,
+    ) -> dict | None:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM approval_requests
+                WHERE user_id = ? AND tool_name = ? AND status = 'approved'
+                ORDER BY approved_at DESC, created_at DESC
+                """,
+                (user_id, tool_name),
+            ).fetchall()
+            for row in rows:
+                if _approval_is_expired(row):
+                    connection.execute(
+                        "UPDATE approval_requests SET status = 'expired', decided_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (row["id"],),
+                    )
+                    continue
+                if str(row["arguments_digest"]) != arguments_digest:
+                    continue
+                if step_id and row["step_id"] and str(row["step_id"]) != step_id:
+                    continue
+                connection.execute(
+                    "UPDATE approval_requests SET status = 'consumed', consumed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (row["id"],),
+                )
+                updated = connection.execute(
+                    "SELECT * FROM approval_requests WHERE id = ?", (row["id"],)
+                ).fetchone()
+                return _approval_request_payload(updated)
+        return None
+
+    def approval_for_step(self, user_id: str, step_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM approval_requests
+                WHERE user_id = ? AND step_id = ? AND status IN ('pending', 'approved')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (user_id, step_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return self.get_approval_request(user_id, str(row["id"]))
+
+    def security_settings(self, user_id: str) -> dict:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT emergency_stop, updated_at FROM security_settings WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return {
+            "emergency_stop": bool(row["emergency_stop"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def set_emergency_stop(self, user_id: str, enabled: bool) -> dict:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE security_settings
+                SET emergency_stop = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+                """,
+                (int(enabled), user_id),
+            )
+            if enabled:
+                connection.execute(
+                    """
+                    UPDATE approval_requests
+                    SET status = 'revoked', decided_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ? AND status IN ('pending', 'approved')
+                    """,
+                    (user_id,),
+                )
+                connection.execute(
+                    """
+                    UPDATE permission_grants
+                    SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ? AND status = 'active'
+                    """,
+                    (user_id,),
+                )
+        return self.security_settings(user_id)
+
+    def create_permission_grant(
+        self,
+        user_id: str,
+        *,
+        permission: str,
+        scope: dict,
+        expires_at: str,
+    ) -> dict:
+        self.ensure_user_defaults(user_id)
+        grant_id = str(uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO permission_grants (id, user_id, permission, scope_json, status, expires_at)
+                VALUES (?, ?, ?, ?, 'active', ?)
+                """,
+                (grant_id, user_id, permission, json.dumps(scope, ensure_ascii=False, sort_keys=True), expires_at),
+            )
+        return self.get_permission_grant(user_id, grant_id) or {}
+
+    def get_permission_grant(self, user_id: str, grant_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM permission_grants WHERE id = ? AND user_id = ?",
+                (grant_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if _grant_is_expired(row) and str(row["status"]) == "active":
+                connection.execute(
+                    "UPDATE permission_grants SET status = 'expired' WHERE id = ?",
+                    (grant_id,),
+                )
+                row = connection.execute("SELECT * FROM permission_grants WHERE id = ?", (grant_id,)).fetchone()
+        return _permission_grant_payload(row) if row is not None else None
+
+    def list_permission_grants(self, user_id: str, *, active_only: bool = False) -> list[dict]:
+        self.ensure_user_defaults(user_id)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM permission_grants WHERE user_id = ? ORDER BY created_at DESC",
+                (user_id,),
+            ).fetchall()
+        items = [self.get_permission_grant(user_id, str(row["id"])) for row in rows]
+        return [item for item in items if item is not None and (not active_only or item["status"] == "active")]
+
+    def revoke_permission_grant(self, user_id: str, grant_id: str) -> dict | None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE permission_grants SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_id = ? AND status = 'active'
+                """,
+                (grant_id, user_id),
+            )
+        return self.get_permission_grant(user_id, grant_id)
+
     def get_model_settings(self, user_id: str = DEFAULT_USER_ID) -> dict[str, str]:
         self.ensure_user_defaults(user_id)
         with self.connect() as connection:
@@ -2543,6 +2814,41 @@ CREATE TABLE IF NOT EXISTS action_logs (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS security_settings (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    emergency_stop INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS approval_requests (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    task_id TEXT,
+    step_id TEXT,
+    tool_name TEXT NOT NULL,
+    arguments_digest TEXT NOT NULL,
+    arguments_json TEXT NOT NULL DEFAULT '{}',
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    risk TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    expires_at TEXT NOT NULL,
+    approved_at TEXT,
+    decided_at TEXT,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS permission_grants (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    permission TEXT NOT NULL,
+    scope_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS model_settings (
     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     provider TEXT NOT NULL DEFAULT 'mock',
@@ -2574,6 +2880,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_index_source ON memory_index(source_type, 
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_task_steps_task_id ON task_steps(task_id);
 CREATE INDEX IF NOT EXISTS idx_action_logs_user_id ON action_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_approvals_user_status ON approval_requests(user_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_approvals_step ON approval_requests(user_id, step_id, status);
+CREATE INDEX IF NOT EXISTS idx_permission_grants_user_status ON permission_grants(user_id, status, expires_at);
 """
 
 
@@ -2581,6 +2890,57 @@ def _memory_search_prefix(term: str) -> str:
     if len(term) <= 4:
         return term
     return term[:5] if term.isascii() else term[:4]
+
+
+def _approval_request_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "task_id": row["task_id"],
+        "step_id": row["step_id"],
+        "tool_name": str(row["tool_name"]),
+        "arguments_digest": str(row["arguments_digest"]),
+        "arguments": _load_json_dict(row["arguments_json"]),
+        "scope": _load_json_dict(row["scope_json"]),
+        "risk": str(row["risk"]),
+        "status": str(row["status"]),
+        "expires_at": str(row["expires_at"]),
+        "approved_at": row["approved_at"],
+        "decided_at": row["decided_at"],
+        "consumed_at": row["consumed_at"],
+        "created_at": str(row["created_at"]),
+    }
+
+
+def _permission_grant_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "permission": str(row["permission"]),
+        "scope": _load_json_dict(row["scope_json"]),
+        "status": str(row["status"]),
+        "expires_at": str(row["expires_at"]),
+        "revoked_at": row["revoked_at"],
+        "created_at": str(row["created_at"]),
+    }
+
+
+def _approval_is_expired(row: sqlite3.Row) -> bool:
+    return _is_past_datetime(str(row["expires_at"]))
+
+
+def _grant_is_expired(row: sqlite3.Row) -> bool:
+    return _is_past_datetime(str(row["expires_at"]))
+
+
+def _is_past_datetime(value: str) -> bool:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc) <= datetime.now(timezone.utc)
 
 
 def _memory_candidate_payload(row: sqlite3.Row) -> dict:

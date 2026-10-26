@@ -481,6 +481,22 @@ button {
   border-style: solid;
 }
 
+.security-stop-banner {
+  margin-bottom: 0.75rem;
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
+}
+
+.security-stop-banner strong {
+  color: var(--danger);
+}
+
+.security-grants {
+  margin-top: 0.85rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--line);
+}
+
 .memory-summary-card {
   display: grid;
   gap: 0.75rem;

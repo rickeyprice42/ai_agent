@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib import error, request
 import json
@@ -264,6 +265,73 @@ class AgentService:
     def approve_blocked_step(self, user_id: str, step_id: str) -> str:
         return self.agent_for_user(user_id).executor.approve_blocked_step(step_id)
 
+    def approval_requests(self, user_id: str, status: str | None = None) -> list[dict]:
+        return self.database.list_approval_requests(user_id, status=status)
+
+    def decide_approval(self, user_id: str, approval_id: str, decision: str) -> dict:
+        agent = self.agent_for_user(user_id)
+        result = agent.policy.decide(approval_id, decision)
+        agent.action_log.record(
+            "approval_decision",
+            decision,
+            {"approval_id": approval_id},
+            f"Approval request {decision}.",
+        )
+        return result
+
+    def security_settings(self, user_id: str) -> dict:
+        return self.database.security_settings(user_id)
+
+    def set_emergency_stop(self, user_id: str, enabled: bool) -> dict:
+        result = self.database.set_emergency_stop(user_id, enabled)
+        self.agent_for_user(user_id).action_log.record(
+            "emergency_stop",
+            "enabled" if enabled else "disabled",
+            {},
+            "Emergency stop state changed.",
+        )
+        return result
+
+    def permission_grants(self, user_id: str) -> list[dict]:
+        return self.database.list_permission_grants(user_id)
+
+    def create_permission_grant(
+        self,
+        user_id: str,
+        *,
+        permission: str,
+        scope: dict,
+        expires_in_minutes: int,
+    ) -> dict:
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=expires_in_minutes)
+        ).isoformat()
+        result = self.database.create_permission_grant(
+            user_id,
+            permission=permission,
+            scope=scope,
+            expires_at=expires_at,
+        )
+        self.agent_for_user(user_id).action_log.record(
+            "permission_grant",
+            "created",
+            {"permission": permission, "scope": scope, "grant_id": result["id"]},
+            "Scoped permission grant created.",
+        )
+        return result
+
+    def revoke_permission_grant(self, user_id: str, grant_id: str) -> dict:
+        result = self.database.revoke_permission_grant(user_id, grant_id)
+        if result is None:
+            raise ValueError("Permission grant не найден.")
+        self.agent_for_user(user_id).action_log.record(
+            "permission_grant",
+            "revoked",
+            {"grant_id": grant_id},
+            "Scoped permission grant revoked.",
+        )
+        return result
+
     def open_workspace_folder(self, user_id: str) -> str:
         return self.agent_for_user(user_id).files.open_folder()
 
@@ -498,6 +566,9 @@ class AgentService:
             "active_project": active_project,
             "tasks": [_task_to_payload(task) for task in agent.tasks.list_tasks()],
             "action_logs": [_action_log_to_payload(log) for log in agent.action_log.recent(limit=20)],
+            "approval_requests": self.database.list_approval_requests(user_id, status="pending"),
+            "permission_grants": self.database.list_permission_grants(user_id, active_only=True),
+            "security": self.database.security_settings(user_id),
             "workspace_files": [_workspace_file_to_payload(file) for file in agent.files.list_files(limit=20)],
             "user": user,
         }
