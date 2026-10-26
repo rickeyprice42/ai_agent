@@ -69,15 +69,19 @@
    - Результат: агент помнит опыт и использует его при выполнении новых задач.
 
 11. [IN PROGRESS] Tool System: агент начинает действовать
-   - Развит единый `ToolRegistry` для всех инструментов.
-   - Инструменты описываются через JSON schema: имя, описание, аргументы, результат.
-   - Добавлено выполнение инструментов через LLM tool-calls с валидацией аргументов.
-   - Добавлено безопасное выполнение и логирование вызовов.
+   - [DONE] Единый `ToolRegistry` переведен на production-контракт: versioned manifests, строгие input/output JSON Schema, typed results/errors/events, timeout, retry, cancellation и idempotency.
+   - [DONE] Добавлены discovery API для инструментов и capabilities без изменения существующих built-ins.
+   - [DONE] Выполнение через LLM tool-calls и task executor использует единый registry-контракт и валидацию до handler.
+   - [DONE] Центральная policy-модель классифицирует read/write/external/high-risk действия, использует exact approvals с TTL, scoped grants, audit trail и emergency stop.
+   - [DONE] Web/tool output считается недоверенными данными; добавлены prompt-injection, SSRF/redirect, secret-exfiltration, traversal и shell-chain проверки.
    - Добавлен внутренний task manager.
    - Добавлен первый файловый инструмент: безопасное чтение текстовых файлов из рабочей папки инструментов.
    - Добавлен второй файловый инструмент: безопасная запись текстовых файлов в рабочую папку без перезаписи по умолчанию.
    - Добавлен ограниченный shell-инструмент для проверок из allowlist внутри рабочей папки инструментов.
    - Добавлен безопасный HTTP-инструмент для GET/HEAD запросов к публичным http/https URL.
+   - [DONE] Добавлен базовый coding tool pack: line-aware read, metadata/hash, Unicode search, hash-safe exact edit, move и recoverable delete/restore.
+   - [DONE] Добавлены project inspection, предопределенные test/lint/typecheck/build runners, timeout, bounded/partial output и process status.
+   - [DONE] Добавлены Git read-only status/diff/log/branch/ref и approval-gated stage/commit/create-branch; автоматический push намеренно отсутствует.
    - [DONE] Добавлен инструмент `create_presentation`: создание базовой `.pptx`-презентации внутри безопасной рабочей папки по JSON-структуре слайдов.
    - [DONE] Поддержать минимальный MVP презентаций: титульный слайд, agenda/структура, текстовые слайды, изображение + подпись, финальный слайд, единая тема оформления.
    - [DONE] Добавлена вставка локальных изображений в `.pptx` через `image_path` внутри безопасной рабочей папки.
@@ -89,7 +93,7 @@
    - [DONE] Добавить проверку качества презентации: нет пустых слайдов, текст не слишком длинный, у изображений есть источник, структура соответствует ТЗ, файл открывается как валидный `.pptx`.
    - Позже расширить до редактирования существующих презентаций: прочитать `.pptx`, извлечь структуру, заменить текст/изображения, добавить или переставить слайды без разрушения шаблона.
    - Инструменты связаны с первым execution loop для выполнения шагов задач.
-   - Далее нужны retry, подтверждения опасных действий и расширение набора безопасных сценариев.
+   - Далее: Tool Factory/Skills с ручным approval, MCP/Connector слой и расширение presentation/research сценариев.
    - Результат: Avelin превращается из "болтуна" в исполнителя.
 
 12. [DONE] Task System: сердце Avelin

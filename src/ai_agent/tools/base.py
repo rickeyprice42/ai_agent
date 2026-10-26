@@ -434,7 +434,12 @@ def validate_json_schema(value: Any, schema: dict[str, Any], path: str = "$") ->
         if "pattern" in schema and re.search(schema["pattern"], value) is None:
             errors.append(f"{path}: строка не соответствует pattern")
 
-    if expected in {"integer", "number"} and isinstance(value, (int, float)) and not isinstance(value, bool):
+    numeric_schema = (
+        expected in {"integer", "number"}
+        if isinstance(expected, str)
+        else isinstance(expected, list) and any(item in {"integer", "number"} for item in expected)
+    )
+    if numeric_schema and isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < schema["minimum"]:
             errors.append(f"{path}: значение меньше minimum")
         if "maximum" in schema and value > schema["maximum"]:

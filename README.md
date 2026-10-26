@@ -185,6 +185,20 @@ API управления: `GET /api/approvals`, `POST /api/approvals/{id}/decisi
 /api/permission-grants` и `DELETE /api/permission-grants/{id}`. Решения, emergency stop
 и grants записываются в redacted action log и изолированы по пользователю.
 
+## Coding tool pack
+
+Поверх production Tool Registry доступны отдельные безопасные операции для работы с
+кодом. Файловый слой поддерживает построчное чтение, SHA-256 metadata, Unicode-поиск,
+точечный `exact edit` с обязательным precondition hash, move и recoverable delete/restore.
+Если файл изменился после чтения, операция возвращает `stale_file` и не перезаписывает
+пользовательские изменения.
+
+Project inspection не запускает код. Тесты, lint, typecheck и build выполняются только
+через предопределённые runners с workspace cwd, очищенным окружением, timeout и
+ограниченным выводом; частичный вывод сохраняется при timeout. Git read-only инструменты
+покрывают status, diff, log, branches и ref inspection. `stage`, `commit` и создание
+локальной ветки требуют exact approval; автоматического `push` в tool pack нет.
+
 ## Context Engine
 
 Перед каждым обращением к модели Context Engine собирает prompt в явный токен-бюджет:

@@ -7,6 +7,7 @@ from ai_agent.memory import MemoryStore
 from ai_agent.planner import Planner
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import Tool, ToolRegistry
+from ai_agent.tools.coding_pack import register_coding_tool_pack
 from ai_agent.tools.documents import DocumentSandbox
 from ai_agent.tools.files import FileSandbox
 from ai_agent.tools.http import HttpSandbox
@@ -27,6 +28,7 @@ def register_builtin_tools(
     http: HttpSandbox,
     executor: ExecutionEngine,
 ) -> None:
+    register_coding_tool_pack(registry, files)
     registry.register(
         Tool(
             name="get_time",
