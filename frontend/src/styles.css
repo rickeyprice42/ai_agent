@@ -897,6 +897,19 @@ button {
   overflow-wrap: anywhere;
 }
 
+.artifact-link {
+  display: inline-flex;
+  margin: 0.35rem 0.45rem 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .state-badge {
   flex: 0 0 auto;
   padding: 0.22rem 0.45rem;

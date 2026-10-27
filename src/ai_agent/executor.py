@@ -183,6 +183,16 @@ class ExecutionEngine:
             self.tasks.set_run_state(
                 run["id"], "waiting_approval", worker_id=self.worker_id, failure_reason=blocked
             )
+            if policy.approval_id:
+                self.tasks.database.create_in_app_notification(
+                    self.tasks.user_id,
+                    deduplication_key=f"approval:{policy.approval_id}",
+                    kind="approval_required",
+                    title=f"Требуется подтверждение: {decision.tool_name}",
+                    body=blocked,
+                    entity_type="approval",
+                    entity_id=policy.approval_id,
+                )
             return _format_task_state(blocked, updated)
 
         self.tasks.heartbeat_run(run["id"], self.worker_id, self.lease_seconds)
@@ -273,6 +283,12 @@ class ExecutionEngine:
 
     def approve_blocked_step(self, step_id: str) -> str:
         approval = self.policy.approve_step(step_id)
+        return self.execute_approved_step(step_id, approval["id"])
+
+    def execute_approved_step(self, step_id: str, approval_id: str) -> str:
+        approval = self.tasks.database.get_approval_request(self.tasks.user_id, approval_id)
+        if approval is None or approval["status"] != "approved" or approval.get("step_id") != step_id:
+            raise ValueError("Approval не подтверждает ожидаемый шаг.")
         task = self.tasks.approve_blocked_step(step_id)
         run = self.tasks.task_run(task.id)
         if run is not None:
@@ -280,7 +296,7 @@ class ExecutionEngine:
         self.action_log.record(
             tool_name="user_approval",
             status="completed",
-            arguments={"step_id": step_id, "approval_id": approval["id"]},
+            arguments={"step_id": step_id, "approval_id": approval_id},
             result=f"Пользователь подтвердил выполнение шага в задаче {task.id}.",
         )
         return self.execute_next_step(approved_step_id=step_id)

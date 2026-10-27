@@ -18,6 +18,7 @@ from ai_agent.autonomous_memory import AutonomousMemoryEngine
 from ai_agent.chat_output import history_for_ui
 from ai_agent.config import Settings
 from ai_agent.database import AvelinDatabase
+from ai_agent.task_reports import TaskReportService
 
 
 AVAILABLE_MODELS = [
@@ -297,6 +298,9 @@ class AgentService:
 
     def decide_approval(self, user_id: str, approval_id: str, decision: str) -> dict:
         agent = self.agent_for_user(user_id)
+        pending = self.database.get_approval_request(user_id, approval_id)
+        if pending is None:
+            raise ValueError("Approval request не найден.")
         result = agent.policy.decide(approval_id, decision)
         agent.action_log.record(
             "approval_decision",
@@ -304,6 +308,58 @@ class AgentService:
             {"approval_id": approval_id},
             f"Approval request {decision}.",
         )
+        step_id = pending.get("step_id")
+        task_id = pending.get("task_id")
+        if decision == "approved" and step_id:
+            agent.executor.execute_approved_step(str(step_id), approval_id)
+        elif decision in {"denied", "revoked"} and task_id:
+            task = agent.tasks.get_task(str(task_id))
+            run = agent.tasks.task_run(str(task_id))
+            reason = f"Действие {pending['tool_name']} отклонено пользователем."
+            if run is not None:
+                for checkpoint in agent.tasks.checkpoints(run["id"]):
+                    if checkpoint.get("step_id") == step_id and checkpoint["status"] == "waiting_approval":
+                        self.database.update_task_checkpoint(
+                            user_id,
+                            checkpoint["id"],
+                            status="denied",
+                            observation=reason,
+                            artifacts=checkpoint.get("artifacts", []),
+                            evidence={"verified": True, "approval": decision},
+                            next_action="revise_or_cancel",
+                        )
+                agent.tasks.set_run_state(run["id"], "paused", failure_reason=reason)
+            if task is not None:
+                if step_id:
+                    agent.tasks.update_step(str(step_id), "blocked", reason)
+                agent.tasks.update_task(task.id, "blocked", reason)
+            self.database.create_in_app_notification(
+                user_id,
+                deduplication_key=f"approval-decision:{approval_id}:{decision}",
+                kind="approval_decision",
+                title="Действие не выполнено",
+                body=reason,
+                entity_type="task",
+                entity_id=str(task_id),
+            )
+        return result
+
+    def run_report(self, user_id: str, run_id: str) -> dict:
+        return TaskReportService(self.database, user_id).run_report(run_id)
+
+    def daily_task_report(self, user_id: str, report_date: str | None = None) -> dict:
+        return TaskReportService(self.database, user_id).daily_report(report_date)
+
+    def task_reports(self, user_id: str, limit: int = 30) -> list[dict]:
+        return TaskReportService(self.database, user_id).list_reports(limit)
+
+    def notifications(self, user_id: str, unread_only: bool = False) -> list[dict]:
+        return self.database.list_in_app_notifications(user_id, unread_only=unread_only)
+
+    def mark_notification_read(self, user_id: str, notification_id: str) -> dict:
+        result = self.database.mark_in_app_notification_read(user_id, notification_id)
+        if result is None:
+            raise ValueError("Уведомление не найдено.")
         return result
 
     def security_settings(self, user_id: str) -> dict:
@@ -593,6 +649,8 @@ class AgentService:
             "active_project": active_project,
             "tasks": [_task_to_payload(task) for task in agent.tasks.list_tasks()],
             "task_runs": agent.tasks.task_runs(),
+            "task_reports": TaskReportService(self.database, user_id).list_reports(10),
+            "notifications": self.database.list_in_app_notifications(user_id, limit=20),
             "action_logs": [_action_log_to_payload(log) for log in agent.action_log.recent(limit=20)],
             "approval_requests": self.database.list_approval_requests(user_id, status="pending"),
             "permission_grants": self.database.list_permission_grants(user_id, active_only=True),

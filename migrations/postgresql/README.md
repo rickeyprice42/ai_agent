@@ -1,7 +1,14 @@
 # PostgreSQL migration contract
 
-`0001_personal_memory.sql` is the production schema contract for AVE-36. The
-current desktop launcher continues to use SQLite; its equivalent tables are
+The numbered files are the production PostgreSQL schema contracts:
+
+- `0001_personal_memory.sql` covers AVE-36 personal memory.
+- `0002_security_policy.sql` defines the security and approval policy.
+- `0003_durable_task_runs.sql` adds durable task runs and checkpoints.
+- `0004_task_reports_notifications.sql` adds AVE-42 evidence reports and
+  in-app notifications.
+
+The current desktop launcher continues to use SQLite; equivalent tables are
 created by `AvelinDatabase.initialize()` so local installations remain
 zero-configuration.
 

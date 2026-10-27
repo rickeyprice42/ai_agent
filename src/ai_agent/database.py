@@ -2538,6 +2538,140 @@ class AvelinDatabase:
             ).fetchall()
         return [_task_checkpoint_payload(row) for row in rows]
 
+    def list_task_runs_for_date(self, user_id: str, report_date: str) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM task_runs
+                WHERE user_id = ? AND (
+                    date(created_at, 'localtime') = ? OR date(updated_at, 'localtime') = ?
+                    OR date(started_at, 'localtime') = ? OR date(finished_at, 'localtime') = ?
+                )
+                ORDER BY created_at ASC
+                """,
+                (user_id, report_date, report_date, report_date, report_date),
+            ).fetchall()
+        return [_task_run_payload(row) for row in rows]
+
+    def save_task_report(
+        self,
+        user_id: str,
+        *,
+        kind: str,
+        report_date: str,
+        run_id: str | None,
+        task_id: str | None,
+        payload: dict,
+    ) -> dict:
+        if kind not in {"run", "daily"}:
+            raise ValueError("Unsupported task report kind.")
+        report_key = f"{kind}:{run_id or report_date}"
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT id FROM task_reports WHERE user_id = ? AND report_key = ?",
+                (user_id, report_key),
+            ).fetchone()
+            report_id = str(existing["id"]) if existing else str(uuid4())
+            connection.execute(
+                """
+                INSERT INTO task_reports (
+                    id, user_id, report_key, kind, report_date, run_id, task_id, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, report_key) DO UPDATE SET
+                    report_date = excluded.report_date,
+                    run_id = excluded.run_id,
+                    task_id = excluded.task_id,
+                    payload_json = excluded.payload_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    report_id, user_id, report_key, kind, report_date, run_id, task_id,
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+            row = connection.execute("SELECT * FROM task_reports WHERE id = ?", (report_id,)).fetchone()
+        return _task_report_payload(row)
+
+    def list_task_reports(self, user_id: str, limit: int = 30) -> list[dict]:
+        safe_limit = max(1, min(int(limit), 100))
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM task_reports WHERE user_id = ?
+                ORDER BY report_date DESC, updated_at DESC LIMIT ?
+                """,
+                (user_id, safe_limit),
+            ).fetchall()
+        return [_task_report_payload(row) for row in rows]
+
+    def create_in_app_notification(
+        self,
+        user_id: str,
+        *,
+        deduplication_key: str,
+        kind: str,
+        title: str,
+        body: str,
+        entity_type: str | None = None,
+        entity_id: str | None = None,
+    ) -> dict:
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM in_app_notifications WHERE user_id = ? AND deduplication_key = ?",
+                (user_id, deduplication_key),
+            ).fetchone()
+            if existing is not None:
+                return _in_app_notification_payload(existing)
+            notification_id = str(uuid4())
+            connection.execute(
+                """
+                INSERT INTO in_app_notifications (
+                    id, user_id, deduplication_key, kind, title, body, entity_type, entity_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    notification_id, user_id, deduplication_key, kind, title, body,
+                    entity_type, entity_id,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM in_app_notifications WHERE id = ?", (notification_id,)
+            ).fetchone()
+        return _in_app_notification_payload(row)
+
+    def list_in_app_notifications(
+        self, user_id: str, *, unread_only: bool = False, limit: int = 50
+    ) -> list[dict]:
+        safe_limit = max(1, min(int(limit), 100))
+        unread_clause = " AND read_at IS NULL" if unread_only else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM in_app_notifications
+                WHERE user_id = ?{unread_clause}
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (user_id, safe_limit),
+            ).fetchall()
+        return [_in_app_notification_payload(row) for row in rows]
+
+    def mark_in_app_notification_read(self, user_id: str, notification_id: str) -> dict | None:
+        with self.connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE in_app_notifications
+                SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
+                WHERE id = ? AND user_id = ?
+                """,
+                (notification_id, user_id),
+            )
+            if updated.rowcount != 1:
+                return None
+            row = connection.execute(
+                "SELECT * FROM in_app_notifications WHERE id = ?", (notification_id,)
+            ).fetchone()
+        return _in_app_notification_payload(row)
+
     def add_action_log(
         self,
         user_id: str,
@@ -3173,6 +3307,34 @@ CREATE TABLE IF NOT EXISTS task_checkpoints (
     UNIQUE(run_id, deduplication_key)
 );
 
+CREATE TABLE IF NOT EXISTS task_reports (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    report_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    report_date TEXT NOT NULL,
+    run_id TEXT REFERENCES task_runs(id) ON DELETE CASCADE,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, report_key)
+);
+
+CREATE TABLE IF NOT EXISTS in_app_notifications (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    deduplication_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    entity_type TEXT,
+    entity_id TEXT,
+    read_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, deduplication_key)
+);
+
 CREATE TABLE IF NOT EXISTS action_logs (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -3251,6 +3413,8 @@ CREATE INDEX IF NOT EXISTS idx_task_steps_task_id ON task_steps(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_runs_queue ON task_runs(user_id, state, lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_task_checkpoints_run ON task_checkpoints(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_task_checkpoints_step ON task_checkpoints(task_id, step_id, status);
+CREATE INDEX IF NOT EXISTS idx_task_reports_user_date ON task_reports(user_id, report_date, updated_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON in_app_notifications(user_id, read_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_action_logs_user_id ON action_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_user_status ON approval_requests(user_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_approvals_step ON approval_requests(user_id, step_id, status);
@@ -3352,6 +3516,34 @@ def _task_checkpoint_payload(row: sqlite3.Row) -> dict:
         "next_action": row["next_action"],
         "created_at": str(row["created_at"]),
         "updated_at": str(row["updated_at"]),
+    }
+
+
+def _task_report_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "kind": str(row["kind"]),
+        "report_date": str(row["report_date"]),
+        "run_id": row["run_id"],
+        "task_id": row["task_id"],
+        "payload": _load_json_dict(row["payload_json"]),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def _in_app_notification_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "kind": str(row["kind"]),
+        "title": str(row["title"]),
+        "body": str(row["body"] or ""),
+        "entity_type": row["entity_type"],
+        "entity_id": row["entity_id"],
+        "read_at": row["read_at"],
+        "created_at": str(row["created_at"]),
     }
 
 

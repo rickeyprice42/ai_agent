@@ -213,6 +213,22 @@ high-risk вызов мог завершиться прямо перед сбо�
 можно управлять через `GET /api/task-runs`, checkpoint API и действия
 `POST /api/tasks/{task_id}/pause|resume|cancel`.
 
+## Approvals, notifications и evidence reports
+
+Approval-карточка показывает точный tool-call, redacted arguments, risk, scope и срок.
+Одноразовый approve продолжает только связанный step; deny фиксируется в checkpoint и
+оставляет задачу на паузе без скрытого выполнения. Если пользователь не отвечает,
+`waiting_approval` не возвращается в очередь. Истёкшее разрешение нельзя использовать:
+после явного resume создаётся новый approval с теми же проверяемыми аргументами.
+
+Run- и daily-отчёты строятся детерминированно из checkpoints и typed evidence, без
+LLM-пересказа. Они содержат подтверждённые действия, тесты/проверки, commits, ссылки на
+workspace artifacts, блокеры, budget usage/limits и следующий шаг. API:
+`POST /api/task-runs/{run_id}/report`, `GET /api/task-reports`,
+`POST /api/task-reports/daily`, `GET /api/notifications` и
+`POST /api/notifications/{id}/read`. Внешние каналы в этот контур не входят и могут
+подключаться отдельно только после явного согласия пользователя.
+
 ## Context Engine
 
 Перед каждым обращением к модели Context Engine собирает prompt в явный токен-бюджет:

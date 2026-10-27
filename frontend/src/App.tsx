@@ -9,6 +9,8 @@ import {
   clearChatMessages,
   clearAgentMemory,
   controlTask,
+  createDailyTaskReport,
+  createRunReport,
   createPersonalMemory,
   createProject,
   createChatThread,
@@ -30,6 +32,7 @@ import {
   fetchPersonalMemory,
   fetchModelProviders,
   login as authLogin,
+  markNotificationRead,
   logout as authLogout,
   openWorkspaceFolder,
   register as authRegister,
@@ -101,6 +104,8 @@ const EMPTY_BOOTSTRAP: BootstrapPayload = {
   active_project: null,
   tasks: [],
   task_runs: [],
+  task_reports: [],
+  notifications: [],
   action_logs: [],
   approval_requests: [],
   permission_grants: [],
@@ -960,6 +965,31 @@ export default function App() {
     }
   }
 
+  async function handleCreateReport(runId?: string) {
+    if (!authToken || isExecutingStep) return;
+    setIsExecutingStep(true);
+    setError(null);
+    try {
+      if (runId) await createRunReport(runId, authToken);
+      else await createDailyTaskReport(authToken);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось сформировать отчёт.");
+    } finally {
+      setIsExecutingStep(false);
+    }
+  }
+
+  async function handleReadNotification(notificationId: string) {
+    if (!authToken) return;
+    try {
+      await markNotificationRead(notificationId, authToken);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось отметить уведомление.");
+    }
+  }
+
   async function handleApproveBlockedStep(stepId: string) {
     if (!authToken || approvingStepId) return;
     setApprovingStepId(stepId);
@@ -1802,6 +1832,21 @@ export default function App() {
               <span>Активные approval и длительные grants отозваны.</span>
             </div>
           ) : null}
+          {bootstrap.notifications.some((item) => !item.read_at) ? (
+            <div className="task-list security-grants">
+              <strong>Уведомления</strong>
+              {bootstrap.notifications.filter((item) => !item.read_at).slice(0, 5).map((item) => (
+                <article className="task-item" key={item.id}>
+                  <div className="task-item-head">
+                    <strong>{item.title}</strong>
+                    <button className="mini-button" onClick={() => void handleReadNotification(item.id)} type="button">Прочитано</button>
+                  </div>
+                  <p className="muted">{item.body}</p>
+                  <small>{formatFileTime(item.created_at)}</small>
+                </article>
+              ))}
+            </div>
+          ) : null}
           <div className="task-list">
             {bootstrap.approval_requests.length === 0 ? (
               <p className="muted">Нет действий, ожидающих решения.</p>
@@ -1860,9 +1905,12 @@ export default function App() {
               <p className="eyebrow">Execution</p>
               <h3>Очередь задач</h3>
             </div>
-            <button className="ghost-button" onClick={() => void handleExecuteNextStep()} disabled={isExecutingStep} type="button">
-              {isExecutingStep ? "Выполняю..." : "Выполнить шаг"}
-            </button>
+            <div className="memory-actions">
+              <button className="ghost-button" onClick={() => void handleCreateReport()} disabled={isExecutingStep} type="button">Отчёт за день</button>
+              <button className="ghost-button" onClick={() => void handleExecuteNextStep()} disabled={isExecutingStep} type="button">
+                {isExecutingStep ? "Выполняю..." : "Выполнить шаг"}
+              </button>
+            </div>
           </div>
           <div className="task-list">
             {bootstrap.tasks.length === 0 ? (
@@ -1885,6 +1933,9 @@ export default function App() {
                     ) : null}
                     {!(["completed", "failed", "cancelled"].includes(bootstrap.task_runs.find((run) => run.task_id === task.id)?.state ?? "")) ? (
                       <button className="mini-button mini-button-danger" onClick={() => void handleTaskControl(task.id, "cancel")} type="button">Отменить</button>
+                    ) : null}
+                    {bootstrap.task_runs.find((run) => run.task_id === task.id) ? (
+                      <button className="mini-button" onClick={() => void handleCreateReport(bootstrap.task_runs.find((run) => run.task_id === task.id)?.id)} type="button">Отчёт</button>
                     ) : null}
                   </div>
                   <div className="task-steps">
@@ -1910,6 +1961,31 @@ export default function App() {
               ))
             )}
           </div>
+          {bootstrap.task_reports.length > 0 ? (
+            <div className="task-list security-grants">
+              <strong>Проверяемые отчёты</strong>
+              {bootstrap.task_reports.slice(0, 4).map((report) => (
+                <article className="task-item" key={report.id}>
+                  <div className="task-item-head">
+                    <strong>{report.kind === "daily" ? `Отчёт за ${report.report_date}` : "Отчёт запуска"}</strong>
+                    <span className="state-badge state-completed">evidence</span>
+                  </div>
+                  <p>{report.payload.summary}</p>
+                  <p className="muted">Проверок: {report.payload.checks?.length ?? 0} · Блокеров: {report.payload.blockers?.length ?? 0}</p>
+                  {(report.payload.artifacts ?? []).map((artifact) => (
+                    <button
+                      className="artifact-link"
+                      key={`${report.id}-${artifact.path}`}
+                      onClick={() => void handleDownloadArtifact({ path: artifact.path, name: artifact.name ?? artifact.path.split("/").pop() ?? "artifact", extension: "", size_bytes: 0 })}
+                      type="button"
+                    >
+                      Скачать {artifact.name ?? artifact.path}
+                    </button>
+                  ))}
+                </article>
+              ))}
+            </div>
+          ) : null}
         </section>
 
         <section className="panel">

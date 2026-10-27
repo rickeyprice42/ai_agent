@@ -409,6 +409,30 @@ class TaskControlResponse(BaseModel):
     run: TaskRunItem
 
 
+class TaskReportItem(BaseModel):
+    id: str
+    user_id: str
+    kind: str
+    report_date: str
+    run_id: str | None = None
+    task_id: str | None = None
+    payload: dict = Field(default_factory=dict)
+    created_at: str
+    updated_at: str
+
+
+class InAppNotificationItem(BaseModel):
+    id: str
+    user_id: str
+    kind: str
+    title: str
+    body: str = ""
+    entity_type: str | None = None
+    entity_id: str | None = None
+    read_at: str | None = None
+    created_at: str
+
+
 class ActionLogItem(BaseModel):
     id: str
     user_id: str
@@ -521,6 +545,8 @@ class BootstrapResponse(BaseModel):
     active_project: ProjectItem | None = None
     tasks: list[TaskItem]
     task_runs: list[TaskRunItem] = Field(default_factory=list)
+    task_reports: list[TaskReportItem] = Field(default_factory=list)
+    notifications: list[InAppNotificationItem] = Field(default_factory=list)
     action_logs: list[ActionLogItem]
     approval_requests: list[ApprovalRequestItem] = Field(default_factory=list)
     permission_grants: list[PermissionGrantItem] = Field(default_factory=list)

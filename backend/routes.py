@@ -51,8 +51,10 @@ from backend.models import (
     ProjectUpdateRequest,
     RegisterRequest,
     SecuritySettingsResponse,
+    InAppNotificationItem,
     TaskCheckpointItem,
     TaskControlResponse,
+    TaskReportItem,
     TaskRunItem,
     UserProfile,
 )
@@ -703,6 +705,60 @@ def task_checkpoints(
             TaskCheckpointItem(**item)
             for item in agent_service.task_checkpoints(user["id"], run_id)
         ]
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/task-runs/{run_id}/report", response_model=TaskReportItem)
+def create_run_report(
+    run_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> TaskReportItem:
+    try:
+        return TaskReportItem(**agent_service.run_report(user["id"], run_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/task-reports", response_model=list[TaskReportItem])
+def task_reports(
+    limit: int = Query(default=30, ge=1, le=100),
+    user: dict[str, str] = Depends(current_user),
+) -> list[TaskReportItem]:
+    return [TaskReportItem(**item) for item in agent_service.task_reports(user["id"], limit)]
+
+
+@router.post("/task-reports/daily", response_model=TaskReportItem)
+def create_daily_task_report(
+    report_date: str | None = Query(default=None, alias="date"),
+    user: dict[str, str] = Depends(current_user),
+) -> TaskReportItem:
+    try:
+        return TaskReportItem(**agent_service.daily_task_report(user["id"], report_date))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/notifications", response_model=list[InAppNotificationItem])
+def notifications(
+    unread_only: bool = Query(default=False),
+    user: dict[str, str] = Depends(current_user),
+) -> list[InAppNotificationItem]:
+    return [
+        InAppNotificationItem(**item)
+        for item in agent_service.notifications(user["id"], unread_only)
+    ]
+
+
+@router.post("/notifications/{notification_id}/read", response_model=InAppNotificationItem)
+def mark_notification_read(
+    notification_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> InAppNotificationItem:
+    try:
+        return InAppNotificationItem(
+            **agent_service.mark_notification_read(user["id"], notification_id)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

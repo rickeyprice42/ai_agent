@@ -514,6 +514,30 @@ export async function controlTask(
   }
 }
 
+export async function createRunReport(runId: string, token: string): Promise<void> {
+  const response = await fetch(`/api/task-runs/${encodeURIComponent(runId)}/report`, {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось сформировать отчёт запуска.");
+}
+
+export async function createDailyTaskReport(token: string): Promise<void> {
+  const response = await fetch("/api/task-reports/daily", {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось сформировать ежедневный отчёт.");
+}
+
+export async function markNotificationRead(notificationId: string, token: string): Promise<void> {
+  const response = await fetch(`/api/notifications/${encodeURIComponent(notificationId)}/read`, {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось отметить уведомление.");
+}
+
 export async function approveBlockedStep(stepId: string, token: string): Promise<{ result: string }> {
   const response = await fetch(`/api/tasks/steps/${encodeURIComponent(stepId)}/approve`, {
     method: "POST",

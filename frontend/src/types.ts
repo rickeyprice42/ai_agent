@@ -62,6 +62,8 @@ export type BootstrapPayload = {
   active_project?: ProjectItem | null;
   tasks: TaskItem[];
   task_runs: TaskRunItem[];
+  task_reports: TaskReportItem[];
+  notifications: InAppNotificationItem[];
   action_logs: ActionLogItem[];
   approval_requests: ApprovalRequestItem[];
   permission_grants: PermissionGrantItem[];
@@ -127,6 +129,38 @@ export type TaskRunItem = {
   budget: Record<string, number>;
   usage: Record<string, number>;
   failure_reason?: string | null;
+};
+
+export type TaskReportItem = {
+  id: string;
+  kind: "run" | "daily" | string;
+  report_date: string;
+  run_id?: string | null;
+  task_id?: string | null;
+  payload: {
+    summary?: string;
+    completed_actions?: Array<Record<string, unknown>>;
+    checks?: Array<Record<string, unknown>>;
+    commits?: Array<Record<string, unknown>>;
+    artifacts?: Array<{ path: string; name?: string; sha256?: string; reference?: string }>;
+    blockers?: Array<Record<string, unknown>>;
+    budget?: Record<string, unknown>;
+    next_action?: string;
+    next_actions?: string[];
+  };
+  created_at: string;
+  updated_at: string;
+};
+
+export type InAppNotificationItem = {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  entity_type?: string | null;
+  entity_id?: string | null;
+  read_at?: string | null;
+  created_at: string;
 };
 
 export type ActionLogItem = {

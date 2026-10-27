@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ai_agent.database import AvelinDatabase
+from ai_agent.task_reports import TaskReportService
 from ai_agent.types import Task, TaskStep
 
 
@@ -66,6 +67,8 @@ class TaskManager:
         )
         if run is None:
             raise ValueError("Durable task run не найден или lease потерян.")
+        if state in {"completed", "failed", "cancelled"}:
+            TaskReportService(self.database, self.user_id).run_report(run_id)
         return run
 
     def task_run(self, task_id: str) -> dict | None:
@@ -89,6 +92,15 @@ class TaskManager:
         if run is None or run["state"] not in {"paused", "waiting_approval"}:
             raise ValueError("Возобновить можно только paused/waiting_approval задачу.")
         self.set_run_state(run["id"], "queued")
+        task = self.get_task(task_id)
+        if task is None:
+            raise ValueError("Задача не найдена.")
+        if self.running_step(task) is None:
+            blocked_step = next((step for step in task.steps if step.status == "blocked"), None)
+            if blocked_step is not None:
+                task = self.update_step(
+                    blocked_step.id, "running", "Шаг явно возобновлён пользователем."
+                )
         task = self.update_task(task_id, "planned")
         cleared = self.database.clear_task_result(task.id)
         return _task_from_row(cleared) if cleared is not None else task

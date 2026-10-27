@@ -106,6 +106,9 @@
    - [DONE] Каждый tool-call сохраняет checkpoint с plan version, redacted arguments, observation, artifacts, evidence и next action.
    - [DONE] Добавлены deduplication key, защита от повторного опасного действия после сбоя, бюджеты шагов/ошибок/времени/токенов/стоимости.
    - [DONE] Добавлены pause/resume/cancel API и управление состоянием очереди в интерфейсе.
+   - [DONE] Завершён approval lifecycle: точный approve продолжает ожидаемый шаг, deny не исполняет действие, expiry требует нового явного resume.
+   - [DONE] Добавлены evidence-only отчёты по run/дню: действия, проверки, commits, артефакты, блокеры, budget и next action.
+   - [DONE] Добавлены персистентные in-app уведомления без внешней доставки и скрытой активности.
    - Результат: пользователь дает список задач, а агент ведет их до результата.
 
 13. [DONE] Planner / Reasoning
