@@ -409,6 +409,76 @@ class TaskControlResponse(BaseModel):
     run: TaskRunItem
 
 
+class AutomationCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    schedule_type: str = Field(..., pattern="^(once|weekly)$")
+    timezone: str = Field(default="UTC", min_length=1, max_length=80)
+    run_at: str | None = None
+    weekday: int | None = Field(default=None, ge=0, le=6)
+    time_of_day: str | None = None
+    budget: dict = Field(default_factory=dict)
+    max_parallel_runs: int = Field(default=1, ge=1, le=3)
+
+
+class AutomationUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    prompt: str | None = Field(default=None, min_length=1, max_length=4000)
+    schedule_type: str | None = Field(default=None, pattern="^(once|weekly)$")
+    timezone: str | None = Field(default=None, min_length=1, max_length=80)
+    run_at: str | None = None
+    weekday: int | None = Field(default=None, ge=0, le=6)
+    time_of_day: str | None = None
+    budget: dict | None = None
+    max_parallel_runs: int | None = Field(default=None, ge=1, le=3)
+
+
+class AutomationRunItem(BaseModel):
+    id: str
+    automation_id: str
+    scheduled_for: str
+    task_id: str
+    task_run_id: str
+    state: str
+    budget: dict = Field(default_factory=dict)
+    usage: dict = Field(default_factory=dict)
+    failure_reason: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    created_at: str
+
+
+class AutomationOccurrenceItem(BaseModel):
+    id: str
+    automation_id: str
+    scheduled_for: str
+    task_id: str
+    task_run_id: str
+    state: str
+
+
+class AutomationItem(BaseModel):
+    id: str
+    user_id: str
+    name: str
+    prompt: str
+    schedule_type: str
+    schedule: dict = Field(default_factory=dict)
+    timezone: str
+    human_rule: str
+    status: str
+    next_run_at: str | None = None
+    last_scheduled_for: str | None = None
+    last_task_id: str | None = None
+    last_task_run_id: str | None = None
+    budget: dict = Field(default_factory=dict)
+    max_parallel_runs: int = 1
+    deleted_at: str | None = None
+    created_at: str
+    updated_at: str
+    last_run: AutomationRunItem | None = None
+
+
 class TaskReportItem(BaseModel):
     id: str
     user_id: str
@@ -545,6 +615,7 @@ class BootstrapResponse(BaseModel):
     active_project: ProjectItem | None = None
     tasks: list[TaskItem]
     task_runs: list[TaskRunItem] = Field(default_factory=list)
+    automations: list[AutomationItem] = Field(default_factory=list)
     task_reports: list[TaskReportItem] = Field(default_factory=list)
     notifications: list[InAppNotificationItem] = Field(default_factory=list)
     action_logs: list[ActionLogItem]

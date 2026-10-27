@@ -7,6 +7,7 @@ The numbered files are the production PostgreSQL schema contracts:
 - `0003_durable_task_runs.sql` adds durable task runs and checkpoints.
 - `0004_task_reports_notifications.sql` adds AVE-42 evidence reports and
   in-app notifications.
+- `0005_automations.sql` adds AVE-54 schedules and deduplicated occurrences.
 
 The current desktop launcher continues to use SQLite; equivalent tables are
 created by `AvelinDatabase.initialize()` so local installations remain

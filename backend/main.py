@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from time import perf_counter
+import asyncio
 import logging
 import sys
 
@@ -20,12 +22,41 @@ if str(SRC) not in sys.path:
 
 from backend.logging_config import configure_logging
 from backend.routes import router
+from backend.service import agent_service
 
 
 configure_logging(ROOT)
 logger = logging.getLogger("avelin.api")
 
-app = FastAPI(title="Avelin API", version="0.1.0")
+
+async def _automation_scheduler(stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            queued = await asyncio.to_thread(agent_service.tick_automations)
+            if queued:
+                logger.info("automation scheduler queued=%s", len(queued))
+        except Exception:
+            logger.exception("automation scheduler tick failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=30)
+        except TimeoutError:
+            pass
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    stop = asyncio.Event()
+    scheduler = asyncio.create_task(_automation_scheduler(stop))
+    try:
+        yield
+    finally:
+        stop.set()
+        scheduler.cancel()
+        with suppress(asyncio.CancelledError):
+            await scheduler
+
+
+app = FastAPI(title="Avelin API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

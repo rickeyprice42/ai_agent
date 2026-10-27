@@ -220,7 +220,7 @@ class ExecutionEngine:
         attempts = invocation.attempts
         self.action_log.record(decision.tool_name, status, arguments, tool_result)
 
-        artifacts = _checkpoint_artifacts(invocation.output)
+        artifacts = _checkpoint_artifacts(invocation.output, decision.tool_name, arguments)
         evidence = {
             "verified": invocation.status == "completed",
             "tool_status": invocation.status,
@@ -675,7 +675,11 @@ def _budget_exhausted(run: dict) -> str | None:
     return None
 
 
-def _checkpoint_artifacts(output: object) -> list[dict]:
+def _checkpoint_artifacts(
+    output: object,
+    tool_name: str | None = None,
+    arguments: dict | None = None,
+) -> list[dict]:
     """Keep only compact, durable artifact references from a tool result."""
     candidates: list[dict] = []
     values = output if isinstance(output, list) else [output]
@@ -690,6 +694,16 @@ def _checkpoint_artifacts(output: object) -> list[dict]:
                     "name": str(value.get("name") or Path(str(path)).name),
                     "sha256": str(value.get("sha256") or ""),
                 }
+            )
+    if not candidates and tool_name in {
+        "write_file", "create_docx", "append_docx", "create_presentation",
+        "edit_file_exact", "move_file", "restore_file",
+    }:
+        safe_arguments = arguments or {}
+        path = safe_arguments.get("destination") or safe_arguments.get("path")
+        if path:
+            candidates.append(
+                {"path": str(path), "name": Path(str(path)).name, "sha256": ""}
             )
     return candidates
 

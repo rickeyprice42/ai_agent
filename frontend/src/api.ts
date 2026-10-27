@@ -514,6 +514,48 @@ export async function controlTask(
   }
 }
 
+export async function createAutomation(
+  payload: {
+    name: string;
+    prompt: string;
+    schedule_type: "once" | "weekly";
+    timezone: string;
+    run_at?: string;
+    weekday?: number;
+    time_of_day?: string;
+    budget: Record<string, number>;
+    max_parallel_runs: number;
+  },
+  token: string
+): Promise<void> {
+  const response = await fetch("/api/automations", {
+    method: "POST",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось создать автоматизацию.");
+}
+
+export async function controlAutomation(
+  automationId: string,
+  action: "pause" | "resume",
+  token: string
+): Promise<void> {
+  const response = await fetch(`/api/automations/${encodeURIComponent(automationId)}/${action}`, {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось изменить автоматизацию.");
+}
+
+export async function deleteAutomation(automationId: string, token: string): Promise<void> {
+  const response = await fetch(`/api/automations/${encodeURIComponent(automationId)}`, {
+    method: "DELETE",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось удалить автоматизацию.");
+}
+
 export async function createRunReport(runId: string, token: string): Promise<void> {
   const response = await fetch(`/api/task-runs/${encodeURIComponent(runId)}/report`, {
     method: "POST",

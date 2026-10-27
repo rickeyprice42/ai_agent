@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from ai_agent.agent import Agent
+from ai_agent.automations import AutomationService
 from ai_agent.autonomous_memory import AutonomousMemoryEngine
 from ai_agent.chat_output import history_for_ui
 from ai_agent.config import Settings
@@ -265,6 +266,35 @@ class AgentService:
 
     def task_runs(self, user_id: str) -> list[dict]:
         return self.agent_for_user(user_id).tasks.task_runs()
+
+    def automations(self, user_id: str) -> list[dict]:
+        return AutomationService(self.database, user_id).list()
+
+    def create_automation(self, user_id: str, payload: dict) -> dict:
+        payload = dict(payload)
+        payload["timezone_name"] = payload.pop("timezone")
+        return AutomationService(self.database, user_id).create(**payload)
+
+    def update_automation(self, user_id: str, automation_id: str, payload: dict) -> dict:
+        return AutomationService(self.database, user_id).update(automation_id, payload)
+
+    def control_automation(self, user_id: str, automation_id: str, action: str) -> dict:
+        service = AutomationService(self.database, user_id)
+        if action == "pause":
+            return service.pause(automation_id)
+        if action == "resume":
+            return service.resume(automation_id)
+        if action == "delete":
+            return service.delete(automation_id)
+        raise ValueError("Неизвестное действие автоматизации.")
+
+    def tick_automations(self, user_id: str | None = None) -> list[dict]:
+        return AutomationService(self.database, user_id).run_due()
+
+    def automation_runs(self, user_id: str, automation_id: str) -> list[dict]:
+        if self.database.get_automation(user_id, automation_id) is None:
+            raise ValueError("Автоматизация не найдена.")
+        return self.database.list_automation_runs(user_id, automation_id)
 
     def task_checkpoints(self, user_id: str, run_id: str) -> list[dict]:
         run = self.database.get_task_run(user_id, run_id)
@@ -625,6 +655,7 @@ class AgentService:
         return project
 
     def bootstrap(self, user_id: str, thread_id: str | None = None) -> dict:
+        self.tick_automations(user_id)
         active_thread = self.resolve_thread(user_id, thread_id)
         agent = self.agent_for_user(user_id, active_thread["id"])
         memory = agent.memory.snapshot()
@@ -649,6 +680,7 @@ class AgentService:
             "active_project": active_project,
             "tasks": [_task_to_payload(task) for task in agent.tasks.list_tasks()],
             "task_runs": agent.tasks.task_runs(),
+            "automations": AutomationService(self.database, user_id).list(),
             "task_reports": TaskReportService(self.database, user_id).list_reports(10),
             "notifications": self.database.list_in_app_notifications(user_id, limit=20),
             "action_logs": [_action_log_to_payload(log) for log in agent.action_log.recent(limit=20)],

@@ -8,6 +8,11 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.auth import hash_password, hash_token, issue_session_token, verify_password
 from backend.models import (
+    AutomationCreateRequest,
+    AutomationItem,
+    AutomationOccurrenceItem,
+    AutomationRunItem,
+    AutomationUpdateRequest,
     ApproveStepResponse,
     ApprovalDecisionRequest,
     ApprovalRequestItem,
@@ -688,6 +693,90 @@ def delete_project(
 @router.post("/tasks/execute-next", response_model=ExecuteStepResponse)
 def execute_next_step(user: dict[str, str] = Depends(current_user)) -> ExecuteStepResponse:
     return ExecuteStepResponse(result=agent_service.execute_next_step(user["id"]))
+
+
+@router.get("/automations", response_model=list[AutomationItem])
+def automations(user: dict[str, str] = Depends(current_user)) -> list[AutomationItem]:
+    return [AutomationItem(**item) for item in agent_service.automations(user["id"])]
+
+
+@router.post("/automations", response_model=AutomationItem)
+def create_automation(
+    payload: AutomationCreateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> AutomationItem:
+    try:
+        return AutomationItem(
+            **agent_service.create_automation(user["id"], payload.model_dump())
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/automations/{automation_id}", response_model=AutomationItem)
+def update_automation(
+    automation_id: str,
+    payload: AutomationUpdateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> AutomationItem:
+    try:
+        return AutomationItem(
+            **agent_service.update_automation(
+                user["id"], automation_id, payload.model_dump(exclude_none=True)
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/automations/{automation_id}/{action}", response_model=AutomationItem)
+def control_automation(
+    automation_id: str,
+    action: str,
+    user: dict[str, str] = Depends(current_user),
+) -> AutomationItem:
+    if action not in {"pause", "resume"}:
+        raise HTTPException(status_code=404, detail="Неизвестное действие автоматизации.")
+    try:
+        return AutomationItem(
+            **agent_service.control_automation(user["id"], automation_id, action)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/automations/{automation_id}", response_model=AutomationItem)
+def delete_automation(
+    automation_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> AutomationItem:
+    try:
+        return AutomationItem(
+            **agent_service.control_automation(user["id"], automation_id, "delete")
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/automations/{automation_id}/runs", response_model=list[AutomationRunItem])
+def automation_runs(
+    automation_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> list[AutomationRunItem]:
+    try:
+        return [
+            AutomationRunItem(**item)
+            for item in agent_service.automation_runs(user["id"], automation_id)
+        ]
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/automations/tick", response_model=list[AutomationOccurrenceItem])
+def tick_automations(user: dict[str, str] = Depends(current_user)) -> list[AutomationOccurrenceItem]:
+    return [
+        AutomationOccurrenceItem(**item) for item in agent_service.tick_automations(user["id"])
+    ]
 
 
 @router.get("/task-runs", response_model=list[TaskRunItem])

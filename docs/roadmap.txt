@@ -109,6 +109,8 @@
    - [DONE] Завершён approval lifecycle: точный approve продолжает ожидаемый шаг, deny не исполняет действие, expiry требует нового явного resume.
    - [DONE] Добавлены evidence-only отчёты по run/дню: действия, проверки, commits, артефакты, блокеры, budget и next action.
    - [DONE] Добавлены персистентные in-app уведомления без внешней доставки и скрытой активности.
+   - [DONE] Добавлены one-shot/weekly Automations с timezone, pause/resume/delete, budgets и enqueue-only scheduler.
+   - [DONE] Scheduled slots дедуплицируются при рестарте, а offline misfires coalesce-ятся без шторма запусков.
    - Результат: пользователь дает список задач, а агент ведет их до результата.
 
 13. [DONE] Planner / Reasoning

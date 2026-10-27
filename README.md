@@ -229,6 +229,21 @@ workspace artifacts, блокеры, budget usage/limits и следующий �
 `POST /api/notifications/{id}/read`. Внешние каналы в этот контур не входят и могут
 подключаться отдельно только после явного согласия пользователя.
 
+## Avelin Automations
+
+One-shot и weekly-автоматизации хранят timezone, human-readable правило, следующий
+запуск и отдельный budget. Фоновый scheduler раз в 30 секунд только ставит обычный
+durable run в очередь: модель и инструменты выполняются существующим worker-контуром.
+Каждый scheduled slot имеет уникальную запись, поэтому рестарт и параллельный tick не
+создают дубликаты. После offline-периода weekly schedule coalesce-ится в один запуск,
+а следующее время вычисляется уже в будущем — без шторма накопившихся задач.
+
+Управление доступно через `GET/POST /api/automations`,
+`PUT /api/automations/{id}`, `POST /api/automations/{id}/pause|resume` и
+`DELETE /api/automations/{id}`. В prompt можно использовать `{date}` и `{datetime}`
+для уникальных имён локальных черновиков. Внешние действия по-прежнему проходят
+центральную approval policy.
+
 ## Context Engine
 
 Перед каждым обращением к модели Context Engine собирает prompt в явный токен-бюджет:

@@ -8,7 +8,9 @@ import {
   approveBlockedStep,
   clearChatMessages,
   clearAgentMemory,
+  controlAutomation,
   controlTask,
+  createAutomation,
   createDailyTaskReport,
   createRunReport,
   createPersonalMemory,
@@ -16,6 +18,7 @@ import {
   createChatThread,
   decideApproval,
   deleteMemoryNote,
+  deleteAutomation,
   deletePersonalMemory,
   deleteProject,
   deleteChatThread,
@@ -104,6 +107,7 @@ const EMPTY_BOOTSTRAP: BootstrapPayload = {
   active_project: null,
   tasks: [],
   task_runs: [],
+  automations: [],
   task_reports: [],
   notifications: [],
   action_logs: [],
@@ -186,6 +190,12 @@ function formatFileTime(value: string): string {
   });
 }
 
+function defaultAutomationRunAt(): string {
+  const value = new Date(Date.now() + 60 * 60 * 1000);
+  const local = new Date(value.getTime() - value.getTimezoneOffset() * 60 * 1000);
+  return local.toISOString().slice(0, 16);
+}
+
 function TypewriterText({ text }: { text: string }) {
   const [visibleText, setVisibleText] = useState(text);
 
@@ -250,6 +260,14 @@ export default function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isExecutingStep, setIsExecutingStep] = useState(false);
+  const [isSavingAutomation, setIsSavingAutomation] = useState(false);
+  const [automationName, setAutomationName] = useState("Еженедельный черновик");
+  const [automationPrompt, setAutomationPrompt] = useState("Создай документ drafts/weekly-{date}.docx с заголовком: Еженедельный черновик с текстом: Подготовь проверяемый локальный черновик. Ничего не публикуй и не отправляй.");
+  const [automationScheduleType, setAutomationScheduleType] = useState<"once" | "weekly">("weekly");
+  const [automationTimezone, setAutomationTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+  const [automationRunAt, setAutomationRunAt] = useState(defaultAutomationRunAt);
+  const [automationWeekday, setAutomationWeekday] = useState(0);
+  const [automationTime, setAutomationTime] = useState("09:00");
   const [approvingStepId, setApprovingStepId] = useState<string | null>(null);
   const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false);
   const [isClearingMemory, setIsClearingMemory] = useState(false);
@@ -962,6 +980,66 @@ export default function App() {
       setError(err instanceof Error ? err.message : "Не удалось изменить состояние задачи.");
     } finally {
       setIsExecutingStep(false);
+    }
+  }
+
+  async function handleCreateAutomation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!authToken || isSavingAutomation) return;
+    setIsSavingAutomation(true);
+    setError(null);
+    try {
+      await createAutomation({
+        name: automationName,
+        prompt: automationPrompt,
+        schedule_type: automationScheduleType,
+        timezone: automationTimezone,
+        ...(automationScheduleType === "once"
+          ? { run_at: automationRunAt }
+          : { weekday: automationWeekday, time_of_day: automationTime }),
+        budget: {
+          max_steps: 20,
+          max_failures: 3,
+          max_seconds: 1800,
+          max_tokens: 50000,
+          max_cost_micros: 0
+        },
+        max_parallel_runs: 1
+      }, authToken);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось создать автоматизацию.");
+    } finally {
+      setIsSavingAutomation(false);
+    }
+  }
+
+  async function handleAutomationControl(automationId: string, action: "pause" | "resume") {
+    if (!authToken || isSavingAutomation) return;
+    setIsSavingAutomation(true);
+    setError(null);
+    try {
+      await controlAutomation(automationId, action, authToken);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось изменить автоматизацию.");
+    } finally {
+      setIsSavingAutomation(false);
+    }
+  }
+
+  async function handleDeleteAutomation(automationId: string) {
+    if (!authToken || isSavingAutomation) return;
+    if (!window.confirm("Удалить автоматизацию? Будущие запуски будут отменены.")) return;
+    setIsSavingAutomation(true);
+    setError(null);
+    try {
+      await deleteAutomation(automationId, authToken);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось удалить автоматизацию.");
+    } finally {
+      setIsSavingAutomation(false);
     }
   }
 
@@ -1897,6 +1975,81 @@ export default function App() {
               ))}
             </div>
           ) : null}
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Automations</p>
+              <h3>Расписания Avelin</h3>
+            </div>
+            <span className="muted">{bootstrap.automations.filter((item) => item.status === "active").length}/20 активных</span>
+          </div>
+          <form className="automation-form" onSubmit={handleCreateAutomation}>
+            <label>
+              Название
+              <input value={automationName} maxLength={120} onChange={(event) => setAutomationName(event.target.value)} required />
+            </label>
+            <label className="automation-prompt-field">
+              Безопасное задание
+              <textarea value={automationPrompt} maxLength={4000} onChange={(event) => setAutomationPrompt(event.target.value)} required />
+            </label>
+            <label>
+              Расписание
+              <select value={automationScheduleType} onChange={(event) => setAutomationScheduleType(event.target.value as "once" | "weekly")}>
+                <option value="once">Один раз</option>
+                <option value="weekly">Раз в неделю</option>
+              </select>
+            </label>
+            <label>
+              Часовой пояс
+              <input value={automationTimezone} onChange={(event) => setAutomationTimezone(event.target.value)} required />
+            </label>
+            {automationScheduleType === "once" ? (
+              <label>
+                Дата и время
+                <input type="datetime-local" value={automationRunAt} onChange={(event) => setAutomationRunAt(event.target.value)} required />
+              </label>
+            ) : (
+              <>
+                <label>
+                  День недели
+                  <select value={automationWeekday} onChange={(event) => setAutomationWeekday(Number(event.target.value))}>
+                    <option value={0}>Понедельник</option><option value={1}>Вторник</option>
+                    <option value={2}>Среда</option><option value={3}>Четверг</option>
+                    <option value={4}>Пятница</option><option value={5}>Суббота</option>
+                    <option value={6}>Воскресенье</option>
+                  </select>
+                </label>
+                <label>
+                  Время
+                  <input type="time" value={automationTime} onChange={(event) => setAutomationTime(event.target.value)} required />
+                </label>
+              </>
+            )}
+            <button className="ghost-button" disabled={isSavingAutomation} type="submit">
+              {isSavingAutomation ? "Сохраняю..." : "Создать автоматизацию"}
+            </button>
+          </form>
+          <p className="muted">Лимит запуска: 20 шагов · 50k токенов · 30 минут · параллелизм 1. Внешняя отправка всё равно потребует approval.</p>
+          <div className="task-list">
+            {bootstrap.automations.length === 0 ? <p className="muted">Автоматизаций пока нет.</p> : bootstrap.automations.map((automation) => (
+              <article className="task-item" key={automation.id}>
+                <div className="task-item-head">
+                  <strong>{automation.name}</strong>
+                  <span className={`state-badge state-${automation.status}`}>{automation.status}</span>
+                </div>
+                <p>{automation.human_rule}</p>
+                <p className="muted">Следующий запуск: {automation.next_run_at ? formatFileTime(automation.next_run_at) : "—"}</p>
+                <p className="muted">Последний результат: {automation.last_run?.state ?? "ещё не запускалась"} · steps {automation.last_run?.usage.steps ?? 0}/{automation.budget.max_steps ?? 0} · tokens {automation.last_run?.usage.tokens ?? 0}/{automation.budget.max_tokens ?? 0} · до {automation.budget.max_seconds ?? 0} сек.</p>
+                <div className="task-step-row">
+                  {automation.status === "active" ? <button className="mini-button" onClick={() => void handleAutomationControl(automation.id, "pause")} type="button">Пауза</button> : null}
+                  {automation.status === "paused" ? <button className="mini-button" onClick={() => void handleAutomationControl(automation.id, "resume")} type="button">Продолжить</button> : null}
+                  <button className="mini-button mini-button-danger" onClick={() => void handleDeleteAutomation(automation.id)} type="button">Удалить</button>
+                </div>
+              </article>
+            ))}
+          </div>
         </section>
 
         <section className="panel">

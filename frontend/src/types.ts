@@ -62,6 +62,7 @@ export type BootstrapPayload = {
   active_project?: ProjectItem | null;
   tasks: TaskItem[];
   task_runs: TaskRunItem[];
+  automations: AutomationItem[];
   task_reports: TaskReportItem[];
   notifications: InAppNotificationItem[];
   action_logs: ActionLogItem[];
@@ -129,6 +130,37 @@ export type TaskRunItem = {
   budget: Record<string, number>;
   usage: Record<string, number>;
   failure_reason?: string | null;
+};
+
+export type AutomationRunItem = {
+  id: string;
+  automation_id: string;
+  scheduled_for: string;
+  task_id: string;
+  task_run_id: string;
+  state: string;
+  budget: Record<string, number>;
+  usage: Record<string, number>;
+  failure_reason?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  created_at: string;
+};
+
+export type AutomationItem = {
+  id: string;
+  name: string;
+  prompt: string;
+  schedule_type: "once" | "weekly" | string;
+  schedule: { run_at?: string; weekday?: number; time_of_day?: string };
+  timezone: string;
+  human_rule: string;
+  status: string;
+  next_run_at?: string | null;
+  last_scheduled_for?: string | null;
+  budget: Record<string, number>;
+  max_parallel_runs: number;
+  last_run?: AutomationRunItem | null;
 };
 
 export type TaskReportItem = {

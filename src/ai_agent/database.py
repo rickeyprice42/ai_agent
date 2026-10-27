@@ -2672,6 +2672,283 @@ class AvelinDatabase:
             ).fetchone()
         return _in_app_notification_payload(row)
 
+    def create_automation(
+        self,
+        user_id: str,
+        *,
+        name: str,
+        prompt: str,
+        schedule_type: str,
+        schedule: dict,
+        timezone_name: str,
+        human_rule: str,
+        next_run_at: str,
+        budget: dict,
+        max_parallel_runs: int,
+    ) -> dict:
+        self.ensure_user_defaults(user_id)
+        automation_id = str(uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO automations (
+                    id, user_id, name, prompt, schedule_type, schedule_json, timezone,
+                    human_rule, status, next_run_at, budget_json, max_parallel_runs
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                """,
+                (
+                    automation_id, user_id, name, prompt, schedule_type,
+                    json.dumps(schedule, ensure_ascii=False, sort_keys=True), timezone_name,
+                    human_rule, next_run_at, json.dumps(budget, sort_keys=True), max_parallel_runs,
+                ),
+            )
+        return self.get_automation(user_id, automation_id) or {}
+
+    def get_automation(self, user_id: str, automation_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM automations WHERE id = ? AND user_id = ?",
+                (automation_id, user_id),
+            ).fetchone()
+        return self._automation_with_last_run(row) if row is not None else None
+
+    def list_automations(
+        self,
+        user_id: str,
+        *,
+        include_deleted: bool = False,
+        active_only: bool = False,
+        limit: int = 100,
+    ) -> list[dict]:
+        clauses = ["user_id = ?"]
+        params: list[object] = [user_id]
+        if not include_deleted:
+            clauses.append("status != 'deleted'")
+        if active_only:
+            clauses.append("status = 'active'")
+        params.append(max(1, min(int(limit), 100)))
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM automations WHERE {' AND '.join(clauses)}
+                ORDER BY CASE status WHEN 'active' THEN 1 WHEN 'paused' THEN 2 ELSE 3 END,
+                         next_run_at ASC, created_at ASC LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._automation_with_last_run(row) for row in rows]
+
+    def update_automation(
+        self,
+        user_id: str,
+        automation_id: str,
+        *,
+        name: str,
+        prompt: str,
+        schedule_type: str,
+        schedule: dict,
+        timezone_name: str,
+        human_rule: str,
+        next_run_at: str,
+        budget: dict,
+        max_parallel_runs: int,
+    ) -> dict:
+        with self.connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE automations
+                SET name = ?, prompt = ?, schedule_type = ?, schedule_json = ?, timezone = ?,
+                    human_rule = ?, next_run_at = ?, budget_json = ?, max_parallel_runs = ?,
+                    status = CASE WHEN status = 'completed' THEN 'active' ELSE status END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_id = ? AND status != 'deleted'
+                """,
+                (
+                    name, prompt, schedule_type,
+                    json.dumps(schedule, ensure_ascii=False, sort_keys=True), timezone_name,
+                    human_rule, next_run_at, json.dumps(budget, sort_keys=True), max_parallel_runs,
+                    automation_id, user_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("Автоматизация не найдена.")
+        return self.get_automation(user_id, automation_id) or {}
+
+    def set_automation_status(
+        self,
+        user_id: str,
+        automation_id: str,
+        status: str,
+        *,
+        next_run_at: str | None = None,
+    ) -> dict | None:
+        if status not in {"active", "paused", "completed", "deleted"}:
+            raise ValueError("Unsupported automation status.")
+        with self.connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE automations
+                SET status = ?, next_run_at = CASE WHEN ? = 'active' THEN COALESCE(?, next_run_at)
+                                                   WHEN ? IN ('completed', 'deleted') THEN NULL
+                                                   ELSE next_run_at END,
+                    deleted_at = CASE WHEN ? = 'deleted' THEN CURRENT_TIMESTAMP ELSE deleted_at END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_id = ? AND status != 'deleted'
+                """,
+                (status, status, next_run_at, status, status, automation_id, user_id),
+            )
+            if updated.rowcount != 1:
+                return None
+        return self.get_automation(user_id, automation_id)
+
+    def list_due_automations(
+        self,
+        now_iso: str,
+        *,
+        limit: int = 50,
+        user_id: str | None = None,
+    ) -> list[dict]:
+        user_clause = " AND user_id = ?" if user_id else ""
+        params: list[object] = [now_iso]
+        if user_id:
+            params.append(user_id)
+        params.append(max(1, min(int(limit), 100)))
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM automations
+                WHERE status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ?{user_clause}
+                ORDER BY next_run_at ASC LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [_automation_payload(row) for row in rows]
+
+    def count_active_automation_runs(self, automation_id: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS value FROM automation_runs AS ar
+                JOIN task_runs AS tr ON tr.id = ar.task_run_id
+                WHERE ar.automation_id = ?
+                  AND tr.state IN ('queued', 'running', 'waiting_approval', 'paused')
+                """,
+                (automation_id,),
+            ).fetchone()
+        return int(row["value"] if row else 0)
+
+    def enqueue_automation_occurrence(
+        self,
+        user_id: str,
+        automation_id: str,
+        *,
+        expected_next_run_at: str,
+        next_run_at: str | None,
+        terminal: bool,
+        scheduled_for: str,
+        task_description: str,
+        task_step: str,
+        budget: dict,
+    ) -> dict | None:
+        task_id = str(uuid4())
+        step_id = str(uuid4())
+        run_id = str(uuid4())
+        occurrence_id = str(uuid4())
+        deduplication_key = f"automation:{automation_id}:{scheduled_for}"
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            claimed = connection.execute(
+                """
+                UPDATE automations
+                SET next_run_at = ?, status = CASE WHEN ? THEN 'completed' ELSE status END,
+                    last_scheduled_for = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_id = ? AND status = 'active' AND next_run_at = ?
+                """,
+                (next_run_at, 1 if terminal else 0, scheduled_for, automation_id, user_id, expected_next_run_at),
+            )
+            if claimed.rowcount != 1:
+                return None
+            duplicate = connection.execute(
+                "SELECT id FROM automation_runs WHERE automation_id = ? AND scheduled_for = ?",
+                (automation_id, scheduled_for),
+            ).fetchone()
+            if duplicate is not None:
+                return None
+            connection.execute(
+                "INSERT INTO tasks (id, user_id, description, priority) VALUES (?, ?, ?, 3)",
+                (task_id, user_id, task_description),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_steps (id, task_id, position, description)
+                VALUES (?, ?, 1, ?)
+                """,
+                (step_id, task_id, task_step),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_runs (
+                    id, task_id, user_id, state, plan_version, deduplication_key,
+                    budget_json, usage_json
+                ) VALUES (?, ?, ?, 'queued', 1, ?, ?, ?)
+                """,
+                (
+                    run_id, task_id, user_id, deduplication_key,
+                    json.dumps(budget, sort_keys=True), json.dumps(_default_task_usage(), sort_keys=True),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO automation_runs (
+                    id, automation_id, user_id, scheduled_for, task_id, task_run_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (occurrence_id, automation_id, user_id, scheduled_for, task_id, run_id),
+            )
+            connection.execute(
+                """
+                UPDATE automations SET last_task_id = ?, last_task_run_id = ? WHERE id = ?
+                """,
+                (task_id, run_id, automation_id),
+            )
+        return {
+            "id": occurrence_id,
+            "automation_id": automation_id,
+            "scheduled_for": scheduled_for,
+            "task_id": task_id,
+            "task_run_id": run_id,
+            "state": "queued",
+        }
+
+    def list_automation_runs(self, user_id: str, automation_id: str, limit: int = 20) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT ar.*, tr.state, tr.budget_json, tr.usage_json, tr.failure_reason,
+                       tr.started_at, tr.finished_at
+                FROM automation_runs AS ar JOIN task_runs AS tr ON tr.id = ar.task_run_id
+                WHERE ar.user_id = ? AND ar.automation_id = ?
+                ORDER BY ar.scheduled_for DESC LIMIT ?
+                """,
+                (user_id, automation_id, max(1, min(int(limit), 100))),
+            ).fetchall()
+        return [_automation_run_payload(row) for row in rows]
+
+    def _automation_with_last_run(self, row: sqlite3.Row) -> dict:
+        payload = _automation_payload(row)
+        with self.connect() as connection:
+            last = connection.execute(
+                """
+                SELECT ar.*, tr.state, tr.budget_json, tr.usage_json, tr.failure_reason,
+                       tr.started_at, tr.finished_at
+                FROM automation_runs AS ar JOIN task_runs AS tr ON tr.id = ar.task_run_id
+                WHERE ar.automation_id = ? ORDER BY ar.scheduled_for DESC LIMIT 1
+                """,
+                (payload["id"],),
+            ).fetchone()
+        payload["last_run"] = _automation_run_payload(last) if last is not None else None
+        return payload
+
     def add_action_log(
         self,
         user_id: str,
@@ -3335,6 +3612,38 @@ CREATE TABLE IF NOT EXISTS in_app_notifications (
     UNIQUE(user_id, deduplication_key)
 );
 
+CREATE TABLE IF NOT EXISTS automations (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    schedule_type TEXT NOT NULL,
+    schedule_json TEXT NOT NULL DEFAULT '{}',
+    timezone TEXT NOT NULL,
+    human_rule TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    next_run_at TEXT,
+    last_scheduled_for TEXT,
+    last_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    last_task_run_id TEXT REFERENCES task_runs(id) ON DELETE SET NULL,
+    budget_json TEXT NOT NULL DEFAULT '{}',
+    max_parallel_runs INTEGER NOT NULL DEFAULT 1,
+    deleted_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS automation_runs (
+    id TEXT PRIMARY KEY,
+    automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    scheduled_for TEXT NOT NULL,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    task_run_id TEXT NOT NULL UNIQUE REFERENCES task_runs(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(automation_id, scheduled_for)
+);
+
 CREATE TABLE IF NOT EXISTS action_logs (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -3415,6 +3724,9 @@ CREATE INDEX IF NOT EXISTS idx_task_checkpoints_run ON task_checkpoints(run_id, 
 CREATE INDEX IF NOT EXISTS idx_task_checkpoints_step ON task_checkpoints(task_id, step_id, status);
 CREATE INDEX IF NOT EXISTS idx_task_reports_user_date ON task_reports(user_id, report_date, updated_at);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON in_app_notifications(user_id, read_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_automations_due ON automations(status, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_automations_user_status ON automations(user_id, status, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_automation ON automation_runs(automation_id, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_action_logs_user_id ON action_logs(user_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_user_status ON approval_requests(user_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_approvals_step ON approval_requests(user_id, step_id, status);
@@ -3543,6 +3855,46 @@ def _in_app_notification_payload(row: sqlite3.Row) -> dict:
         "entity_type": row["entity_type"],
         "entity_id": row["entity_id"],
         "read_at": row["read_at"],
+        "created_at": str(row["created_at"]),
+    }
+
+
+def _automation_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "name": str(row["name"]),
+        "prompt": str(row["prompt"]),
+        "schedule_type": str(row["schedule_type"]),
+        "schedule": _load_json_dict(row["schedule_json"]),
+        "timezone": str(row["timezone"]),
+        "human_rule": str(row["human_rule"]),
+        "status": str(row["status"]),
+        "next_run_at": row["next_run_at"],
+        "last_scheduled_for": row["last_scheduled_for"],
+        "last_task_id": row["last_task_id"],
+        "last_task_run_id": row["last_task_run_id"],
+        "budget": {**_default_task_budget(), **_load_json_dict(row["budget_json"])},
+        "max_parallel_runs": int(row["max_parallel_runs"]),
+        "deleted_at": row["deleted_at"],
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def _automation_run_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "automation_id": str(row["automation_id"]),
+        "scheduled_for": str(row["scheduled_for"]),
+        "task_id": str(row["task_id"]),
+        "task_run_id": str(row["task_run_id"]),
+        "state": str(row["state"]),
+        "budget": {**_default_task_budget(), **_load_json_dict(row["budget_json"])},
+        "usage": {**_default_task_usage(), **_load_json_dict(row["usage_json"])},
+        "failure_reason": row["failure_reason"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
         "created_at": str(row["created_at"]),
     }
 
