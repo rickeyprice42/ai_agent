@@ -10,8 +10,10 @@ from ai_agent.tools.base import Tool, ToolPermission, ToolRegistry
 from ai_agent.tools.browser import PlaywrightBrowserRunner, browser_interact_result, browser_read_result
 from ai_agent.tools.coding_pack import register_coding_tool_pack
 from ai_agent.tools.documents import DocumentSandbox
+from ai_agent.tools.desktop import DesktopRunner, desktop_interact_result, desktop_snapshot_result
 from ai_agent.tools.files import FileSandbox
 from ai_agent.tools.http import HttpSandbox
+from ai_agent.llm.vision import VisionRouter, analyze_image_result
 from ai_agent.tools.presentations import PresentationSandbox
 from ai_agent.tools.shell import ShellSandbox
 from ai_agent.types import Task
@@ -28,6 +30,8 @@ def register_builtin_tools(
     shell: ShellSandbox,
     http: HttpSandbox,
     browser: PlaywrightBrowserRunner,
+    vision: VisionRouter,
+    desktop: DesktopRunner,
     executor: ExecutionEngine,
 ) -> None:
     register_coding_tool_pack(registry, files)
@@ -468,6 +472,121 @@ def register_builtin_tools(
             timeout_seconds=float(browser.timeout_ms / 1000 + 5),
             availability=browser.availability,
             handler=lambda args: browser_interact_result(browser, args),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="analyze_image",
+            version="1.0.0",
+            description=(
+                "Анализирует PNG/JPEG/WEBP/GIF из безопасного workspace. "
+                "Изображение отправляется сначала в Gemma 4, затем при ошибке в OpenAI fallback."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "minLength": 1, "maxLength": 240},
+                    "prompt": {"type": "string", "maxLength": 2000},
+                },
+                "required": ["path"],
+            },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "provider": {"type": "string"},
+                    "model": {"type": "string"},
+                },
+                "required": ["text", "provider", "model"],
+                "additionalProperties": False,
+            },
+            capabilities=("vision.analyze", "images.read"),
+            permissions=(ToolPermission("cloud.image.upload", "external"),),
+            timeout_seconds=130.0,
+            availability=vision.availability,
+            handler=lambda args: analyze_image_result(vision, args),
+        )
+    )
+
+    desktop_output_schema = {
+        "type": "object",
+        "properties": {
+            "window_title": {"type": "string"},
+            "backend": {"type": "string"},
+            "screen_hash": {"type": "string"},
+            "controls": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "screenshot": {"type": "object", "additionalProperties": True},
+            "actions": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+        },
+        "required": ["window_title", "backend", "screen_hash", "controls", "screenshot"],
+        "additionalProperties": False,
+    }
+    registry.register(
+        Tool(
+            name="desktop_snapshot",
+            version="1.0.0",
+            description=(
+                "Снимает UIA snapshot и PNG только с окна из DESKTOP_ALLOWED_WINDOW_TITLES. "
+                "Личные окна, login/password поверхности и произвольный desktop недоступны."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "window_title": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "screenshot_path": {"type": "string", "maxLength": 240},
+                },
+                "required": ["window_title"],
+            },
+            output_schema=desktop_output_schema,
+            capabilities=("desktop.uia", "desktop.screenshot"),
+            permissions=(ToolPermission("desktop.capture", "external"),),
+            timeout_seconds=float(desktop.timeout_seconds + 5),
+            availability=desktop.availability,
+            handler=lambda args: desktop_snapshot_result(desktop, args),
+        )
+    )
+    registry.register(
+        Tool(
+            name="desktop_interact",
+            version="1.0.0",
+            description=(
+                "Кликает точный UIA control в allowlisted Windows-окне. Каждый вызов требует approval; "
+                "PyAutoGUI coordinate fallback по умолчанию выключен."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "window_title": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "expected_screen_hash": {"type": "string", "maxLength": 128},
+                    "screenshot_path": {"type": "string", "maxLength": 240},
+                    "actions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["click"]},
+                                "ref": {"type": "string", "pattern": "^u[1-9][0-9]*$"},
+                                "automation_id": {"type": "string", "maxLength": 120},
+                                "title": {"type": "string", "maxLength": 300},
+                                "control_type": {"type": "string", "maxLength": 80},
+                                "x": {"type": "integer", "minimum": 0, "maximum": 16384},
+                                "y": {"type": "integer", "minimum": 0, "maximum": 16384},
+                            },
+                            "required": ["type"],
+                        },
+                    },
+                },
+                "required": ["window_title", "actions"],
+            },
+            output_schema=desktop_output_schema,
+            capabilities=("desktop.uia", "desktop.click", "desktop.pyautogui_fallback"),
+            permissions=(ToolPermission("desktop.interact", "high"),),
+            timeout_seconds=float(desktop.timeout_seconds + 5),
+            availability=desktop.availability,
+            handler=lambda args: desktop_interact_result(desktop, args),
         )
     )
 

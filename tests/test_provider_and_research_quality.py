@@ -131,10 +131,10 @@ class RepeatingSearchProvider(TaggedProvider):
 class ProviderContractTest(unittest.TestCase):
     def test_public_provider_catalog_exposes_capabilities(self):
         for provider in AVAILABLE_MODELS:
-            self.assertEqual(
-                set(provider["capabilities"]),
-                {"streaming", "tool_calling", "structured_output", "cancellation"},
-            )
+            expected = {"streaming", "tool_calling", "structured_output", "cancellation"}
+            if provider["provider"] in {"ollama_cloud", "openai"}:
+                expected.add("vision")
+            self.assertEqual(set(provider["capabilities"]), expected)
 
     def test_registry_switches_two_providers_with_the_same_contract(self):
         registry = ProviderRegistry()

@@ -17,6 +17,39 @@ def load_dotenv(dotenv_path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip())
 
 
+def load_project_secrets(secret_path: Path) -> dict[str, str]:
+    """Load named local secrets without ever placing their values in logs or manifests."""
+    if not secret_path.is_file():
+        return {}
+    lines = secret_path.read_text(encoding="utf-8-sig").splitlines()
+    secrets: dict[str, str] = {}
+    pending_name: str | None = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            name, value = line.split("=", 1)
+            normalized = name.strip().upper()
+            if normalized in {"OLLAMA_API_KEY", "OPENAI_API_KEY"} and value.strip():
+                secrets[normalized] = value.strip()
+            pending_name = None
+            continue
+        lowered = line.casefold().rstrip(":")
+        if "ollama" in lowered and "api" in lowered:
+            pending_name = "OLLAMA_API_KEY"
+            continue
+        if "openai" in lowered and "api" in lowered:
+            pending_name = "OPENAI_API_KEY"
+            continue
+        if pending_name:
+            secrets[pending_name] = line
+            pending_name = None
+        elif len(lines) == 1:
+            secrets["OLLAMA_API_KEY"] = line
+    return secrets
+
+
 @dataclass(slots=True)
 class Settings:
     agent_name: str
@@ -26,6 +59,13 @@ class Settings:
     ollama_cloud_url: str
     ollama_api_key: str
     ollama_cloud_model: str
+    openai_api_key: str
+    openai_base_url: str
+    openai_model: str
+    reasoning_fallback_enabled: bool
+    vision_primary_model: str
+    vision_fallback_model: str
+    max_image_bytes: int
     llm_timeout_seconds: int
     llm_max_retries: int
     context_window_tokens: int
@@ -43,20 +83,22 @@ class Settings:
     allow_private_http: bool
     browser_timeout_seconds: int
     browser_allowed_hosts: tuple[str, ...]
+    desktop_timeout_seconds: int
+    desktop_allowed_window_titles: tuple[str, ...]
+    desktop_allow_pyautogui: bool
     system_prompt: str
 
     @classmethod
     def load(cls, root_dir: Path) -> "Settings":
         load_dotenv(root_dir / ".env")
 
-        api_key = os.getenv("OLLAMA_API_KEY", "").strip()
-        key_file = root_dir / "API_KEY.txt"
-        if not api_key and key_file.is_file():
-            raw_key = key_file.read_text(encoding="utf-8-sig").strip()
-            if raw_key.startswith("OLLAMA_API_KEY="):
-                raw_key = raw_key.split("=", 1)[1].strip()
-            if "\n" not in raw_key and "\r" not in raw_key:
-                api_key = raw_key
+        local_secrets = load_project_secrets(root_dir / "API_KEY.txt")
+        api_key = os.getenv("OLLAMA_API_KEY", "").strip() or local_secrets.get(
+            "OLLAMA_API_KEY", ""
+        )
+        openai_api_key = os.getenv("OPENAI_API_KEY", "").strip() or local_secrets.get(
+            "OPENAI_API_KEY", ""
+        )
 
         configured_provider = os.getenv("MODEL_PROVIDER", "").strip()
         model_provider = configured_provider or ("ollama_cloud" if api_key else "mock")
@@ -80,6 +122,17 @@ class Settings:
             ollama_cloud_url=os.getenv("OLLAMA_CLOUD_URL", "https://ollama.com"),
             ollama_api_key=api_key,
             ollama_cloud_model=os.getenv("OLLAMA_CLOUD_MODEL", "beam:cloud"),
+            openai_api_key=openai_api_key,
+            openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            openai_model=os.getenv("OPENAI_MODEL", "gpt-6-luna"),
+            reasoning_fallback_enabled=_read_bool_env(
+                "REASONING_FALLBACK_ENABLED", default=True
+            ),
+            vision_primary_model=os.getenv("VISION_PRIMARY_MODEL", "gemma4:31b"),
+            vision_fallback_model=os.getenv("VISION_FALLBACK_MODEL", "gpt-6-luna"),
+            max_image_bytes=_read_int_env(
+                "MAX_IMAGE_BYTES", default=10 * 1024 * 1024, minimum=1024
+            ),
             llm_timeout_seconds=_read_int_env("LLM_TIMEOUT_SECONDS", default=120, minimum=10),
             llm_max_retries=_read_int_env("LLM_MAX_RETRIES", default=1, minimum=0),
             context_window_tokens=context_window_tokens,
@@ -109,6 +162,19 @@ class Settings:
                 host.strip().casefold()
                 for host in os.getenv("BROWSER_ALLOWED_HOSTS", "").split(",")
                 if host.strip()
+            ),
+            desktop_timeout_seconds=_read_int_env(
+                "DESKTOP_TIMEOUT_SECONDS", default=15, minimum=1
+            ),
+            desktop_allowed_window_titles=tuple(
+                title.strip()
+                for title in os.getenv(
+                    "DESKTOP_ALLOWED_WINDOW_TITLES", "Avelin Test GUI"
+                ).split(",")
+                if title.strip()
+            ),
+            desktop_allow_pyautogui=_read_bool_env(
+                "DESKTOP_ALLOW_PYAUTOGUI", default=False
             ),
             system_prompt=os.getenv(
                 "SYSTEM_PROMPT",

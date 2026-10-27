@@ -14,6 +14,11 @@ from ai_agent.executor import _tool_status
 from ai_agent.executor import decide_step_action
 from ai_agent.llm.base import ProviderError
 from ai_agent.llm.registry import build_provider
+from ai_agent.llm.vision import (
+    OllamaVisionProvider,
+    OpenAIVisionProvider,
+    VisionRouter,
+)
 from ai_agent.memory import MemoryStore
 from ai_agent.planner import Planner
 from ai_agent.security import ToolPolicyEngine, mark_untrusted_tool_output
@@ -22,6 +27,7 @@ from ai_agent.tools.base import ToolRegistry
 from ai_agent.tools.browser import PlaywrightBrowserRunner
 from ai_agent.tools.builtin import register_builtin_tools
 from ai_agent.tools.documents import DocumentSandbox
+from ai_agent.tools.desktop import DesktopRunner
 from ai_agent.tools.files import FileSandbox
 from ai_agent.tools.http import HttpSandbox
 from ai_agent.tools.presentations import PresentationSandbox
@@ -100,6 +106,39 @@ class Agent:
             allow_private_networks=False,
             max_text_chars=settings.max_http_response_chars,
         )
+        vision_providers = []
+        if settings.ollama_api_key:
+            vision_providers.append(
+                OllamaVisionProvider(
+                    model=settings.vision_primary_model,
+                    api_key=settings.ollama_api_key,
+                    base_url=settings.ollama_cloud_url,
+                    timeout_seconds=settings.llm_timeout_seconds,
+                )
+            )
+        if settings.openai_api_key:
+            vision_providers.append(
+                OpenAIVisionProvider(
+                    model=settings.vision_fallback_model,
+                    api_key=settings.openai_api_key,
+                    base_url=settings.openai_base_url,
+                    timeout_seconds=settings.llm_timeout_seconds,
+                )
+            )
+        self.vision = VisionRouter(
+            settings.tool_workspace_dir,
+            vision_providers,
+            max_image_bytes=settings.max_image_bytes,
+        )
+        self.desktop = DesktopRunner(
+            settings.tool_workspace_dir,
+            allowed_window_titles=settings.desktop_allowed_window_titles,
+            emergency_stop=lambda: self.memory.database.security_settings(user_id)[
+                "emergency_stop"
+            ],
+            timeout_seconds=settings.desktop_timeout_seconds,
+            allow_pyautogui=settings.desktop_allow_pyautogui,
+        )
         self.tools = ToolRegistry()
         self.policy = ToolPolicyEngine(self.memory.database, user_id)
         self.executor = ExecutionEngine(self.tasks, self.tools, self.action_log, self.policy)
@@ -114,6 +153,8 @@ class Agent:
             self.shell,
             self.http,
             self.browser,
+            self.vision,
+            self.desktop,
             self.executor,
         )
         self.provider = self._build_provider()
@@ -629,7 +670,9 @@ class Agent:
         status: str,
         output: object | None = None,
     ) -> dict | None:
-        if status == "completed" and tool_name in {"browser_read", "browser_interact"}:
+        if status == "completed" and tool_name in {
+            "browser_read", "browser_interact", "desktop_snapshot", "desktop_interact",
+        }:
             screenshot = output.get("screenshot") if isinstance(output, dict) else None
             if isinstance(screenshot, dict) and screenshot.get("path"):
                 return {

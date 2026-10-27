@@ -42,7 +42,14 @@ AVAILABLE_MODELS = [
         "label": "Ollama Cloud",
         "description": "Облачная модель через прямой Ollama API и OLLAMA_API_KEY.",
         "models": [],
-        "capabilities": ["streaming", "tool_calling", "structured_output", "cancellation"],
+        "capabilities": ["streaming", "tool_calling", "structured_output", "cancellation", "vision"],
+    },
+    {
+        "provider": "openai",
+        "label": "OpenAI",
+        "description": "Responses API; резерв reasoning и vision через OPENAI_API_KEY.",
+        "models": [],
+        "capabilities": ["streaming", "tool_calling", "structured_output", "cancellation", "vision"],
     },
 ]
 
@@ -109,6 +116,10 @@ class AgentService:
                 item["models"] = [self.settings.ollama_cloud_model]
                 if not self.settings.ollama_api_key:
                     item["description"] = "Нужен OLLAMA_API_KEY в локальном .env."
+            if item["provider"] == "openai":
+                item["models"] = [self.settings.openai_model]
+                if not self.settings.openai_api_key:
+                    item["description"] = "Нужен OPENAI_API_KEY в локальном .env или API_KEY.txt."
         return models
 
     def installed_ollama_models(self) -> list[str]:
@@ -177,6 +188,8 @@ class AgentService:
             raise ValueError("Ollama доступна, но установленные модели не найдены.")
         if provider == "ollama_cloud" and not self.settings.ollama_api_key:
             raise ValueError("Для Ollama Cloud нужен OLLAMA_API_KEY в локальном .env.")
+        if provider == "openai" and not self.settings.openai_api_key:
+            raise ValueError("Для OpenAI нужен OPENAI_API_KEY в локальном .env или API_KEY.txt.")
         if model_name not in allowed[provider]:
             raise ValueError("Модель не найдена для выбранного provider.")
 

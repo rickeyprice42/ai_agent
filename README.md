@@ -98,16 +98,41 @@ python -c "from fastapi.testclient import TestClient; from backend.main import a
 `failed`), provider-ом и моделью. Ошибки Ollama не записываются как обычные ответы и
 не раскрывают тело ответа upstream-сервера.
 
-## Ollama Cloud
+## Облачные модели и резервирование
 
 Для облачного запуска положи тестовый ключ в игнорируемый Git-файл `API_KEY.txt`
-(одна строка с ключом) либо задай `OLLAMA_API_KEY` в `.env`. При наличии ключа по
-умолчанию используются `ollama_cloud` и `beam:cloud`. Значения можно переопределить:
+либо задай ключи в `.env`. Поддерживается старый формат из одной строки с ключом
+Ollama и именованный формат для нескольких провайдеров:
+
+```text
+Avelin Ollama Cloud API:
+<key>
+
+Avelin OpenAI API:
+<key>
+```
+
+При наличии обоих ключей `beam:cloud` используется как основная reasoning-модель,
+а `gpt-6-luna` — как резервная. Для изображений основной маршрут использует
+`gemma4:31b`, резервный — `gpt-6-luna`. Переключение reasoning происходит только
+до начала выдачи ответа, чтобы пользователь не получил смесь двух ответов.
+Изображение отправляется облачной модели только после отдельного approval.
+Значения можно переопределить:
 
 ```dotenv
 MODEL_PROVIDER=ollama_cloud
 MODEL_NAME=beam:cloud
 OLLAMA_CLOUD_MODEL=beam:cloud
+OPENAI_MODEL=gpt-6-luna
+REASONING_FALLBACK_ENABLED=true
+VISION_PRIMARY_MODEL=gemma4:31b
+VISION_FALLBACK_MODEL=gpt-6-luna
+```
+
+Проверка всех четырёх маршрутов без вывода ключей:
+
+```powershell
+.venv\Scripts\python.exe scripts\smoke_multimodal.py
 ```
 
 ## Frontend
@@ -163,6 +188,20 @@ BROWSER_TIMEOUT_SECONDS=20
 # Необязательно: фиксированный allowlist через запятую. Без него каждый запуск
 # ограничивается host исходного URL и его поддоменами.
 BROWSER_ALLOWED_HOSTS=example.com,docs.example.com
+```
+
+Для управления обычными Windows-приложениями доступны `desktop_snapshot` и
+`desktop_interact`. Runner сначала использует UI Automation и стабильные ссылки
+на найденные контролы; координатный PyAutoGUI fallback по умолчанию выключен.
+Работа разрешена только с окнами из точного allowlist, клики требуют approval,
+а окна входа, паролей, банков и кошельков блокируются. Перед каждым действием
+проверяются emergency stop и hash предыдущего скриншота. Ввод текста и паролей
+в MVP намеренно не поддерживается.
+
+```dotenv
+DESKTOP_TIMEOUT_SECONDS=15
+DESKTOP_ALLOWED_WINDOW_TITLES=Avelin Test GUI
+DESKTOP_ALLOW_PYAUTOGUI=false
 ```
 
 ## Tool Registry

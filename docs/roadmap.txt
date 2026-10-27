@@ -80,6 +80,8 @@
    - Добавлен ограниченный shell-инструмент для проверок из allowlist внутри рабочей папки инструментов.
    - Добавлен безопасный HTTP-инструмент для GET/HEAD запросов к публичным http/https URL.
    - [DONE] Добавлен browser Computer Use MVP через Playwright и установленный Edge: DOM-first чтение, screenshot artifacts, click/scroll, host allowlist, SSRF-защита, одноразовый профиль и approval перед взаимодействием.
+   - [DONE] Добавлен Windows Computer Use MVP: UI Automation с screenshot grounding, точным allowlist окон, stale-screen guard, approval перед кликом, emergency stop и выключенным по умолчанию координатным fallback.
+   - [DONE] Добавлен мультимодальный provider routing: Beam как основной reasoning, OpenAI как резерв; Gemma 4 как основной vision, OpenAI как резерв. Загрузка изображения в облако требует отдельного approval.
    - [DONE] Добавлен базовый coding tool pack: line-aware read, metadata/hash, Unicode search, hash-safe exact edit, move и recoverable delete/restore.
    - [DONE] Добавлены project inspection, предопределенные test/lint/typecheck/build runners, timeout, bounded/partial output и process status.
    - [DONE] Добавлены Git read-only status/diff/log/branch/ref и approval-gated stage/commit/create-branch; автоматический push намеренно отсутствует.

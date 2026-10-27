@@ -20,6 +20,7 @@ class ProviderCapabilities:
     tool_calling: bool = True
     structured_output: bool = True
     cancellation: bool = True
+    vision: bool = False
 
 
 @dataclass(frozen=True, slots=True)
