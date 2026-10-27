@@ -19,6 +19,7 @@ from ai_agent.planner import Planner
 from ai_agent.security import ToolPolicyEngine, mark_untrusted_tool_output
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import ToolRegistry
+from ai_agent.tools.browser import PlaywrightBrowserRunner
 from ai_agent.tools.builtin import register_builtin_tools
 from ai_agent.tools.documents import DocumentSandbox
 from ai_agent.tools.files import FileSandbox
@@ -92,6 +93,13 @@ class Agent:
             max_response_chars=settings.max_http_response_chars,
             allow_private_networks=settings.allow_private_http,
         )
+        self.browser = PlaywrightBrowserRunner(
+            workspace_dir=settings.tool_workspace_dir,
+            timeout_seconds=settings.browser_timeout_seconds,
+            allowed_hosts=settings.browser_allowed_hosts,
+            allow_private_networks=False,
+            max_text_chars=settings.max_http_response_chars,
+        )
         self.tools = ToolRegistry()
         self.policy = ToolPolicyEngine(self.memory.database, user_id)
         self.executor = ExecutionEngine(self.tasks, self.tools, self.action_log, self.policy)
@@ -105,6 +113,7 @@ class Agent:
             self.presentations,
             self.shell,
             self.http,
+            self.browser,
             self.executor,
         )
         self.provider = self._build_provider()
@@ -405,6 +414,7 @@ class Agent:
     def _execute_tool_calls(self, tool_calls, user_text: str) -> ToolOutcome:
         outcome = ToolOutcome()
         for tool_call in tool_calls:
+            invocation_output = None
             if not self.tools.has(tool_call.name):
                 tool_result = f"Инструмент '{tool_call.name}' не найден."
                 status = "not_found"
@@ -427,6 +437,7 @@ class Agent:
                         invocation = self.tools.invoke(tool_call.name, arguments)
                         tool_result = invocation.text()
                         status = invocation.status
+                        invocation_output = invocation.output
             self.action_log.record(
                 tool_name=tool_call.name,
                 status=status,
@@ -443,7 +454,9 @@ class Agent:
             outcome.results.append(tool_result)
             outcome.tool_names.append(tool_call.name)
             outcome.statuses.append(status)
-            artifact = self._artifact_from_tool(tool_call.name, arguments, status)
+            artifact = self._artifact_from_tool(
+                tool_call.name, arguments, status, invocation_output
+            )
             if artifact is not None:
                 outcome.artifacts.append(artifact)
         return outcome
@@ -506,7 +519,9 @@ class Agent:
                 name=decision.tool_name,
             )
         )
-        artifact = self._artifact_from_tool(decision.tool_name, arguments, status)
+        artifact = self._artifact_from_tool(
+            decision.tool_name, arguments, status, invocation.output
+        )
         return ToolOutcome(
             results=[tool_result],
             artifacts=[artifact] if artifact is not None else [],
@@ -607,7 +622,22 @@ class Agent:
                 return next_candidate.as_posix()
         return relative_path
 
-    def _artifact_from_tool(self, tool_name: str, arguments: dict, status: str) -> dict | None:
+    def _artifact_from_tool(
+        self,
+        tool_name: str,
+        arguments: dict,
+        status: str,
+        output: object | None = None,
+    ) -> dict | None:
+        if status == "completed" and tool_name in {"browser_read", "browser_interact"}:
+            screenshot = output.get("screenshot") if isinstance(output, dict) else None
+            if isinstance(screenshot, dict) and screenshot.get("path"):
+                return {
+                    "path": str(screenshot["path"]),
+                    "name": str(screenshot.get("name") or Path(str(screenshot["path"])).name),
+                    "extension": ".png",
+                    "size_bytes": int(screenshot.get("size_bytes", 0)),
+                }
         if status != "completed" or tool_name not in {
             "write_file",
             "create_docx",

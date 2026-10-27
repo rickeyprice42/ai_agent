@@ -312,6 +312,17 @@ def decide_step_action(step: TaskStep) -> ExecutionDecision:
     if _is_list_files_request(text):
         return ExecutionDecision("list_workspace_files", {"limit": 20}, "list workspace files requested")
 
+    url = _extract_url(text)
+    if url and re.search(
+        r"\b(?:browser|playwright|render|браузер|страниц(?:у|ы|е)|сайт(?:а|е)?)\b",
+        lowered,
+    ):
+        return ExecutionDecision(
+            "browser_read",
+            {"url": url, "screenshot": True},
+            "browser page inspection requested",
+        )
+
     read_path = _extract_file_path(text, ("прочитай", "открой", "покажи", "read", "open", "show"))
     if read_path:
         return ExecutionDecision("read_file", {"path": read_path}, "read file requested")
@@ -367,7 +378,6 @@ def decide_step_action(step: TaskStep) -> ExecutionDecision:
     if command:
         return ExecutionDecision("run_shell", {"command": command}, "shell verification requested")
 
-    url = _extract_url(text)
     if url:
         method = "HEAD" if "head" in lowered else "GET"
         return ExecutionDecision("http_request", {"url": url, "method": method}, "http request requested")
@@ -686,13 +696,14 @@ def _checkpoint_artifacts(
     for value in values:
         if not isinstance(value, dict):
             continue
-        path = value.get("path") or value.get("file_path")
+        nested = value.get("screenshot") if isinstance(value.get("screenshot"), dict) else {}
+        path = value.get("path") or value.get("file_path") or nested.get("path")
         if path:
             candidates.append(
                 {
                     "path": str(path),
-                    "name": str(value.get("name") or Path(str(path)).name),
-                    "sha256": str(value.get("sha256") or ""),
+                    "name": str(value.get("name") or nested.get("name") or Path(str(path)).name),
+                    "sha256": str(value.get("sha256") or nested.get("sha256") or ""),
                 }
             )
     if not candidates and tool_name in {

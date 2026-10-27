@@ -6,7 +6,8 @@ from ai_agent.executor import ExecutionEngine
 from ai_agent.memory import MemoryStore
 from ai_agent.planner import Planner
 from ai_agent.tasks import TaskManager
-from ai_agent.tools.base import Tool, ToolRegistry
+from ai_agent.tools.base import Tool, ToolPermission, ToolRegistry
+from ai_agent.tools.browser import PlaywrightBrowserRunner, browser_interact_result, browser_read_result
 from ai_agent.tools.coding_pack import register_coding_tool_pack
 from ai_agent.tools.documents import DocumentSandbox
 from ai_agent.tools.files import FileSandbox
@@ -26,6 +27,7 @@ def register_builtin_tools(
     presentations: PresentationSandbox,
     shell: ShellSandbox,
     http: HttpSandbox,
+    browser: PlaywrightBrowserRunner,
     executor: ExecutionEngine,
 ) -> None:
     register_coding_tool_pack(registry, files)
@@ -380,6 +382,92 @@ def register_builtin_tools(
                 method=str(args.get("method", "GET")),
                 headers=args.get("headers") if isinstance(args.get("headers"), dict) else None,
             ),
+        )
+    )
+
+    browser_output_schema = {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "title": {"type": "string"},
+            "status": {"type": ["integer", "null"]},
+            "dom_hash": {"type": "string"},
+            "main_text": {"type": "string"},
+            "elements": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "actions": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "screenshot": {"type": ["object", "null"]},
+            "blocked_requests": {"type": "array", "items": {"type": "string"}},
+            "profile": {"type": "string", "enum": ["ephemeral"]},
+        },
+        "required": ["url", "title", "dom_hash", "main_text", "elements", "actions", "profile"],
+        "additionalProperties": False,
+    }
+    registry.register(
+        Tool(
+            name="browser_read",
+            version="1.0.0",
+            description=(
+                "Открывает публичную страницу в изолированном headless Edge, возвращает DOM-first snapshot "
+                "и screenshot. Профиль всегда ephemeral, cookies пользователя недоступны."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "minLength": 8, "maxLength": 2000},
+                    "screenshot": {"type": "boolean"},
+                    "screenshot_path": {"type": "string", "maxLength": 240},
+                },
+                "required": ["url"],
+            },
+            output_schema=browser_output_schema,
+            capabilities=("browser.read", "browser.screenshot"),
+            permissions=(ToolPermission("network.read", "read"),),
+            timeout_seconds=float(browser.timeout_ms / 1000 + 5),
+            availability=browser.availability,
+            handler=lambda args: browser_read_result(browser, args),
+        )
+    )
+    registry.register(
+        Tool(
+            name="browser_interact",
+            version="1.0.0",
+            description=(
+                "Открывает публичную страницу в изолированном Edge и выполняет точные click/scroll/snapshot "
+                "действия. Требует approval; expected_dom_hash предотвращает клик после изменения DOM."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "minLength": 8, "maxLength": 2000},
+                    "expected_dom_hash": {"type": "string", "maxLength": 128},
+                    "actions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 12,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["click", "scroll", "snapshot"]},
+                                "ref": {"type": "string", "maxLength": 40},
+                                "selector": {"type": "string", "maxLength": 300},
+                                "role": {"type": "string", "maxLength": 80},
+                                "name": {"type": "string", "maxLength": 300},
+                                "delta_y": {"type": "integer", "minimum": -5000, "maximum": 5000},
+                            },
+                            "required": ["type"],
+                        },
+                    },
+                    "screenshot": {"type": "boolean"},
+                    "screenshot_path": {"type": "string", "maxLength": 240},
+                },
+                "required": ["url", "actions"],
+            },
+            output_schema=browser_output_schema,
+            capabilities=("browser.navigate", "browser.dom", "browser.click", "browser.scroll"),
+            permissions=(ToolPermission("browser.interact", "external"),),
+            timeout_seconds=float(browser.timeout_ms / 1000 + 5),
+            availability=browser.availability,
+            handler=lambda args: browser_interact_result(browser, args),
         )
     )
 

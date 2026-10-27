@@ -41,6 +41,8 @@ class Settings:
     http_timeout_seconds: int
     max_http_response_chars: int
     allow_private_http: bool
+    browser_timeout_seconds: int
+    browser_allowed_hosts: tuple[str, ...]
     system_prompt: str
 
     @classmethod
@@ -102,6 +104,12 @@ class Settings:
             http_timeout_seconds=_read_int_env("HTTP_TIMEOUT_SECONDS", default=15, minimum=1),
             max_http_response_chars=_read_int_env("MAX_HTTP_RESPONSE_CHARS", default=20000, minimum=1000),
             allow_private_http=_read_bool_env("ALLOW_PRIVATE_HTTP", default=False),
+            browser_timeout_seconds=_read_int_env("BROWSER_TIMEOUT_SECONDS", default=20, minimum=1),
+            browser_allowed_hosts=tuple(
+                host.strip().casefold()
+                for host in os.getenv("BROWSER_ALLOWED_HOSTS", "").split(",")
+                if host.strip()
+            ),
             system_prompt=os.getenv(
                 "SYSTEM_PROMPT",
                 (
