@@ -175,7 +175,7 @@ class Agent:
         return build_provider(self.settings)
 
     def respond(self, user_text: str) -> str:
-        user_message = Message(role="user", content=user_text)
+        user_message = Message(role="user", content=user_text, name=self._shared_author_name())
         user_message_id = self.memory.append_message(user_message)
 
         direct_result = self._try_direct_tool_action(user_text)
@@ -190,9 +190,10 @@ class Agent:
         completed_tools = ToolOutcome()
         for attempt in range(4):
             try:
-                tool_definitions = self.tools.list_for_model()
+                shared_workspace = self.memory.shared_project() is not None
+                tool_definitions = [] if shared_workspace else self.tools.list_for_model()
                 context = self.context.build(
-                    self.tool_factory.system_prompt(self.settings.system_prompt),
+                    self.settings.system_prompt if shared_workspace else self.tool_factory.system_prompt(self.settings.system_prompt),
                     model=self.settings.model_name,
                     tools=tool_definitions,
                 )
@@ -258,7 +259,9 @@ class Agent:
         return fallback
 
     def respond_stream(self, user_text: str):
-        user_message_id = self.memory.append_message(Message(role="user", content=user_text))
+        user_message_id = self.memory.append_message(
+            Message(role="user", content=user_text, name=self._shared_author_name())
+        )
         direct_result = self._try_direct_tool_action(user_text)
         if direct_result is not None:
             assistant_text = _tool_completion_text(direct_result)
@@ -280,9 +283,10 @@ class Agent:
         completed_tools = ToolOutcome()
         try:
             for attempt in range(4):
-                tool_definitions = self.tools.list_for_model()
+                shared_workspace = self.memory.shared_project() is not None
+                tool_definitions = [] if shared_workspace else self.tools.list_for_model()
                 context = self.context.build(
-                    self.tool_factory.system_prompt(self.settings.system_prompt),
+                    self.settings.system_prompt if shared_workspace else self.tool_factory.system_prompt(self.settings.system_prompt),
                     model=self.settings.model_name,
                     tools=tool_definitions,
                 )
@@ -459,13 +463,27 @@ class Agent:
             }
 
     def _extract_autonomous_memory(self, source_message_id: str, user_text: str) -> None:
+        if self.memory.shared_project() is not None:
+            return
         try:
             self.autonomous_memory.process_completed_turn(source_message_id, user_text)
         except Exception:
             logger.exception("Autonomous memory extraction failed without affecting the chat response.")
 
+    def _shared_author_name(self) -> str | None:
+        if self.memory.shared_project() is None:
+            return None
+        user = self.memory.database.get_user(self.memory.user_id)
+        return str(user.get("display_name") or user.get("username") or "Участник")
+
     def _execute_tool_calls(self, tool_calls, user_text: str) -> ToolOutcome:
         outcome = ToolOutcome()
+        if self.memory.shared_project() is not None:
+            outcome.results.append(
+                "Tool calls are disabled in Shared Workspace MVP; share board items explicitly through the workspace UI."
+            )
+            outcome.statuses.append("blocked")
+            return outcome
         for tool_call in tool_calls:
             invocation_output = None
             if not self.tools.has(tool_call.name):

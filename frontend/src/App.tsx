@@ -6,11 +6,14 @@ import {
   archiveChatThread,
   assignChatToProject,
   approveBlockedStep,
+  acceptProjectInvitation,
   clearChatMessages,
   clearAgentMemory,
   controlAutomation,
   controlTask,
   createAutomation,
+  createProjectInvitation,
+  createSharedProjectItem,
   createExtensionProposal,
   createDailyTaskReport,
   createRunReport,
@@ -36,6 +39,9 @@ import {
   fetchMemorySummary,
   fetchPersonalMemory,
   fetchModelProviders,
+  fetchProjectInvitations,
+  fetchProjectMembers,
+  fetchSharedProjectItems,
   installExtension,
   login as authLogin,
   markNotificationRead,
@@ -46,6 +52,7 @@ import {
   rollbackContextCompaction,
   rollbackExtension,
   restoreProject,
+  removeProjectMember,
   revokePermissionGrant,
   sendMessageStream,
   setConnectorEnabled,
@@ -70,6 +77,9 @@ import type {
   MemorySummary,
   PersonalMemoryItem,
   ModelProviderOption,
+  ProjectInvitationItem,
+  ProjectMemberItem,
+  SharedProjectItem,
   UserProfile
 } from "./types";
 
@@ -174,8 +184,8 @@ const MEMORY_SECTION_LABELS: Record<PersonalMemoryItem["kind"], string> = {
   episode: "Недавние события"
 };
 
-function formatRoleLabel(message: ChatMessage, agentName: string): string {
-  if (message.role === "user") return "Ты";
+function formatRoleLabel(message: ChatMessage, agentName: string, shared = false): string {
+  if (message.role === "user") return shared ? (message.name ?? "Участник") : "Ты";
   if (message.role === "assistant") return agentName;
   return message.name ?? "Инструмент";
 }
@@ -296,6 +306,10 @@ export default function App() {
   const [authToken, setAuthToken] = useState(() => window.localStorage.getItem(AUTH_TOKEN_KEY) ?? "");
   const [activeThreadId, setActiveThreadId] = useState(() => window.localStorage.getItem(ACTIVE_THREAD_KEY) ?? "");
   const [activeProjectId, setActiveProjectId] = useState("");
+  const [projectMembers, setProjectMembers] = useState<ProjectMemberItem[]>([]);
+  const [projectInvitations, setProjectInvitations] = useState<ProjectInvitationItem[]>([]);
+  const [sharedProjectItems, setSharedProjectItems] = useState<SharedProjectItem[]>([]);
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authLoginValue, setAuthLoginValue] = useState("");
@@ -343,6 +357,24 @@ export default function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, isSending, animatedMessageKey]);
+
+  useEffect(() => {
+    if (!authToken || !activeProjectId) {
+      setProjectMembers([]);
+      setProjectInvitations([]);
+      setSharedProjectItems([]);
+      return;
+    }
+    void Promise.all([
+      fetchProjectMembers(authToken, activeProjectId),
+      fetchProjectInvitations(authToken, activeProjectId).catch(() => []),
+      fetchSharedProjectItems(authToken, activeProjectId)
+    ]).then(([members, invitations, items]) => {
+      setProjectMembers(members);
+      setProjectInvitations(invitations);
+      setSharedProjectItems(items);
+    }).catch((err) => setError(err instanceof Error ? err.message : "Не удалось загрузить shared workspace."));
+  }, [authToken, activeProjectId, bootstrap.projects]);
 
   useEffect(() => {
     if (!authToken) {
@@ -611,11 +643,95 @@ export default function App() {
     try {
       await updateProject(authToken, activeProjectId, {
         title: title.trim(),
-        description: description.trim()
+        description: description.trim(),
+        expected_revision: project?.revision
       });
       await refreshBootstrap(false, false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось обновить проект.");
+    }
+  }
+
+  async function handleInviteMember() {
+    if (!authToken || !activeProjectId || workspaceBusy) return;
+    const email = window.prompt("Email участника workspace");
+    if (!email?.trim()) return;
+    const roleInput = window.prompt("Роль: editor или viewer", "editor")?.trim().toLowerCase();
+    if (roleInput !== "editor" && roleInput !== "viewer") return;
+    setWorkspaceBusy(true);
+    try {
+      const invitation = await createProjectInvitation(authToken, activeProjectId, email.trim(), roleInput);
+      await navigator.clipboard?.writeText(invitation.token ?? "");
+      window.prompt("Токен приглашения (скопирован в буфер, если браузер разрешил):", invitation.token ?? "");
+      setProjectInvitations(await fetchProjectInvitations(authToken, activeProjectId));
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось пригласить участника.");
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }
+
+  async function handleAcceptInvitation() {
+    if (!authToken || workspaceBusy) return;
+    const token = window.prompt("Вставь токен приглашения workspace");
+    if (!token?.trim()) return;
+    setWorkspaceBusy(true);
+    try {
+      const project = await acceptProjectInvitation(authToken, token.trim());
+      setActiveProjectId(project.id);
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось принять приглашение.");
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }
+
+  async function handleRemoveMember(member: ProjectMemberItem) {
+    if (!authToken || !activeProjectId || workspaceBusy) return;
+    if (!window.confirm(`Удалить ${member.display_name} из workspace? Личные данные участника сохранятся.`)) return;
+    setWorkspaceBusy(true);
+    try {
+      await removeProjectMember(authToken, activeProjectId, member.user_id);
+      setProjectMembers(await fetchProjectMembers(authToken, activeProjectId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось удалить участника.");
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }
+
+  async function handleAgentMode(mode: "mention_only" | "explicit" | "off") {
+    if (!authToken || !activeProject || workspaceBusy) return;
+    setWorkspaceBusy(true);
+    try {
+      await updateProject(authToken, activeProject.id, { agent_mode: mode, expected_revision: activeProject.revision });
+      await refreshBootstrap(false, false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось изменить режим Avelin.");
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }
+
+  async function handleCreateSharedItem() {
+    if (!authToken || !activeProjectId || workspaceBusy) return;
+    const kind = window.prompt("Тип: task, decision, artifact или memory", "task")?.trim() as SharedProjectItem["kind"] | undefined;
+    if (!kind || !["task", "decision", "artifact", "memory"].includes(kind)) return;
+    const title = window.prompt("Название");
+    if (!title?.trim()) return;
+    const text = window.prompt("Содержимое, которое будет явно доступно участникам", "") ?? "";
+    setWorkspaceBusy(true);
+    try {
+      await createSharedProjectItem(authToken, activeProjectId, {
+        kind, title: title.trim(), content: { text }, source_type: "explicit_ui_share"
+      });
+      setSharedProjectItems(await fetchSharedProjectItems(authToken, activeProjectId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось добавить shared item.");
+    } finally {
+      setWorkspaceBusy(false);
     }
   }
 
@@ -1324,6 +1440,7 @@ export default function App() {
   const selectedProviderOption = modelProviders.find((item) => item.provider === selectedProvider);
   const selectedProviderModels = selectedProviderOption?.models ?? [selectedModel];
   const activeProject = bootstrap.projects.find((project) => project.id === activeProjectId) ?? bootstrap.active_project;
+  const isSharedViewer = Boolean(activeProject?.shared && activeProject.role === "viewer");
   const projectThreads = activeProjectId
     ? bootstrap.chat_threads.filter((thread) => thread.project_id === activeProjectId)
     : [];
@@ -1441,24 +1558,27 @@ export default function App() {
                   type="button"
                 >
                   <span>{project.title}</span>
-                  <small>{project.chat_count} чатов</small>
+                  <small>{project.shared ? `${project.role} · shared` : `${project.chat_count} чатов`}</small>
                 </button>
               ))
             )}
           </div>
 
           <div className="thread-actions">
-            <button className="mini-button" disabled={!activeProjectId} onClick={() => void handleRenameProject()} type="button">
+            <button className="mini-button" disabled={!activeProjectId || activeProject?.role === "viewer"} onClick={() => void handleRenameProject()} type="button">
               Назвать
             </button>
-            <button className="mini-button" disabled={!activeProjectId} onClick={() => void handleArchiveProject()} type="button">
+            <button className="mini-button" disabled={!activeProjectId || activeProject?.role !== "owner"} onClick={() => void handleArchiveProject()} type="button">
               Архив
             </button>
-            <button className="mini-button" disabled={!activeProjectId} onClick={() => void handleDeleteProject()} type="button">
+            <button className="mini-button" disabled={!activeProjectId || activeProject?.role !== "owner"} onClick={() => void handleDeleteProject()} type="button">
               Удалить
             </button>
             <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleAssignActiveChatToProject(null)} type="button">
               Без проекта
+            </button>
+            <button className="mini-button" disabled={workspaceBusy} onClick={() => void handleAcceptInvitation()} type="button">
+              Принять invite
             </button>
           </div>
 
@@ -1477,6 +1597,54 @@ export default function App() {
                 ))}
               </select>
             </label>
+          ) : null}
+
+          {activeProject ? (
+            <details className="workspace-panel" open={activeProject.shared}>
+              <summary>Shared workspace · {activeProject.role}</summary>
+              <label className="project-select">
+                Режим Avelin
+                <select
+                  value={activeProject.agent_mode}
+                  disabled={activeProject.role === "viewer" || workspaceBusy}
+                  onChange={(event) => void handleAgentMode(event.target.value as "mention_only" | "explicit" | "off")}
+                >
+                  <option value="mention_only">Только по @Avelin</option>
+                  <option value="explicit">На каждый явный запрос</option>
+                  <option value="off">Выключен</option>
+                </select>
+              </label>
+              <div className="workspace-actions">
+                {activeProject.role === "owner" ? (
+                  <button className="mini-button" disabled={workspaceBusy} onClick={() => void handleInviteMember()} type="button">Пригласить</button>
+                ) : null}
+                {activeProject.role !== "viewer" ? (
+                  <button className="mini-button" disabled={workspaceBusy} onClick={() => void handleCreateSharedItem()} type="button">Поделиться</button>
+                ) : null}
+              </div>
+              <div className="workspace-members">
+                {projectMembers.map((member) => (
+                  <div className="workspace-row" key={member.user_id}>
+                    <span>{member.display_name} · {member.role}</span>
+                    {activeProject.role === "owner" && member.role !== "owner" ? (
+                      <button className="mini-button mini-button-danger" disabled={workspaceBusy} onClick={() => void handleRemoveMember(member)} type="button">Удалить</button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+              {projectInvitations.filter((item) => item.status === "pending").map((invite) => (
+                <small key={invite.id}>Invite: {invite.email} · {invite.role} · до {formatFileTime(invite.expires_at)}</small>
+              ))}
+              <div className="workspace-board">
+                {sharedProjectItems.length === 0 ? <small>Общая доска пуста. Личная память и файлы сюда не попадают автоматически.</small> : sharedProjectItems.map((item) => (
+                  <article className="workspace-board-item" key={item.id}>
+                    <b>{item.kind} · {item.title}</b>
+                    <span>{String(item.content.text ?? "")}</span>
+                    <small>revision {item.revision}</small>
+                  </article>
+                ))}
+              </div>
+            </details>
           ) : null}
 
           {bootstrap.archived_projects.length > 0 ? (
@@ -1505,7 +1673,7 @@ export default function App() {
               <p className="eyebrow">Chats</p>
               <h3>{activeProject ? activeProject.title : "Диалоги"}</h3>
             </div>
-            <button className="ghost-button" onClick={() => void handleCreateChat()} type="button">
+            <button className="ghost-button" disabled={isSharedViewer} onClick={() => void handleCreateChat()} type="button">
               Новый
             </button>
           </div>
@@ -1550,20 +1718,28 @@ export default function App() {
           </div>
 
           <div className="thread-actions">
-            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleRenameChat()} type="button">
+            <button className="mini-button" disabled={!activeThreadId || isSharedViewer} onClick={() => void handleRenameChat()} type="button">
               Назвать
             </button>
-            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleClearChat()} type="button">
+            <button className="mini-button" disabled={!activeThreadId || isSharedViewer} onClick={() => void handleClearChat()} type="button">
               Очистить
             </button>
-            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleArchiveChat()} type="button">
+            <button className="mini-button" disabled={!activeThreadId || isSharedViewer} onClick={() => void handleArchiveChat()} type="button">
               Архив
             </button>
-            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleDeleteChat()} type="button">
+            <button className="mini-button" disabled={!activeThreadId || isSharedViewer} onClick={() => void handleDeleteChat()} type="button">
               Удалить
             </button>
           </div>
 
+          {activeProject?.shared ? (
+            <div className="memory-rule-box">
+              <div>
+                <strong>Личная память изолирована</strong>
+                <span>Общий чат не сохраняется в личную память. Факты передаются Avelin только через общую доску.</span>
+              </div>
+            </div>
+          ) : (
           <div className="memory-rule-box">
             <div>
               <strong>{bootstrap.active_thread.memory_enabled ? "Чат влияет на память" : "Чат исключен из памяти"}</strong>
@@ -1582,6 +1758,7 @@ export default function App() {
               </button>
             </div>
           </div>
+          )}
 
           {compactions.length > 0 ? (
             <details className="compaction-panel">
@@ -2489,7 +2666,7 @@ export default function App() {
 
               return (
                 <article className={`message message-${message.role} message-${message.status ?? "complete"}`} key={messageKey}>
-                  <span className="message-role">{formatRoleLabel(message, bootstrap.agent_name)}</span>
+                  <span className="message-role">{formatRoleLabel(message, bootstrap.agent_name, Boolean(activeProject?.shared))}</span>
                   <div className="message-content">
                     {message.status === "pending" && !message.content ? (
                       <div className="typing-dots" aria-label="Avelin печатает"><span /><span /><span /></div>
@@ -2546,7 +2723,8 @@ export default function App() {
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleComposerKeyDown}
-              placeholder="Спроси что-нибудь у Avelin..."
+              placeholder={isSharedViewer ? "Viewer имеет доступ только для чтения" : activeProject?.shared && activeProject.agent_mode === "mention_only" ? "Упомяни @Avelin, чтобы агент ответил…" : "Спроси что-нибудь у Avelin..."}
+              disabled={isSharedViewer}
               rows={3}
             />
             <div className="composer-row">
@@ -2557,7 +2735,7 @@ export default function App() {
                 <button
                   className="ghost-button"
                   onClick={() => setInput("")}
-                  disabled={!input.trim() || isSending}
+                  disabled={!input.trim() || isSending || isSharedViewer}
                   type="button"
                 >
                   Очистить
@@ -2565,7 +2743,7 @@ export default function App() {
                 {isSending ? (
                   <button className="stop-button" onClick={handleStopGeneration} type="button">Остановить</button>
                 ) : (
-                  <button disabled={!input.trim()} type="submit">Отправить</button>
+                  <button disabled={!input.trim() || isSharedViewer} type="submit">Отправить</button>
                 )}
               </div>
             </div>

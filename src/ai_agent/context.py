@@ -483,6 +483,20 @@ class ContextBuilder:
         return _section("Current project context", "\n".join(lines))
 
     def _task_context(self) -> str:
+        shared_project = self.memory.shared_project()
+        if shared_project is not None:
+            items = self.memory.database.list_shared_project_items(
+                self.memory.user_id, str(shared_project["id"])
+            )
+            relevant = [item for item in items if item["kind"] in {"task", "decision"}]
+            if not relevant:
+                return _section("Shared workspace board", "No shared tasks or decisions.")
+            lines = [
+                f"- [{item['kind']}; revision={item['revision']}] {item['title']}: "
+                f"{item['content'].get('text', '')}"
+                for item in relevant[:20]
+            ]
+            return _section("Shared workspace board", "\n".join(lines))
         task = self.tasks.active_task()
         if task is None:
             return _section("Current task context", "No active or queued task.")
@@ -513,6 +527,8 @@ class ContextBuilder:
         return _section("Older conversation continuity", "\n".join([header, *excerpts]))
 
     def _action_context(self) -> str:
+        if self.memory.shared_project() is not None:
+            return ""
         logs = self.action_log.recent(limit=self.action_limit)
         if not logs:
             return ""

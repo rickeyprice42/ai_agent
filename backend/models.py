@@ -375,6 +375,10 @@ class ProjectItem(BaseModel):
     title: str
     description: str = ""
     status: str
+    shared: bool = False
+    agent_mode: str = "mention_only"
+    revision: int = 0
+    role: str = "owner"
     created_at: str
     updated_at: str
     chat_count: int = 0
@@ -388,10 +392,92 @@ class ProjectCreateRequest(BaseModel):
 class ProjectUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=1000)
+    agent_mode: str | None = Field(default=None, pattern="^(mention_only|explicit|off)$")
+    expected_revision: int | None = Field(default=None, ge=0)
 
 
 class ProjectActionResponse(BaseModel):
     project: ProjectItem
+
+
+class ProjectMemberItem(BaseModel):
+    project_id: str
+    user_id: str
+    role: str
+    status: str
+    email: str = ""
+    username: str = ""
+    display_name: str = ""
+    joined_at: str
+    removed_at: str | None = None
+
+
+class ProjectInvitationCreateRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=160)
+    role: str = Field(..., pattern="^(editor|viewer)$")
+    expires_in_hours: int = Field(default=72, ge=1, le=720)
+
+
+class ProjectInvitationAcceptRequest(BaseModel):
+    token: str = Field(..., min_length=20, max_length=200)
+
+
+class ProjectInvitationItem(BaseModel):
+    id: str
+    project_id: str
+    email: str
+    role: str
+    status: str
+    invited_by: str
+    expires_at: str
+    accepted_by: str | None = None
+    accepted_at: str | None = None
+    revoked_at: str | None = None
+    created_at: str
+    token: str | None = None
+
+
+class SharedProjectItemCreateRequest(BaseModel):
+    kind: str = Field(..., pattern="^(task|decision|artifact|memory)$")
+    title: str = Field(..., min_length=1, max_length=200)
+    content: dict = Field(default_factory=dict)
+    source_type: str | None = Field(default=None, max_length=80)
+    source_id: str | None = Field(default=None, max_length=200)
+
+
+class SharedProjectItemUpdateRequest(BaseModel):
+    content: dict = Field(default_factory=dict)
+    expected_revision: int = Field(..., ge=0)
+
+
+class SharedProjectItem(BaseModel):
+    id: str
+    project_id: str
+    created_by: str
+    kind: str
+    title: str
+    content: dict = Field(default_factory=dict)
+    source_type: str | None = None
+    source_id: str | None = None
+    revision: int
+    status: str
+    created_at: str
+    updated_at: str
+
+
+class ProjectAuditItem(BaseModel):
+    id: str
+    project_id: str
+    actor_user_id: str
+    action: str
+    entity_type: str
+    entity_id: str | None = None
+    details: dict = Field(default_factory=dict)
+    created_at: str
+
+
+class ChatReadRequest(BaseModel):
+    message_id: str | None = Field(default=None, max_length=120)
 
 
 class FileArtifactItem(BaseModel):
@@ -405,6 +491,7 @@ class HistoryItem(BaseModel):
     role: str
     content: str
     name: str | None = None
+    author_user_id: str | None = None
     status: str = "complete"
     error: str | None = None
     provider: str | None = None

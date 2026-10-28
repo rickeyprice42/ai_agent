@@ -330,3 +330,11 @@
    - [DONE] Read-only вызовы разрешены policy, write/send требуют approval; добавлены scopes и rate limits.
    - [DONE] Credentials остаются внутри transport и отсутствуют в model context, manifests, errors и логах.
    - [DONE] Добавлены API/UI enable-disable и contract/security tests для двух тестовых источников.
+
+38. [DONE] Shared Workspace MVP (AVE-55)
+   - [DONE] Добавлены membership и роли owner/editor/viewer с приглашениями, отзывом доступа и audit log.
+   - [DONE] Общие чаты показывают автора сообщения, mention-only/explicit/off режим Avelin и per-user read state.
+   - [DONE] Добавлена общая доска task/decision/artifact/memory с optimistic revisions и защитой от stale update.
+   - [DONE] Личная память, личные чаты, Skills и файлы изолированы; shared context принимает только явно опубликованные элементы.
+   - [DONE] Viewer не изменяет чаты и доску, editor не управляет участниками, удаление участника не удаляет его личные данные.
+   - [DONE] Добавлены tenant/IDOR/invitation/concurrency regression tests и PostgreSQL RLS migration.

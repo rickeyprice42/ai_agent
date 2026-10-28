@@ -118,6 +118,22 @@ class MemoryStore:
         query_terms = _terms(query)
         thread = self.current_thread()
         project_id = str(thread["project_id"]) if thread and thread.get("project_id") else None
+        shared_project = self.shared_project()
+        if shared_project is not None:
+            candidates = []
+            for item in self.database.list_shared_project_items(self.user_id, str(shared_project["id"])):
+                if item["kind"] not in {"memory", "decision"}:
+                    continue
+                content = str(item["content"].get("text") or item["title"])
+                memory = MemoryItem(
+                    kind=str(item["kind"]), content=content, scope="shared_project",
+                    memory_id=str(item["id"]), confidence=1.0,
+                    updated_at=str(item["updated_at"]), provenance=("explicit_workspace_share",),
+                )
+                memory.score = _score_memory(memory, query_terms, 0.0)
+                candidates.append(memory)
+            candidates.sort(key=lambda item: (-item.score, item.updated_at or ""))
+            return candidates[:safe_limit]
         persistent = self.database.search_memory_records(
             self.user_id,
             terms=sorted(query_terms),
@@ -197,6 +213,7 @@ class MemoryStore:
             name=message.name,
             thread_id=self.thread_id,
             artifacts=message.artifacts,
+            author_user_id=self.user_id if message.role == "user" else None,
         )
         self.database.auto_title_chat_thread(self.user_id, self.thread_id)
         return message_id
@@ -276,14 +293,26 @@ class MemoryStore:
 
     def snapshot(self) -> MemoryState:
         return MemoryState(
-            notes=self.database.list_notes(user_id=self.user_id),
+            notes=[] if self.shared_project() is not None else self.database.list_notes(user_id=self.user_id),
             history=self.database.list_messages(thread_id=self.thread_id),
         )
 
     def current_thread(self) -> dict | None:
         return self.database.get_chat_thread(self.user_id, self.thread_id)
 
+    def shared_project(self) -> dict | None:
+        thread = self.current_thread()
+        if not thread or not thread.get("project_id"):
+            return None
+        project = self.database.get_project(self.user_id, str(thread["project_id"]))
+        return project if project and project.get("shared") else None
+
     def remember_current_chat(self) -> str:
+        if self.shared_project() is not None:
+            return (
+                "Общий чат не переносится в личную память. "
+                "Поделитесь конкретным фактом через общую доску проекта."
+            )
         result = self.database.remember_thread(self.user_id, self.thread_id)
         if result is None:
             return "Чат не найден или удален."
@@ -294,6 +323,8 @@ class MemoryStore:
     def _memory_candidates(self) -> list[MemoryItem]:
         thread = self.current_thread()
         if not thread or thread["deleted_at"] is not None or thread["archived_at"] is not None:
+            return []
+        if self.shared_project() is not None:
             return []
 
         project_id = str(thread["project_id"]) if thread.get("project_id") else None

@@ -33,6 +33,7 @@ from backend.models import (
     ChatRequest,
     ChatResponse,
     ChatMemoryResponse,
+    ChatReadRequest,
     ContextCompactionItem,
     ContextCompactionReviewResponse,
     ContextTraceResponse,
@@ -58,11 +59,19 @@ from backend.models import (
     OpenWorkspaceResponse,
     OAuthProviderResponse,
     ProjectActionResponse,
+    ProjectAuditItem,
     ProjectCreateRequest,
+    ProjectInvitationAcceptRequest,
+    ProjectInvitationCreateRequest,
+    ProjectInvitationItem,
     ProjectItem,
+    ProjectMemberItem,
     ProjectUpdateRequest,
     RegisterRequest,
     SecuritySettingsResponse,
+    SharedProjectItem,
+    SharedProjectItemCreateRequest,
+    SharedProjectItemUpdateRequest,
     InAppNotificationItem,
     TaskCheckpointItem,
     TaskControlResponse,
@@ -245,6 +254,8 @@ def chat(payload: ChatRequest, user: dict[str, str] = Depends(current_user)) -> 
         result = agent_service.chat(payload.message, user["id"], thread_id=payload.thread_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ProviderError as exc:
         raise HTTPException(status_code=502, detail=exc.user_message) from exc
     return ChatResponse(**result)
@@ -260,6 +271,8 @@ def chat_stream(payload: ChatRequest, user: dict[str, str] = Depends(current_use
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     def ndjson_stream():
         try:
@@ -278,6 +291,18 @@ def chat_stream(payload: ChatRequest, user: dict[str, str] = Depends(current_use
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/chats/{thread_id}/read")
+def mark_chat_read(
+    thread_id: str,
+    payload: ChatReadRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> dict:
+    try:
+        return agent_service.mark_chat_read(user["id"], thread_id, payload.message_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/chats/{thread_id}/context-trace", response_model=ContextTraceResponse)
@@ -387,6 +412,8 @@ def create_chat_thread(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
 
 
@@ -408,6 +435,8 @@ def update_chat_thread(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
 
 
@@ -420,6 +449,8 @@ def archive_chat_thread(
         thread = agent_service.archive_chat_thread(user["id"], thread_id, archived=True)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
 
 
@@ -432,6 +463,8 @@ def unarchive_chat_thread(
         thread = agent_service.archive_chat_thread(user["id"], thread_id, archived=False)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
 
 
@@ -444,6 +477,8 @@ def restore_chat_thread(
         thread = agent_service.restore_chat_thread(user["id"], thread_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
 
 
@@ -456,6 +491,8 @@ def delete_chat_thread(
         thread = agent_service.delete_chat_thread(user["id"], thread_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ChatThreadActionResponse(thread=ChatThreadItem(**thread))
 
 
@@ -468,6 +505,8 @@ def clear_chat_messages(
         deleted_messages = agent_service.clear_chat(user["id"], thread_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ClearChatResponse(deleted_messages=deleted_messages)
 
 
@@ -480,6 +519,8 @@ def remember_chat(
         result = agent_service.remember_chat(user["id"], thread_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ChatMemoryResponse(result=result["result"], thread=ChatThreadItem(**result["thread"]))
 
 
@@ -677,10 +718,126 @@ def update_project(
             project_id,
             title=payload.title,
             description=payload.description,
+            agent_mode=payload.agent_mode,
+            expected_revision=payload.expected_revision,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ProjectActionResponse(project=ProjectItem(**project))
+
+
+@router.get("/projects/{project_id}/members", response_model=list[ProjectMemberItem])
+def project_members(project_id: str, user: dict[str, str] = Depends(current_user)) -> list[ProjectMemberItem]:
+    try:
+        return [ProjectMemberItem(**item) for item in agent_service.project_members(user["id"], project_id)]
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/invitations", response_model=list[ProjectInvitationItem])
+def project_invitations(project_id: str, user: dict[str, str] = Depends(current_user)) -> list[ProjectInvitationItem]:
+    try:
+        return [ProjectInvitationItem(**item) for item in agent_service.project_invitations(user["id"], project_id)]
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/invitations", response_model=ProjectInvitationItem)
+def create_project_invitation(
+    project_id: str,
+    payload: ProjectInvitationCreateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ProjectInvitationItem:
+    try:
+        return ProjectInvitationItem(**agent_service.create_project_invitation(
+            user["id"], project_id, payload.email, payload.role, payload.expires_in_hours
+        ))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/project-invitations/accept", response_model=ProjectActionResponse)
+def accept_project_invitation(
+    payload: ProjectInvitationAcceptRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ProjectActionResponse:
+    try:
+        return ProjectActionResponse(project=ProjectItem(**agent_service.accept_project_invitation(user["id"], payload.token)))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/projects/{project_id}/invitations/{invitation_id}", response_model=ProjectInvitationItem)
+def revoke_project_invitation(project_id: str, invitation_id: str, user: dict[str, str] = Depends(current_user)) -> ProjectInvitationItem:
+    try:
+        return ProjectInvitationItem(**agent_service.revoke_project_invitation(user["id"], project_id, invitation_id))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/projects/{project_id}/members/{member_user_id}")
+def remove_project_member(project_id: str, member_user_id: str, user: dict[str, str] = Depends(current_user)) -> dict:
+    try:
+        return agent_service.remove_project_member(user["id"], project_id, member_user_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/shared-items", response_model=list[SharedProjectItem])
+def shared_project_items(project_id: str, user: dict[str, str] = Depends(current_user)) -> list[SharedProjectItem]:
+    try:
+        return [SharedProjectItem(**item) for item in agent_service.shared_project_items(user["id"], project_id)]
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/projects/{project_id}/shared-items", response_model=SharedProjectItem)
+def create_shared_project_item(
+    project_id: str,
+    payload: SharedProjectItemCreateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> SharedProjectItem:
+    try:
+        return SharedProjectItem(**agent_service.create_shared_project_item(user["id"], project_id, **payload.model_dump()))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/projects/{project_id}/shared-items/{item_id}", response_model=SharedProjectItem)
+def update_shared_project_item(
+    project_id: str,
+    item_id: str,
+    payload: SharedProjectItemUpdateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> SharedProjectItem:
+    try:
+        return SharedProjectItem(**agent_service.update_shared_project_item(
+            user["id"], project_id, item_id, payload.content, payload.expected_revision
+        ))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/projects/{project_id}/audit", response_model=list[ProjectAuditItem])
+def project_audit(project_id: str, user: dict[str, str] = Depends(current_user)) -> list[ProjectAuditItem]:
+    try:
+        return [ProjectAuditItem(**item) for item in agent_service.project_audit(user["id"], project_id)]
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/projects/{project_id}/archive", response_model=ProjectActionResponse)
@@ -692,6 +849,8 @@ def archive_project(
         project = agent_service.update_project(user["id"], project_id, status="archived")
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ProjectActionResponse(project=ProjectItem(**project))
 
 
@@ -704,6 +863,8 @@ def restore_project(
         project = agent_service.update_project(user["id"], project_id, status="active")
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ProjectActionResponse(project=ProjectItem(**project))
 
 
@@ -716,6 +877,8 @@ def delete_project(
         project = agent_service.update_project(user["id"], project_id, status="deleted")
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return ProjectActionResponse(project=ProjectItem(**project))
 
 

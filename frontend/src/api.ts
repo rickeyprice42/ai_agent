@@ -13,6 +13,9 @@ import type {
   ModelProviderOption,
   ModelSettings,
   ProjectItem,
+  ProjectInvitationItem,
+  ProjectMemberItem,
+  SharedProjectItem,
   UserProfile
 } from "./types";
 import type { ConnectorItem } from "./types";
@@ -388,7 +391,7 @@ export async function createProject(
 export async function updateProject(
   token: string,
   projectId: string,
-  payload: { title?: string; description?: string }
+  payload: { title?: string; description?: string; agent_mode?: ProjectItem["agent_mode"]; expected_revision?: number }
 ): Promise<{ project: ProjectItem }> {
   const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: "PATCH",
@@ -401,6 +404,65 @@ export async function updateProject(
   if (!response.ok) {
     throw await parseError(response, "Не удалось обновить проект.");
   }
+  return response.json();
+}
+
+export async function fetchProjectMembers(token: string, projectId: string): Promise<ProjectMemberItem[]> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/members`, { headers: authHeaders(token) });
+  if (!response.ok) throw await parseError(response, "Не удалось загрузить участников workspace.");
+  return response.json();
+}
+
+export async function fetchProjectInvitations(token: string, projectId: string): Promise<ProjectInvitationItem[]> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/invitations`, { headers: authHeaders(token) });
+  if (!response.ok) throw await parseError(response, "Не удалось загрузить приглашения.");
+  return response.json();
+}
+
+export async function createProjectInvitation(token: string, projectId: string, email: string, role: "editor" | "viewer"): Promise<ProjectInvitationItem> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/invitations`, {
+    method: "POST",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ email, role, expires_in_hours: 72 })
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось создать приглашение.");
+  return response.json();
+}
+
+export async function acceptProjectInvitation(token: string, invitationToken: string): Promise<ProjectItem> {
+  const response = await fetch("/api/project-invitations/accept", {
+    method: "POST",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ token: invitationToken })
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось принять приглашение.");
+  return (await response.json()).project;
+}
+
+export async function removeProjectMember(token: string, projectId: string, userId: string): Promise<void> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`, {
+    method: "DELETE", headers: authHeaders(token)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось удалить участника.");
+}
+
+export async function fetchSharedProjectItems(token: string, projectId: string): Promise<SharedProjectItem[]> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/shared-items`, { headers: authHeaders(token) });
+  if (!response.ok) throw await parseError(response, "Не удалось загрузить общую доску.");
+  return response.json();
+}
+
+export async function createSharedProjectItem(
+  token: string,
+  projectId: string,
+  payload: { kind: SharedProjectItem["kind"]; title: string; content: Record<string, unknown>; source_type?: string; source_id?: string }
+): Promise<SharedProjectItem> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/shared-items`, {
+    method: "POST",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось добавить элемент на общую доску.");
   return response.json();
 }
 

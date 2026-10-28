@@ -11,6 +11,7 @@ export type ChatMessage = {
   role: ChatRole;
   content: string;
   name?: string | null;
+  author_user_id?: string | null;
   status?: "pending" | "complete" | "cancelled" | "failed" | string;
   error?: string | null;
   provider?: string | null;
@@ -41,9 +42,50 @@ export type ProjectItem = {
   title: string;
   description: string;
   status: string;
+  shared: boolean;
+  agent_mode: "mention_only" | "explicit" | "off";
+  revision: number;
+  role: "owner" | "editor" | "viewer";
   created_at: string;
   updated_at: string;
   chat_count: number;
+};
+
+export type ProjectMemberItem = {
+  project_id: string;
+  user_id: string;
+  role: "owner" | "editor" | "viewer";
+  status: string;
+  email: string;
+  username: string;
+  display_name: string;
+  joined_at: string;
+};
+
+export type ProjectInvitationItem = {
+  id: string;
+  project_id: string;
+  email: string;
+  role: "editor" | "viewer";
+  status: string;
+  expires_at: string;
+  token?: string | null;
+  created_at: string;
+};
+
+export type SharedProjectItem = {
+  id: string;
+  project_id: string;
+  created_by: string;
+  kind: "task" | "decision" | "artifact" | "memory";
+  title: string;
+  content: Record<string, unknown>;
+  source_type?: string | null;
+  source_id?: string | null;
+  revision: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
 };
 
 export type BootstrapPayload = {

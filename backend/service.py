@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib import error, request
 import json
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,7 @@ from ai_agent.config import Settings
 from ai_agent.connectors import ConnectorFailure, SAFE_FAILURE_MESSAGES
 from ai_agent.database import AvelinDatabase
 from ai_agent.task_reports import TaskReportService
+from ai_agent.types import Message
 
 
 AVAILABLE_MODELS = [
@@ -233,12 +235,57 @@ class AgentService:
 
     def chat(self, message: str, user_id: str, thread_id: str | None = None) -> dict[str, str]:
         thread = self.resolve_thread(user_id, thread_id)
-        reply = self.agent_for_user(user_id, thread["id"]).respond(message)
+        project = self._shared_project_for_thread(user_id, thread)
+        agent = self.agent_for_user(user_id, thread["id"])
+        if project is not None:
+            self._ensure_shared_writer(project)
+            if not self._agent_should_respond(project, message):
+                message_id = agent.memory.append_message(
+                    Message(role="user", content=message, name=str(self.database.get_user(user_id).get("display_name") or "Участник"))
+                )
+                self.database.mark_chat_read(user_id, thread["id"], message_id)
+                return {"reply": "", "thread_id": thread["id"]}
+        reply = agent.respond(message)
+        self.database.mark_chat_read(user_id, thread["id"])
         return {"reply": reply, "thread_id": thread["id"]}
 
     def chat_stream(self, message: str, user_id: str, thread_id: str | None = None):
         thread = self.resolve_thread(user_id, thread_id)
-        return thread["id"], self.agent_for_user(user_id, thread["id"]).respond_stream(message)
+        project = self._shared_project_for_thread(user_id, thread)
+        agent = self.agent_for_user(user_id, thread["id"])
+        if project is not None:
+            self._ensure_shared_writer(project)
+            if not self._agent_should_respond(project, message):
+                message_id = agent.memory.append_message(
+                    Message(role="user", content=message, name=str(self.database.get_user(user_id).get("display_name") or "Участник"))
+                )
+                self.database.mark_chat_read(user_id, thread["id"], message_id)
+                return thread["id"], iter((
+                    {"type": "status", "status": "mention_required", "text": "Avelin отвечает в этом workspace только по @Avelin."},
+                    {"type": "done", "text": ""},
+                ))
+        return thread["id"], agent.respond_stream(message)
+
+    def _shared_project_for_thread(self, user_id: str, thread: dict) -> dict | None:
+        project_id = thread.get("project_id")
+        if not project_id:
+            return None
+        project = self.database.get_project(user_id, str(project_id))
+        return project if project and project.get("shared") else None
+
+    @staticmethod
+    def _ensure_shared_writer(project: dict) -> None:
+        if project.get("role") not in {"owner", "editor"}:
+            raise PermissionError("Viewer может читать workspace, но не отправлять сообщения и менять данные.")
+
+    @staticmethod
+    def _agent_should_respond(project: dict, message: str) -> bool:
+        mode = project.get("agent_mode", "mention_only")
+        if mode == "off":
+            return False
+        if mode == "mention_only":
+            return bool(re.search(r"(?i)(?:^|\s)@avelin\b", message))
+        return True
 
     def context_trace(self, user_id: str, thread_id: str) -> dict:
         thread = self.resolve_thread(user_id, thread_id)
@@ -596,11 +643,18 @@ class AgentService:
         return thread
 
     def remember_chat(self, user_id: str, thread_id: str) -> dict:
-        result = self.database.remember_thread(user_id, thread_id)
-        if result is None:
-            raise ValueError("Чат не найден.")
         thread = self.database.get_chat_thread(user_id, thread_id)
         if thread is None:
+            raise ValueError("Чат не найден.")
+        if thread.get("project_id"):
+            project = self.database.get_project(user_id, str(thread["project_id"]))
+            if project and project.get("shared"):
+                raise PermissionError(
+                    "Общий чат не переносится в личную память. "
+                    "Поделитесь конкретным фактом через общую доску проекта."
+                )
+        result = self.database.remember_thread(user_id, thread_id)
+        if result is None:
             raise ValueError("Чат не найден.")
         self._agents.pop((user_id, thread_id), None)
         return {
@@ -738,6 +792,8 @@ class AgentService:
         title: str | None = None,
         description: str | None = None,
         status: str | None = None,
+        agent_mode: str | None = None,
+        expected_revision: int | None = None,
     ) -> dict:
         project = self.database.update_project(
             user_id,
@@ -745,10 +801,50 @@ class AgentService:
             title=title,
             description=description,
             status=status,
+            agent_mode=agent_mode,
+            expected_revision=expected_revision,
         )
         if project is None:
             raise ValueError("Проект не найден.")
         return project
+
+    def project_members(self, user_id: str, project_id: str) -> list[dict]:
+        return self.database.list_project_members(user_id, project_id)
+
+    def project_invitations(self, user_id: str, project_id: str) -> list[dict]:
+        return self.database.list_project_invitations(user_id, project_id)
+
+    def create_project_invitation(self, user_id: str, project_id: str, email: str, role: str, expires_in_hours: int) -> dict:
+        expires_at = (datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)).isoformat()
+        return self.database.create_project_invitation(user_id, project_id, email, role, expires_at)
+
+    def accept_project_invitation(self, user_id: str, token: str) -> dict:
+        project = self.database.accept_project_invitation(user_id, token)
+        self._drop_user_agents(user_id)
+        return project
+
+    def revoke_project_invitation(self, user_id: str, project_id: str, invitation_id: str) -> dict:
+        return self.database.revoke_project_invitation(user_id, project_id, invitation_id)
+
+    def remove_project_member(self, user_id: str, project_id: str, member_user_id: str) -> dict:
+        result = self.database.remove_project_member(user_id, project_id, member_user_id)
+        self._drop_user_agents(member_user_id)
+        return result
+
+    def shared_project_items(self, user_id: str, project_id: str) -> list[dict]:
+        return self.database.list_shared_project_items(user_id, project_id)
+
+    def create_shared_project_item(self, user_id: str, project_id: str, **payload) -> dict:
+        return self.database.create_shared_project_item(user_id, project_id, **payload)
+
+    def update_shared_project_item(self, user_id: str, project_id: str, item_id: str, content: dict, expected_revision: int) -> dict:
+        return self.database.update_shared_project_item(user_id, project_id, item_id, content, expected_revision)
+
+    def project_audit(self, user_id: str, project_id: str) -> list[dict]:
+        return self.database.list_project_audit(user_id, project_id)
+
+    def mark_chat_read(self, user_id: str, thread_id: str, message_id: str | None) -> dict:
+        return self.database.mark_chat_read(user_id, thread_id, message_id)
 
     def bootstrap(self, user_id: str, thread_id: str | None = None) -> dict:
         self.tick_automations(user_id)

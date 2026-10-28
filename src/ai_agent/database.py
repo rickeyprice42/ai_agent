@@ -5,8 +5,10 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
+from hashlib import sha256
 import json
 import re
+import secrets
 import sqlite3
 
 
@@ -46,6 +48,7 @@ class AvelinDatabase:
             connection.executescript(SCHEMA)
             self._migrate_chat_threads(connection)
             self._migrate_project_links(connection)
+            self._migrate_shared_workspaces(connection)
             self._migrate_durable_tasks(connection)
             self._migrate_messages(connection)
             self._migrate_memory_records(connection)
@@ -157,6 +160,32 @@ class AvelinDatabase:
             connection.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT")
 
     @staticmethod
+    def _migrate_shared_workspaces(connection: sqlite3.Connection) -> None:
+        project_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(projects)").fetchall()
+        }
+        for column, statement in {
+            "shared": "ALTER TABLE projects ADD COLUMN shared INTEGER NOT NULL DEFAULT 0",
+            "agent_mode": "ALTER TABLE projects ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'mention_only'",
+            "revision": "ALTER TABLE projects ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if column not in project_columns:
+                connection.execute(statement)
+        message_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        if "author_user_id" not in message_columns:
+            connection.execute("ALTER TABLE messages ADD COLUMN author_user_id TEXT")
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO project_members (project_id, user_id, role, status, invited_by)
+            SELECT id, user_id, 'owner', 'active', user_id FROM projects
+            """
+        )
+
+    @staticmethod
     def _migrate_durable_tasks(connection: sqlite3.Connection) -> None:
         connection.execute(
             """
@@ -209,6 +238,10 @@ class AvelinDatabase:
             CREATE INDEX IF NOT EXISTS idx_chat_threads_status ON chat_threads(status, archived_at, deleted_at);
             CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
             CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+            CREATE INDEX IF NOT EXISTS idx_project_members_user ON project_members(user_id, status, project_id);
+            CREATE INDEX IF NOT EXISTS idx_project_invites_email ON project_invitations(email, status, expires_at);
+            CREATE INDEX IF NOT EXISTS idx_shared_items_project ON shared_project_items(project_id, status, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_project_audit_project ON project_audit_events(project_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_memory_records_key ON memory_records(user_id, memory_key, status);
             """
         )
@@ -411,8 +444,14 @@ class AvelinDatabase:
         if status not in {"active", "archived", "deleted", "all"}:
             status = "active"
 
-        where = "chat_threads.user_id = ?"
-        params: list[str] = [user_id]
+        where = """(chat_threads.user_id = ? OR (
+            chat_threads.project_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM project_members AS access_member
+                WHERE access_member.project_id = chat_threads.project_id
+                  AND access_member.user_id = ? AND access_member.status = 'active'
+            )
+        ))"""
+        params: list[str] = [user_id, user_id]
         if status == "active":
             where += (
                 " AND chat_threads.deleted_at IS NULL"
@@ -485,10 +524,18 @@ class AvelinDatabase:
                     MAX(messages.created_at) AS last_message_at
                 FROM chat_threads
                 LEFT JOIN messages ON messages.thread_id = chat_threads.id
-                WHERE chat_threads.user_id = ? AND chat_threads.id = ?
+                WHERE chat_threads.id = ? AND (
+                    chat_threads.user_id = ? OR (
+                        chat_threads.project_id IS NOT NULL AND EXISTS (
+                            SELECT 1 FROM project_members AS access_member
+                            WHERE access_member.project_id = chat_threads.project_id
+                              AND access_member.user_id = ? AND access_member.status = 'active'
+                        )
+                    )
+                )
                 GROUP BY chat_threads.id
                 """,
-                (user_id, thread_id),
+                (thread_id, user_id, user_id),
             ).fetchone()
         return self._thread_payload(row) if row else None
 
@@ -499,8 +546,8 @@ class AvelinDatabase:
         project_id: str | None = None,
     ) -> dict:
         self.ensure_user_defaults(user_id)
-        if project_id and self.get_project(user_id, project_id) is None:
-            return self.create_chat_thread(user_id, title=title)
+        if project_id and self.project_role(user_id, project_id) not in {"owner", "editor"}:
+            raise PermissionError("Viewer не может создавать общий чат.")
         thread_id = str(uuid4())
         normalized_title = (title or "New chat").strip() or "New chat"
         with self.connect() as connection:
@@ -538,7 +585,12 @@ class AvelinDatabase:
         clear_project: bool = False,
         memory_enabled: bool | None = None,
     ) -> dict | None:
-        if self.get_chat_thread(user_id, thread_id) is None:
+        current = self.get_chat_thread(user_id, thread_id)
+        if current is None:
+            return None
+        if current.get("project_id") and self.project_role(user_id, str(current["project_id"])) not in {"owner", "editor"}:
+            return None
+        if not current.get("project_id") and current["user_id"] != user_id:
             return None
         assignments = ["updated_at = CURRENT_TIMESTAMP"]
         params: list[str | int] = []
@@ -558,13 +610,13 @@ class AvelinDatabase:
         if memory_enabled is not None:
             assignments.append("memory_enabled = ?")
             params.append(1 if memory_enabled else 0)
-        params.extend([user_id, thread_id])
+        params.append(thread_id)
         with self.connect() as connection:
             connection.execute(
                 f"""
                 UPDATE chat_threads
                 SET {", ".join(assignments)}
-                WHERE user_id = ? AND id = ?
+                WHERE id = ?
                 """,
                 params,
             )
@@ -581,6 +633,15 @@ class AvelinDatabase:
                 VALUES (?, ?, ?, ?)
                 """,
                 (project_id, user_id, normalized_title, description.strip()),
+            )
+            connection.execute(
+                """INSERT INTO project_members (project_id, user_id, role, status, invited_by)
+                   VALUES (?, ?, 'owner', 'active', ?)""",
+                (project_id, user_id, user_id),
+            )
+            self._add_project_audit(
+                connection, project_id, user_id, "project.created", "project", project_id,
+                {"title": normalized_title},
             )
         return self.get_project(user_id, project_id) or {
             "id": project_id,
@@ -604,17 +665,26 @@ class AvelinDatabase:
                     projects.title,
                     projects.description,
                     projects.status,
+                    projects.shared,
+                    projects.agent_mode,
+                    projects.revision,
                     projects.created_at,
                     projects.updated_at,
+                    CASE WHEN projects.user_id = ? THEN 'owner' ELSE project_members.role END AS role,
                     COUNT(chat_threads.id) AS chat_count
                 FROM projects
+                LEFT JOIN project_members
+                  ON project_members.project_id = projects.id
+                 AND project_members.user_id = ?
+                 AND project_members.status = 'active'
                 LEFT JOIN chat_threads
                   ON chat_threads.project_id = projects.id
                  AND chat_threads.deleted_at IS NULL
-                WHERE projects.user_id = ? AND projects.id = ?
+                WHERE projects.id = ?
+                  AND (projects.user_id = ? OR project_members.user_id IS NOT NULL)
                 GROUP BY projects.id
                 """,
-                (user_id, project_id),
+                (user_id, user_id, project_id, user_id),
             ).fetchone()
         return self._project_payload(row) if row else None
 
@@ -622,7 +692,7 @@ class AvelinDatabase:
         self.ensure_user_defaults(user_id)
         if status not in {"active", "archived", "deleted", "all"}:
             status = "active"
-        where = "projects.user_id = ?"
+        where = "(projects.user_id = ? OR project_members.user_id IS NOT NULL)"
         params = [user_id]
         if status != "all":
             where += " AND projects.status = ?"
@@ -636,10 +706,18 @@ class AvelinDatabase:
                     projects.title,
                     projects.description,
                     projects.status,
+                    projects.shared,
+                    projects.agent_mode,
+                    projects.revision,
                     projects.created_at,
                     projects.updated_at,
+                    CASE WHEN projects.user_id = ? THEN 'owner' ELSE project_members.role END AS role,
                     COUNT(chat_threads.id) AS chat_count
                 FROM projects
+                LEFT JOIN project_members
+                  ON project_members.project_id = projects.id
+                 AND project_members.user_id = ?
+                 AND project_members.status = 'active'
                 LEFT JOIN chat_threads
                   ON chat_threads.project_id = projects.id
                  AND chat_threads.deleted_at IS NULL
@@ -655,7 +733,7 @@ class AvelinDatabase:
                     projects.updated_at DESC,
                     projects.created_at DESC
                 """,
-                params,
+                [user_id, user_id, *params],
             ).fetchall()
         return [self._project_payload(row) for row in rows]
 
@@ -666,9 +744,16 @@ class AvelinDatabase:
         title: str | None = None,
         description: str | None = None,
         status: str | None = None,
+        agent_mode: str | None = None,
+        expected_revision: int | None = None,
     ) -> dict | None:
-        if self.get_project(user_id, project_id) is None:
+        current = self.get_project(user_id, project_id)
+        if current is None:
             return None
+        if current.get("role") not in {"owner", "editor"}:
+            raise PermissionError("Viewer не может изменять workspace.")
+        if status is not None and current.get("role") != "owner":
+            raise PermissionError("Только owner может архивировать, восстанавливать или удалять workspace.")
         assignments = ["updated_at = CURRENT_TIMESTAMP"]
         params: list[str] = []
         if title is not None:
@@ -682,15 +767,31 @@ class AvelinDatabase:
                 return None
             assignments.append("status = ?")
             params.append(status)
-        params.extend([user_id, project_id])
+        if agent_mode is not None:
+            if agent_mode not in {"mention_only", "explicit", "off"}:
+                return None
+            assignments.append("agent_mode = ?")
+            params.append(agent_mode)
+        assignments.append("revision = revision + 1")
+        where = "id = ?"
+        params.append(project_id)
+        if expected_revision is not None:
+            where += " AND revision = ?"
+            params.append(str(expected_revision))
         with self.connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 f"""
                 UPDATE projects
                 SET {", ".join(assignments)}
-                WHERE user_id = ? AND id = ?
+                WHERE {where}
                 """,
                 params,
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Проект изменён другим участником; обнови данные и повтори.")
+            self._add_project_audit(
+                connection, project_id, user_id, "project.updated", "project", project_id,
+                {"revision": current["revision"] + 1},
             )
         return self.get_project(user_id, project_id)
 
@@ -701,13 +802,249 @@ class AvelinDatabase:
             "title": str(row["title"]),
             "description": str(row["description"] or ""),
             "status": str(row["status"]),
+            "shared": bool(row["shared"]),
+            "agent_mode": str(row["agent_mode"]),
+            "revision": int(row["revision"]),
+            "role": str(row["role"]),
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
             "chat_count": int(row["chat_count"] or 0),
         }
 
+    def project_role(self, user_id: str, project_id: str) -> str | None:
+        project = self.get_project(user_id, project_id)
+        return str(project["role"]) if project else None
+
+    def list_project_members(self, user_id: str, project_id: str) -> list[dict]:
+        if self.get_project(user_id, project_id) is None:
+            raise ValueError("Проект не найден или доступ отозван.")
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT members.project_id, members.user_id, members.role, members.status,
+                          members.joined_at, members.removed_at,
+                          users.email, users.username, users.display_name
+                   FROM project_members AS members
+                   JOIN users ON users.id = members.user_id
+                   WHERE members.project_id = ? AND members.status = 'active'
+                   ORDER BY CASE members.role WHEN 'owner' THEN 1 WHEN 'editor' THEN 2 ELSE 3 END,
+                            users.display_name""",
+                (project_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_project_invitation(
+        self,
+        user_id: str,
+        project_id: str,
+        email: str,
+        role: str,
+        expires_at: str,
+    ) -> dict:
+        if self.project_role(user_id, project_id) != "owner":
+            raise PermissionError("Только owner управляет участниками.")
+        normalized_email = email.strip().casefold()
+        if role not in {"editor", "viewer"} or not normalized_email:
+            raise ValueError("Укажи email и роль editor/viewer.")
+        token = secrets.token_urlsafe(32)
+        invitation_id = str(uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO project_invitations
+                   (id, project_id, email, role, token_hash, invited_by, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (invitation_id, project_id, normalized_email, role, sha256(token.encode()).hexdigest(), user_id, expires_at),
+            )
+            connection.execute("UPDATE projects SET shared = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (project_id,))
+            self._add_project_audit(connection, project_id, user_id, "invitation.created", "invitation", invitation_id, {"email": normalized_email, "role": role})
+        invitation = self.get_project_invitation(user_id, invitation_id)
+        return {**(invitation or {}), "token": token}
+
+    def get_project_invitation(self, user_id: str, invitation_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT invitation.* FROM project_invitations AS invitation
+                   JOIN projects ON projects.id = invitation.project_id
+                   WHERE invitation.id = ? AND projects.user_id = ?""",
+                (invitation_id, user_id),
+            ).fetchone()
+        return _project_invitation_payload(row) if row else None
+
+    def list_project_invitations(self, user_id: str, project_id: str) -> list[dict]:
+        if self.project_role(user_id, project_id) != "owner":
+            raise PermissionError("Только owner видит приглашения.")
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM project_invitations WHERE project_id = ? ORDER BY created_at DESC",
+                (project_id,),
+            ).fetchall()
+        return [_project_invitation_payload(row) for row in rows]
+
+    def accept_project_invitation(self, user_id: str, token: str) -> dict:
+        user = self.get_user(user_id)
+        digest = sha256(token.encode()).hexdigest()
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM project_invitations
+                   WHERE token_hash = ? AND status = 'pending'""",
+                (digest,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Приглашение недействительно или уже использовано.")
+            if str(row["expires_at"]) <= datetime.now(timezone.utc).isoformat():
+                connection.execute("UPDATE project_invitations SET status = 'expired' WHERE id = ?", (row["id"],))
+                raise ValueError("Срок приглашения истёк.")
+            if str(user.get("email", "")).casefold() != str(row["email"]).casefold():
+                raise PermissionError("Приглашение предназначено другому пользователю.")
+            connection.execute(
+                """INSERT INTO project_members (project_id, user_id, role, status, invited_by)
+                   VALUES (?, ?, ?, 'active', ?)
+                   ON CONFLICT(project_id, user_id) DO UPDATE SET
+                     role = excluded.role, status = 'active', removed_at = NULL""",
+                (row["project_id"], user_id, row["role"], row["invited_by"]),
+            )
+            connection.execute(
+                """UPDATE project_invitations SET status = 'accepted', accepted_by = ?,
+                          accepted_at = CURRENT_TIMESTAMP WHERE id = ?""",
+                (user_id, row["id"]),
+            )
+            self._add_project_audit(connection, str(row["project_id"]), user_id, "invitation.accepted", "member", user_id, {"role": row["role"]})
+        project = self.get_project(user_id, str(row["project_id"]))
+        if project is None:
+            raise ValueError("Не удалось открыть общий проект.")
+        return project
+
+    def revoke_project_invitation(self, user_id: str, project_id: str, invitation_id: str) -> dict:
+        if self.project_role(user_id, project_id) != "owner":
+            raise PermissionError("Только owner управляет приглашениями.")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE project_invitations SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND project_id = ? AND status = 'pending'""",
+                (invitation_id, project_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Активное приглашение не найдено.")
+            self._add_project_audit(connection, project_id, user_id, "invitation.revoked", "invitation", invitation_id, {})
+        return self.get_project_invitation(user_id, invitation_id) or {}
+
+    def remove_project_member(self, user_id: str, project_id: str, member_user_id: str) -> dict:
+        if self.project_role(user_id, project_id) != "owner":
+            raise PermissionError("Только owner управляет участниками.")
+        if member_user_id == user_id:
+            raise ValueError("Owner нельзя удалить из собственного проекта.")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE project_members SET status = 'removed', removed_at = CURRENT_TIMESTAMP
+                   WHERE project_id = ? AND user_id = ? AND role != 'owner' AND status = 'active'""",
+                (project_id, member_user_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Активный участник не найден.")
+            self._add_project_audit(connection, project_id, user_id, "member.removed", "member", member_user_id, {})
+        return {"project_id": project_id, "user_id": member_user_id, "status": "removed"}
+
+    def create_shared_project_item(
+        self,
+        user_id: str,
+        project_id: str,
+        *,
+        kind: str,
+        title: str,
+        content: dict,
+        source_type: str | None = None,
+        source_id: str | None = None,
+    ) -> dict:
+        if self.project_role(user_id, project_id) not in {"owner", "editor"}:
+            raise PermissionError("Viewer не может изменять общую доску.")
+        if kind not in {"task", "decision", "artifact", "memory"}:
+            raise ValueError("Неподдерживаемый тип shared item.")
+        item_id = str(uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO shared_project_items
+                   (id, project_id, created_by, kind, title, content_json, source_type, source_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (item_id, project_id, user_id, kind, title.strip(), json.dumps(content, ensure_ascii=False, sort_keys=True), source_type, source_id),
+            )
+            self._add_project_audit(connection, project_id, user_id, "shared_item.created", kind, item_id, {"title": title.strip()})
+        return self.get_shared_project_item(user_id, project_id, item_id) or {}
+
+    def get_shared_project_item(self, user_id: str, project_id: str, item_id: str) -> dict | None:
+        if self.get_project(user_id, project_id) is None:
+            return None
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM shared_project_items WHERE id = ? AND project_id = ? AND status = 'active'",
+                (item_id, project_id),
+            ).fetchone()
+        return _shared_project_item_payload(row) if row else None
+
+    def list_shared_project_items(self, user_id: str, project_id: str) -> list[dict]:
+        if self.get_project(user_id, project_id) is None:
+            raise ValueError("Проект не найден или доступ отозван.")
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM shared_project_items WHERE project_id = ? AND status = 'active' ORDER BY updated_at DESC",
+                (project_id,),
+            ).fetchall()
+        return [_shared_project_item_payload(row) for row in rows]
+
+    def update_shared_project_item(self, user_id: str, project_id: str, item_id: str, content: dict, expected_revision: int) -> dict:
+        if self.project_role(user_id, project_id) not in {"owner", "editor"}:
+            raise PermissionError("Viewer не может изменять общую доску.")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE shared_project_items SET content_json = ?, revision = revision + 1,
+                          updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND project_id = ? AND revision = ? AND status = 'active'""",
+                (json.dumps(content, ensure_ascii=False, sort_keys=True), item_id, project_id, expected_revision),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Элемент изменён другим участником; обнови данные и повтори.")
+            self._add_project_audit(connection, project_id, user_id, "shared_item.updated", "shared_item", item_id, {"revision": expected_revision + 1})
+        return self.get_shared_project_item(user_id, project_id, item_id) or {}
+
+    def list_project_audit(self, user_id: str, project_id: str, limit: int = 100) -> list[dict]:
+        if self.get_project(user_id, project_id) is None:
+            raise ValueError("Проект не найден или доступ отозван.")
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM project_audit_events WHERE project_id = ? ORDER BY created_at DESC LIMIT ?",
+                (project_id, max(1, min(limit, 200))),
+            ).fetchall()
+        return [_project_audit_payload(row) for row in rows]
+
+    def mark_chat_read(self, user_id: str, thread_id: str, message_id: str | None = None) -> dict:
+        thread = self.get_chat_thread(user_id, thread_id)
+        if thread is None:
+            raise ValueError("Чат не найден или доступ отозван.")
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO chat_read_states (thread_id, user_id, last_read_message_id)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(thread_id, user_id) DO UPDATE SET
+                     last_read_message_id = excluded.last_read_message_id,
+                     last_read_at = CURRENT_TIMESTAMP""",
+                (thread_id, user_id, message_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM chat_read_states WHERE thread_id = ? AND user_id = ?",
+                (thread_id, user_id),
+            ).fetchone()
+        return dict(row)
+
+    @staticmethod
+    def _add_project_audit(connection, project_id: str, actor_user_id: str, action: str, entity_type: str, entity_id: str | None, details: dict) -> None:
+        connection.execute(
+            """INSERT INTO project_audit_events
+               (id, project_id, actor_user_id, action, entity_type, entity_id, details_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (str(uuid4()), project_id, actor_user_id, action, entity_type, entity_id, json.dumps(details, ensure_ascii=False, sort_keys=True)),
+        )
+
     def archive_chat_thread(self, user_id: str, thread_id: str, archived: bool = True) -> dict | None:
-        if self.get_chat_thread(user_id, thread_id) is None:
+        thread = self.get_chat_thread(user_id, thread_id)
+        if thread is None or (thread.get("project_id") and self.project_role(user_id, str(thread["project_id"])) not in {"owner", "editor"}):
             return None
         with self.connect() as connection:
             if archived:
@@ -717,9 +1054,9 @@ class AvelinDatabase:
                     SET status = 'archived',
                         archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = ? AND id = ? AND deleted_at IS NULL
+                    WHERE id = ? AND deleted_at IS NULL
                     """,
-                    (user_id, thread_id),
+                    (thread_id,),
                 )
             else:
                 connection.execute(
@@ -728,14 +1065,15 @@ class AvelinDatabase:
                     SET status = 'active',
                         archived_at = NULL,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = ? AND id = ? AND deleted_at IS NULL
+                    WHERE id = ? AND deleted_at IS NULL
                     """,
-                    (user_id, thread_id),
+                    (thread_id,),
                 )
         return self.get_chat_thread(user_id, thread_id)
 
     def soft_delete_chat_thread(self, user_id: str, thread_id: str) -> dict | None:
-        if self.get_chat_thread(user_id, thread_id) is None:
+        thread = self.get_chat_thread(user_id, thread_id)
+        if thread is None or (thread.get("project_id") and self.project_role(user_id, str(thread["project_id"])) not in {"owner", "editor"}):
             return None
         with self.connect() as connection:
             connection.execute(
@@ -744,14 +1082,15 @@ class AvelinDatabase:
                 SET status = 'deleted',
                     deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP),
                     updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = ? AND id = ?
+                WHERE id = ?
                 """,
-                (user_id, thread_id),
+                (thread_id,),
             )
         return self.get_chat_thread(user_id, thread_id)
 
     def restore_chat_thread(self, user_id: str, thread_id: str) -> dict | None:
-        if self.get_chat_thread(user_id, thread_id) is None:
+        thread = self.get_chat_thread(user_id, thread_id)
+        if thread is None or (thread.get("project_id") and self.project_role(user_id, str(thread["project_id"])) not in {"owner", "editor"}):
             return None
         with self.connect() as connection:
             connection.execute(
@@ -761,14 +1100,15 @@ class AvelinDatabase:
                     archived_at = NULL,
                     deleted_at = NULL,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = ? AND id = ?
+                WHERE id = ?
                 """,
-                (user_id, thread_id),
+                (thread_id,),
             )
         return self.get_chat_thread(user_id, thread_id)
 
     def clear_chat_messages(self, user_id: str, thread_id: str) -> int | None:
-        if self.get_chat_thread(user_id, thread_id) is None:
+        thread = self.get_chat_thread(user_id, thread_id)
+        if thread is None or (thread.get("project_id") and self.project_role(user_id, str(thread["project_id"])) not in {"owner", "editor"}):
             return None
         with self.connect() as connection:
             count = connection.execute(
@@ -780,9 +1120,9 @@ class AvelinDatabase:
                 """
                 UPDATE chat_threads
                 SET updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = ? AND id = ?
+                WHERE id = ?
                 """,
-                (user_id, thread_id),
+                (thread_id,),
             )
         return int(count)
 
@@ -1787,15 +2127,16 @@ class AvelinDatabase:
         provider: str | None = None,
         model: str | None = None,
         artifacts: list[dict] | None = None,
+        author_user_id: str | None = None,
     ) -> str:
         message_id = str(uuid4())
         with self.connect() as connection:
             connection.execute(
                 """
                 INSERT INTO messages (
-                    id, thread_id, role, content, name, status, error, provider, model, artifacts_json
+                    id, thread_id, role, content, name, status, error, provider, model, artifacts_json, author_user_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id,
@@ -1808,6 +2149,7 @@ class AvelinDatabase:
                     provider,
                     model,
                     json.dumps(artifacts or [], ensure_ascii=False),
+                    author_user_id,
                 ),
             )
             connection.execute(
@@ -1860,7 +2202,7 @@ class AvelinDatabase:
             rows = connection.execute(
                 """
                 SELECT id, role, content, name, status, error, provider, model,
-                       artifacts_json, created_at
+                       artifacts_json, author_user_id, created_at
                 FROM messages
                 WHERE thread_id = ?
                 ORDER BY created_at ASC, rowid ASC
@@ -1878,6 +2220,7 @@ class AvelinDatabase:
                     "provider": row["provider"],
                     "model": row["model"],
                     "artifacts": _load_json_list(row["artifacts_json"]),
+                    "author_user_id": row["author_user_id"],
                     "created_at": str(row["created_at"]),
                 }
                 for row in rows
@@ -3515,8 +3858,71 @@ CREATE TABLE IF NOT EXISTS projects (
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'active',
+    shared INTEGER NOT NULL DEFAULT 0,
+    agent_mode TEXT NOT NULL DEFAULT 'mention_only',
+    revision INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS project_members (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'editor', 'viewer')),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'removed')),
+    invited_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    removed_at TEXT,
+    PRIMARY KEY (project_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_invitations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('editor', 'viewer')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'revoked', 'expired')),
+    token_hash TEXT NOT NULL UNIQUE,
+    invited_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    accepted_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    accepted_at TEXT,
+    revoked_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS shared_project_items (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('task', 'decision', 'artifact', 'memory')),
+    title TEXT NOT NULL,
+    content_json TEXT NOT NULL DEFAULT '{}',
+    source_type TEXT,
+    source_id TEXT,
+    revision INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS project_audit_events (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    actor_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS chat_read_states (
+    thread_id TEXT NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    last_read_message_id TEXT,
+    last_read_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (thread_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -3529,6 +3935,7 @@ CREATE TABLE IF NOT EXISTS messages (
     error TEXT,
     provider TEXT,
     model TEXT,
+    author_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
     artifacts_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -3943,6 +4350,52 @@ def _extension_proposal_payload(row: sqlite3.Row) -> dict:
         "installed_at": row["installed_at"],
         "created_at": str(row["created_at"]),
         "updated_at": str(row["updated_at"]),
+    }
+
+
+def _project_invitation_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "project_id": str(row["project_id"]),
+        "email": str(row["email"]),
+        "role": str(row["role"]),
+        "status": str(row["status"]),
+        "invited_by": str(row["invited_by"]),
+        "expires_at": str(row["expires_at"]),
+        "accepted_by": row["accepted_by"],
+        "accepted_at": row["accepted_at"],
+        "revoked_at": row["revoked_at"],
+        "created_at": str(row["created_at"]),
+    }
+
+
+def _shared_project_item_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "project_id": str(row["project_id"]),
+        "created_by": str(row["created_by"]),
+        "kind": str(row["kind"]),
+        "title": str(row["title"]),
+        "content": _load_json_dict(row["content_json"]),
+        "source_type": row["source_type"],
+        "source_id": row["source_id"],
+        "revision": int(row["revision"]),
+        "status": str(row["status"]),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def _project_audit_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "project_id": str(row["project_id"]),
+        "actor_user_id": str(row["actor_user_id"]),
+        "action": str(row["action"]),
+        "entity_type": str(row["entity_type"]),
+        "entity_id": row["entity_id"],
+        "details": _load_json_dict(row["details_json"]),
+        "created_at": str(row["created_at"]),
     }
 
 
