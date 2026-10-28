@@ -69,6 +69,55 @@ class PermissionGrantCreateRequest(BaseModel):
     expires_in_minutes: int = Field(default=30, ge=1, le=1440)
 
 
+class ExtensionProposalCreateRequest(BaseModel):
+    kind: str = Field(..., pattern="^(skill|tool)$")
+    name: str = Field(..., min_length=2, max_length=64, pattern="^[a-z][a-z0-9_]+$")
+    version: str = Field(..., pattern=r"^\d+\.\d+\.\d+$")
+    description: str = Field(..., min_length=3, max_length=500)
+    manifest: dict = Field(default_factory=dict)
+    permissions: list[dict] = Field(default_factory=list)
+    threat_model: str = Field(..., min_length=20, max_length=4000)
+    source_code: str = Field(default="", max_length=32000)
+    skill_markdown: str = Field(default="", max_length=32000)
+    tests: list[dict] = Field(default_factory=list, max_length=50)
+
+
+class ExtensionProposalItem(BaseModel):
+    id: str
+    user_id: str
+    kind: str
+    name: str
+    version: str
+    description: str
+    manifest: dict = Field(default_factory=dict)
+    permissions: list[dict] = Field(default_factory=list)
+    threat_model: str
+    source_code: str = ""
+    skill_markdown: str = ""
+    tests: list[dict] = Field(default_factory=list)
+    checks: list[dict] = Field(default_factory=list)
+    diff: str = ""
+    status: str
+    installed_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class ExtensionInstallRequest(BaseModel):
+    version: str = Field(..., pattern=r"^\d+\.\d+\.\d+$")
+
+
+class ExtensionInstallResponse(BaseModel):
+    status: str
+    proposal: ExtensionProposalItem | None = None
+    approval_id: str | None = None
+    message: str = ""
+
+
+class ExtensionRollbackRequest(BaseModel):
+    version: str = Field(..., pattern=r"^\d+\.\d+\.\d+$")
+
+
 class OpenWorkspaceResponse(BaseModel):
     result: str
 
@@ -639,6 +688,7 @@ class BootstrapResponse(BaseModel):
     action_logs: list[ActionLogItem]
     approval_requests: list[ApprovalRequestItem] = Field(default_factory=list)
     permission_grants: list[PermissionGrantItem] = Field(default_factory=list)
+    extension_proposals: list[ExtensionProposalItem] = Field(default_factory=list)
     connectors: list[ConnectorItem] = Field(default_factory=list)
     security: SecuritySettingsResponse
     workspace_files: list[WorkspaceFileItem]

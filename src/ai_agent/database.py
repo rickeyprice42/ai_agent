@@ -3006,6 +3006,137 @@ class AvelinDatabase:
             )
         return logs
 
+    def create_extension_proposal(
+        self,
+        user_id: str,
+        *,
+        kind: str,
+        name: str,
+        version: str,
+        description: str,
+        manifest: dict,
+        permissions: list[dict],
+        threat_model: str,
+        source_code: str = "",
+        skill_markdown: str = "",
+        tests: list[dict] | None = None,
+        checks: list[dict] | None = None,
+        diff: str = "",
+        status: str = "draft",
+    ) -> dict:
+        self.ensure_user_defaults(user_id)
+        proposal_id = str(uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO extension_proposals (
+                    id, user_id, kind, name, version, description, manifest_json,
+                    permissions_json, threat_model, source_code, skill_markdown,
+                    tests_json, checks_json, diff_text, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    proposal_id, user_id, kind, name, version, description,
+                    json.dumps(manifest, ensure_ascii=False, sort_keys=True),
+                    json.dumps(permissions, ensure_ascii=False, sort_keys=True),
+                    threat_model, source_code, skill_markdown,
+                    json.dumps(tests or [], ensure_ascii=False, sort_keys=True),
+                    json.dumps(checks or [], ensure_ascii=False, sort_keys=True),
+                    diff, status,
+                ),
+            )
+        return self.get_extension_proposal(user_id, proposal_id) or {}
+
+    def get_extension_proposal(self, user_id: str, proposal_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM extension_proposals WHERE id = ? AND user_id = ?",
+                (proposal_id, user_id),
+            ).fetchone()
+        return _extension_proposal_payload(row) if row is not None else None
+
+    def list_extension_proposals(self, user_id: str, limit: int = 100) -> list[dict]:
+        self.ensure_user_defaults(user_id)
+        safe_limit = max(1, min(int(limit), 200))
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM extension_proposals WHERE user_id = ?
+                   ORDER BY created_at DESC, rowid DESC LIMIT ?""",
+                (user_id, safe_limit),
+            ).fetchall()
+        return [_extension_proposal_payload(row) for row in rows]
+
+    def update_extension_proposal(
+        self,
+        user_id: str,
+        proposal_id: str,
+        *,
+        status: str | None = None,
+        checks: list[dict] | None = None,
+    ) -> dict | None:
+        if self.get_extension_proposal(user_id, proposal_id) is None:
+            return None
+        assignments = ["updated_at = CURRENT_TIMESTAMP"]
+        values: list[object] = []
+        if status is not None:
+            assignments.append("status = ?")
+            values.append(status)
+        if checks is not None:
+            assignments.append("checks_json = ?")
+            values.append(json.dumps(checks, ensure_ascii=False, sort_keys=True))
+        values.extend([proposal_id, user_id])
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE extension_proposals SET {', '.join(assignments)} WHERE id = ? AND user_id = ?",
+                values,
+            )
+        return self.get_extension_proposal(user_id, proposal_id)
+
+    def activate_extension_version(self, user_id: str, proposal_id: str) -> dict | None:
+        proposal = self.get_extension_proposal(user_id, proposal_id)
+        if proposal is None:
+            return None
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE extension_proposals SET status = 'superseded', updated_at = CURRENT_TIMESTAMP
+                   WHERE user_id = ? AND name = ? AND status = 'installed' AND id <> ?""",
+                (user_id, proposal["name"], proposal_id),
+            )
+            connection.execute(
+                """UPDATE extension_proposals
+                   SET status = 'installed', installed_at = COALESCE(installed_at, CURRENT_TIMESTAMP),
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND user_id = ?""",
+                (proposal_id, user_id),
+            )
+        return self.get_extension_proposal(user_id, proposal_id)
+
+    def disable_extension(self, user_id: str, name: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM extension_proposals
+                   WHERE user_id = ? AND name = ? AND status = 'installed'
+                   ORDER BY installed_at DESC, created_at DESC LIMIT 1""",
+                (user_id, name),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE extension_proposals SET status = 'disabled', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (row["id"],),
+            )
+        return self.get_extension_proposal(user_id, str(row["id"]))
+
+    def installed_extensions(self, user_id: str) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM extension_proposals
+                   WHERE user_id = ? AND status = 'installed'
+                   ORDER BY name, installed_at DESC""",
+                (user_id,),
+            ).fetchall()
+        return [_extension_proposal_payload(row) for row in rows]
+
     def create_approval_request(
         self,
         user_id: str,
@@ -3689,6 +3820,28 @@ CREATE TABLE IF NOT EXISTS connector_settings (
     PRIMARY KEY (user_id, connector_id)
 );
 
+CREATE TABLE IF NOT EXISTS extension_proposals (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('skill', 'tool')),
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    manifest_json TEXT NOT NULL DEFAULT '{}',
+    permissions_json TEXT NOT NULL DEFAULT '[]',
+    threat_model TEXT NOT NULL DEFAULT '',
+    source_code TEXT NOT NULL DEFAULT '',
+    skill_markdown TEXT NOT NULL DEFAULT '',
+    tests_json TEXT NOT NULL DEFAULT '[]',
+    checks_json TEXT NOT NULL DEFAULT '[]',
+    diff_text TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    installed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, name, version)
+);
+
 CREATE TABLE IF NOT EXISTS approval_requests (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -3757,6 +3910,7 @@ CREATE INDEX IF NOT EXISTS idx_automations_due ON automations(status, next_run_a
 CREATE INDEX IF NOT EXISTS idx_automations_user_status ON automations(user_id, status, next_run_at);
 CREATE INDEX IF NOT EXISTS idx_automation_runs_automation ON automation_runs(automation_id, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_action_logs_user_id ON action_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_extensions_user_status ON extension_proposals(user_id, status, name);
 CREATE INDEX IF NOT EXISTS idx_approvals_user_status ON approval_requests(user_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_approvals_step ON approval_requests(user_id, step_id, status);
 CREATE INDEX IF NOT EXISTS idx_permission_grants_user_status ON permission_grants(user_id, status, expires_at);
@@ -3767,6 +3921,29 @@ def _memory_search_prefix(term: str) -> str:
     if len(term) <= 4:
         return term
     return term[:5] if term.isascii() else term[:4]
+
+
+def _extension_proposal_payload(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "kind": str(row["kind"]),
+        "name": str(row["name"]),
+        "version": str(row["version"]),
+        "description": str(row["description"]),
+        "manifest": _load_json_dict(row["manifest_json"]),
+        "permissions": _load_json_list(row["permissions_json"]),
+        "threat_model": str(row["threat_model"]),
+        "source_code": str(row["source_code"]),
+        "skill_markdown": str(row["skill_markdown"]),
+        "tests": _load_json_list(row["tests_json"]),
+        "checks": _load_json_list(row["checks_json"]),
+        "diff": str(row["diff_text"]),
+        "status": str(row["status"]),
+        "installed_at": row["installed_at"],
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
 
 
 def _approval_request_payload(row: sqlite3.Row) -> dict:

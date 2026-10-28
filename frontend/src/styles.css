@@ -487,6 +487,43 @@ button {
   border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
 }
 
+.factory-source,
+.factory-diff {
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
+.factory-source {
+  min-height: 150px;
+}
+
+.factory-checks {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.75rem 0;
+}
+
+.factory-checks small {
+  display: block;
+}
+
+.factory-check-pass {
+  color: var(--success, #3aa981);
+}
+
+.factory-check-fail {
+  color: var(--danger, #d95d67);
+}
+
+.factory-diff {
+  max-height: 260px;
+  overflow: auto;
+  padding: 0.8rem;
+  border-radius: 10px;
+  background: var(--surface-strong, rgba(0, 0, 0, 0.18));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .security-stop-banner strong {
   color: var(--danger);
 }

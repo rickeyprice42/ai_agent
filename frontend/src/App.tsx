@@ -11,6 +11,7 @@ import {
   controlAutomation,
   controlTask,
   createAutomation,
+  createExtensionProposal,
   createDailyTaskReport,
   createRunReport,
   createPersonalMemory,
@@ -22,6 +23,7 @@ import {
   deletePersonalMemory,
   deleteProject,
   deleteChatThread,
+  disableExtension,
   downloadWorkspaceFile,
   executeNextStep,
   exportAgentMemory,
@@ -34,6 +36,7 @@ import {
   fetchMemorySummary,
   fetchPersonalMemory,
   fetchModelProviders,
+  installExtension,
   login as authLogin,
   markNotificationRead,
   logout as authLogout,
@@ -41,6 +44,7 @@ import {
   register as authRegister,
   rememberChat,
   rollbackContextCompaction,
+  rollbackExtension,
   restoreProject,
   revokePermissionGrant,
   sendMessageStream,
@@ -114,6 +118,7 @@ const EMPTY_BOOTSTRAP: BootstrapPayload = {
   action_logs: [],
   approval_requests: [],
   permission_grants: [],
+  extension_proposals: [],
   connectors: [],
   security: { emergency_stop: false, updated_at: "" },
   workspace_files: [],
@@ -272,6 +277,14 @@ export default function App() {
   const [automationTime, setAutomationTime] = useState("09:00");
   const [approvingStepId, setApprovingStepId] = useState<string | null>(null);
   const [updatingConnectorId, setUpdatingConnectorId] = useState<string | null>(null);
+  const [extensionBusyId, setExtensionBusyId] = useState<string | null>(null);
+  const [extensionKind, setExtensionKind] = useState<"skill" | "tool">("skill");
+  const [extensionName, setExtensionName] = useState("meeting_summary");
+  const [extensionVersion, setExtensionVersion] = useState("1.0.0");
+  const [extensionDescription, setExtensionDescription] = useState("Повторяемая процедура подготовки сводки встречи.");
+  const [extensionThreatModel, setExtensionThreatModel] = useState("Расширение не получает доступ к сети, файлам или секретам; результат проверяет пользователь.");
+  const [extensionContent, setExtensionContent] = useState("# Meeting summary\n\nВыдели решения, ответственных и сроки. Не выполняй внешние действия.\n");
+  const [extensionTests, setExtensionTests] = useState('[{"input":{"name":"Avelin"},"expected":{"message":"Hello Avelin"}}]');
   const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false);
   const [isClearingMemory, setIsClearingMemory] = useState(false);
   const [isExportingMemory, setIsExportingMemory] = useState(false);
@@ -1131,6 +1144,87 @@ export default function App() {
     }
   }
 
+  async function handleCreateExtension(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!authToken || extensionBusyId) return;
+    setExtensionBusyId("create");
+    setError(null);
+    try {
+      const tests = extensionKind === "tool" ? JSON.parse(extensionTests) : [];
+      if (!Array.isArray(tests)) throw new Error("Contract tests должны быть JSON-массивом.");
+      await createExtensionProposal({
+        kind: extensionKind,
+        name: extensionName.trim(),
+        version: extensionVersion.trim(),
+        description: extensionDescription.trim(),
+        manifest: {
+          name: extensionName.trim(),
+          input_schema: { type: "object", additionalProperties: true },
+          output_schema: {},
+          capabilities: [extensionName.trim()],
+          timeout_seconds: 5,
+          idempotent: true
+        },
+        permissions: [],
+        threat_model: extensionThreatModel.trim(),
+        source_code: extensionKind === "tool" ? extensionContent : "",
+        skill_markdown: extensionKind === "skill" ? extensionContent : "",
+        tests
+      }, authToken);
+      await refreshBootstrap(false, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось проверить расширение.");
+    } finally {
+      setExtensionBusyId(null);
+    }
+  }
+
+  async function handleInstallExtension(proposalId: string, version: string) {
+    if (!authToken || extensionBusyId) return;
+    setExtensionBusyId(proposalId);
+    setError(null);
+    try {
+      const result = await installExtension(proposalId, version, authToken);
+      if (result.status === "waiting_approval") {
+        setError("Установка подготовлена. Проверь разрешение в Security, разреши один раз и нажми «Установить» повторно.");
+      }
+      await refreshBootstrap(false, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось установить расширение.");
+    } finally {
+      setExtensionBusyId(null);
+    }
+  }
+
+  async function handleDisableExtension(name: string) {
+    if (!authToken || extensionBusyId) return;
+    setExtensionBusyId(name);
+    try {
+      await disableExtension(name, authToken);
+      await refreshBootstrap(false, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось отключить расширение.");
+    } finally {
+      setExtensionBusyId(null);
+    }
+  }
+
+  async function handleRollbackExtension(name: string, version: string) {
+    if (!authToken || extensionBusyId) return;
+    setExtensionBusyId(`${name}@${version}`);
+    try {
+      const result = await rollbackExtension(name, version, authToken);
+      if (result.status === "waiting_approval") {
+        setError("Откат ожидает одноразового разрешения в Security. После разрешения нажми «Откатить» повторно.");
+      }
+      await refreshBootstrap(false, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось откатить расширение.");
+    } finally {
+      setExtensionBusyId(null);
+    }
+  }
+
   async function handleRevokeGrant(grantId: string) {
     if (!authToken) return;
     try {
@@ -1939,6 +2033,90 @@ export default function App() {
                 </article>
               ))
             )}
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Tool Factory</p>
+              <h3>Skills и локальные инструменты</h3>
+            </div>
+            <span className="muted">{bootstrap.extension_proposals.filter((item) => item.status === "installed").length} установлено</span>
+          </div>
+          <p className="muted">Сначала Avelin ищет готовый tool/connector/Skill. Новый код проходит статическую проверку и contract tests в изолированном процессе; установка требует отдельного approval.</p>
+          <form className="automation-form" onSubmit={handleCreateExtension}>
+            <label>
+              Тип
+              <select value={extensionKind} onChange={(event) => {
+                const kind = event.target.value as "skill" | "tool";
+                setExtensionKind(kind);
+                setExtensionContent(kind === "skill" ? "# New Skill\n\nОпиши повторяемую процедуру без исполняемого кода.\n" : 'def run(arguments):\n    return {"message": "Hello " + arguments["name"]}\n');
+              }}>
+                <option value="skill">Skill без кода</option>
+                <option value="tool">Sandboxed tool</option>
+              </select>
+            </label>
+            <label>
+              Имя
+              <input value={extensionName} onChange={(event) => setExtensionName(event.target.value)} pattern="[a-z][a-z0-9_]+" required />
+            </label>
+            <label>
+              Версия
+              <input value={extensionVersion} onChange={(event) => setExtensionVersion(event.target.value)} pattern="\d+\.\d+\.\d+" required />
+            </label>
+            <label className="automation-prompt-field">
+              Описание
+              <input value={extensionDescription} onChange={(event) => setExtensionDescription(event.target.value)} required />
+            </label>
+            <label className="automation-prompt-field">
+              Threat model
+              <textarea value={extensionThreatModel} onChange={(event) => setExtensionThreatModel(event.target.value)} minLength={20} required />
+            </label>
+            <label className="automation-prompt-field">
+              {extensionKind === "skill" ? "SKILL.md" : "Python: только def run(arguments), без imports/calls/attributes"}
+              <textarea className="factory-source" value={extensionContent} onChange={(event) => setExtensionContent(event.target.value)} required />
+            </label>
+            {extensionKind === "tool" ? (
+              <label className="automation-prompt-field">
+                Contract tests (JSON)
+                <textarea value={extensionTests} onChange={(event) => setExtensionTests(event.target.value)} required />
+              </label>
+            ) : null}
+            <button className="primary-button" disabled={extensionBusyId === "create"} type="submit">
+              {extensionBusyId === "create" ? "Проверяю…" : "Создать proposal и проверить"}
+            </button>
+          </form>
+          <div className="task-list factory-list">
+            {bootstrap.extension_proposals.length === 0 ? <p className="muted">Proposal пока нет.</p> : bootstrap.extension_proposals.map((proposal) => (
+              <article className="task-item" key={proposal.id}>
+                <div className="task-item-head">
+                  <strong>{proposal.name} · {proposal.version}</strong>
+                  <span className={`state-badge state-${proposal.status}`}>{proposal.kind} · {proposal.status}</span>
+                </div>
+                <p>{proposal.description}</p>
+                <p className="muted">Permissions: {proposal.permissions.length ? JSON.stringify(proposal.permissions) : "нет"}</p>
+                <div className="factory-checks">
+                  {proposal.checks.map((check) => (
+                    <small key={check.name} className={check.passed ? "factory-check-pass" : "factory-check-fail"}>
+                      {check.passed ? "PASS" : "FAIL"} · {check.name}: {check.detail}
+                    </small>
+                  ))}
+                </div>
+                {proposal.diff ? <details><summary>Показать diff</summary><pre className="factory-diff">{proposal.diff}</pre></details> : null}
+                <div className="memory-actions">
+                  {proposal.status === "ready" ? (
+                    <button className="mini-button" disabled={extensionBusyId === proposal.id} onClick={() => void handleInstallExtension(proposal.id, proposal.version)} type="button">Установить</button>
+                  ) : null}
+                  {proposal.status === "installed" ? (
+                    <button className="mini-button mini-button-danger" disabled={extensionBusyId === proposal.name} onClick={() => void handleDisableExtension(proposal.name)} type="button">Отключить</button>
+                  ) : null}
+                  {["superseded", "disabled"].includes(proposal.status) ? (
+                    <button className="mini-button" disabled={extensionBusyId === `${proposal.name}@${proposal.version}`} onClick={() => void handleRollbackExtension(proposal.name, proposal.version)} type="button">Откатить к этой версии</button>
+                  ) : null}
+                </div>
+              </article>
+            ))}
           </div>
         </section>
 

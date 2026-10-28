@@ -4,6 +4,8 @@ import type {
   ChatThreadItem,
   ContextCompactionItem,
   ContextCompactionReview,
+  ExtensionInstallResult,
+  ExtensionProposalItem,
   AutonomousMemorySettings,
   MemoryOverview,
   MemorySummary,
@@ -626,6 +628,59 @@ export async function revokePermissionGrant(grantId: string, token: string): Pro
   if (!response.ok) {
     throw await parseError(response, "Не удалось отозвать разрешение.");
   }
+}
+
+export async function createExtensionProposal(
+  payload: {
+    kind: "skill" | "tool";
+    name: string;
+    version: string;
+    description: string;
+    manifest: Record<string, unknown>;
+    permissions: Array<Record<string, unknown>>;
+    threat_model: string;
+    source_code: string;
+    skill_markdown: string;
+    tests: Array<Record<string, unknown>>;
+  },
+  token: string
+): Promise<ExtensionProposalItem> {
+  const response = await fetch("/api/extensions", {
+    method: "POST",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось проверить extension proposal.");
+  return response.json();
+}
+
+export async function installExtension(proposalId: string, version: string, token: string): Promise<ExtensionInstallResult> {
+  const response = await fetch(`/api/extensions/${encodeURIComponent(proposalId)}/install`, {
+    method: "POST",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ version })
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось установить расширение.");
+  return response.json();
+}
+
+export async function disableExtension(name: string, token: string): Promise<ExtensionProposalItem> {
+  const response = await fetch(`/api/extensions/${encodeURIComponent(name)}/disable`, {
+    method: "POST",
+    headers: authHeaders(token)
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось отключить расширение.");
+  return response.json();
+}
+
+export async function rollbackExtension(name: string, version: string, token: string): Promise<ExtensionInstallResult> {
+  const response = await fetch(`/api/extensions/${encodeURIComponent(name)}/rollback`, {
+    method: "POST",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ version })
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось откатить расширение.");
+  return response.json();
 }
 
 export async function openWorkspaceFolder(token: string): Promise<{ result: string }> {

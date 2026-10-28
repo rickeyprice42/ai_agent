@@ -260,6 +260,21 @@ Project inspection не запускает код. Тесты, lint, typecheck �
 покрывают status, diff, log, branches и ref inspection. `stage`, `commit` и создание
 локальной ветки требуют exact approval; автоматического `push` в tool pack нет.
 
+## Tool Factory и Skills
+
+Перед созданием расширения `tool_search` ищет совпадения среди built-ins, connector-tools
+и установленных Skills. Инструктивные повторяемые процедуры сохраняются как versioned
+`SKILL.md` без Python. Исполняемый tool допускает только маленький deny-by-default subset
+Python (`def run(arguments)` без imports, calls и attribute access), проходит static,
+dependency, permission и contract checks в отдельном изолированном процессе.
+
+UI показывает manifest, threat model, permissions, результаты каждой проверки и diff с
+предыдущей версией. Регистрация происходит только после exact one-time approval для
+конкретных `proposal_id + version`; изменение версии требует нового решения. Установленную
+версию можно отключить, а предыдущую — восстановить через такой же approval-поток.
+API: `GET/POST /api/extensions`, `POST /api/extensions/{id}/install`,
+`POST /api/extensions/{name}/disable` и `POST /api/extensions/{name}/rollback`.
+
 ## Durable task execution
 
 Каждая задача получает отдельный `task_run` со стабильными состояниями `queued`,

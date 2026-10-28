@@ -38,6 +38,11 @@ from backend.models import (
     ContextTraceResponse,
     ExecuteStepResponse,
     EmergencyStopRequest,
+    ExtensionInstallRequest,
+    ExtensionInstallResponse,
+    ExtensionProposalCreateRequest,
+    ExtensionProposalItem,
+    ExtensionRollbackRequest,
     MemoryOverviewResponse,
     MemoryExtractionTraceResponse,
     MemoryRetrievalTraceResponse,
@@ -964,6 +969,65 @@ def revoke_permission_grant(
         return PermissionGrantItem(**agent_service.revoke_permission_grant(user["id"], grant_id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/extensions", response_model=list[ExtensionProposalItem])
+def extension_proposals(
+    user: dict[str, str] = Depends(current_user),
+) -> list[ExtensionProposalItem]:
+    return [ExtensionProposalItem(**item) for item in agent_service.extension_proposals(user["id"])]
+
+
+@router.post("/extensions", response_model=ExtensionProposalItem)
+def create_extension_proposal(
+    payload: ExtensionProposalCreateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ExtensionProposalItem:
+    try:
+        return ExtensionProposalItem(
+            **agent_service.create_extension_proposal(user["id"], **payload.model_dump())
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/extensions/{proposal_id}/install", response_model=ExtensionInstallResponse)
+def install_extension(
+    proposal_id: str,
+    payload: ExtensionInstallRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ExtensionInstallResponse:
+    try:
+        return ExtensionInstallResponse(
+            **agent_service.install_extension(user["id"], proposal_id, payload.version)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/extensions/{name}/disable", response_model=ExtensionProposalItem)
+def disable_extension(
+    name: str,
+    user: dict[str, str] = Depends(current_user),
+) -> ExtensionProposalItem:
+    try:
+        return ExtensionProposalItem(**agent_service.disable_extension(user["id"], name))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/extensions/{name}/rollback", response_model=ExtensionInstallResponse)
+def rollback_extension(
+    name: str,
+    payload: ExtensionRollbackRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ExtensionInstallResponse:
+    try:
+        return ExtensionInstallResponse(
+            **agent_service.rollback_extension(user["id"], name, payload.version)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/workspace/open", response_model=OpenWorkspaceResponse)

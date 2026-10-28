@@ -97,7 +97,9 @@
    - [DONE] Добавить проверку качества презентации: нет пустых слайдов, текст не слишком длинный, у изображений есть источник, структура соответствует ТЗ, файл открывается как валидный `.pptx`.
    - Позже расширить до редактирования существующих презентаций: прочитать `.pptx`, извлечь структуру, заменить текст/изображения, добавить или переставить слайды без разрушения шаблона.
    - Инструменты связаны с первым execution loop для выполнения шагов задач.
-   - Далее: Tool Factory/Skills с ручным approval, MCP/Connector слой и расширение presentation/research сценариев.
+   - [DONE] Tool Factory/Skills: поиск дублей, versioned manifests, threat model, статические/security/contract проверки, отдельный sandbox, diff и exact manual approval перед установкой.
+   - [DONE] Instruction-only процедуры устанавливаются как Skills без Python; tools поддерживают disable, versioned update и rollback.
+   - Далее: расширение presentation/research сценариев и production hardening sandbox на уровне OS/container.
    - Результат: Avelin превращается из "болтуна" в исполнителя.
 
 12. [DONE] Task System: сердце Avelin

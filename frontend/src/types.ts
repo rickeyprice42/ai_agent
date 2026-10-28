@@ -68,6 +68,7 @@ export type BootstrapPayload = {
   action_logs: ActionLogItem[];
   approval_requests: ApprovalRequestItem[];
   permission_grants: PermissionGrantItem[];
+  extension_proposals: ExtensionProposalItem[];
   connectors: ConnectorItem[];
   security: SecuritySettings;
   workspace_files: WorkspaceFileItem[];
@@ -99,6 +100,33 @@ export type PermissionGrantItem = {
 export type SecuritySettings = {
   emergency_stop: boolean;
   updated_at: string;
+};
+
+export type ExtensionProposalItem = {
+  id: string;
+  kind: "skill" | "tool";
+  name: string;
+  version: string;
+  description: string;
+  manifest: Record<string, unknown>;
+  permissions: Array<Record<string, unknown>>;
+  threat_model: string;
+  source_code: string;
+  skill_markdown: string;
+  tests: Array<Record<string, unknown>>;
+  checks: Array<{ name: string; passed: boolean; detail: string }>;
+  diff: string;
+  status: string;
+  installed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ExtensionInstallResult = {
+  status: string;
+  proposal?: ExtensionProposalItem | null;
+  approval_id?: string | null;
+  message: string;
 };
 
 export type ConnectorItem = {

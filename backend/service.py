@@ -486,6 +486,61 @@ class AgentService:
         )
         return result
 
+    def extension_proposals(self, user_id: str) -> list[dict]:
+        return self.database.list_extension_proposals(user_id)
+
+    def create_extension_proposal(self, user_id: str, **payload) -> dict:
+        agent = self.agent_for_user(user_id)
+        proposal = agent.tool_factory.create_proposal(**payload)
+        agent.action_log.record(
+            "tool_factory_review",
+            proposal["status"],
+            {"proposal_id": proposal["id"], "name": proposal["name"], "version": proposal["version"]},
+            "Extension proposal reviewed by deterministic checks.",
+        )
+        return proposal
+
+    def install_extension(self, user_id: str, proposal_id: str, version: str) -> dict:
+        agent = self.agent_for_user(user_id)
+        result = agent.tool_factory.request_install(proposal_id, version)
+        payload = {
+            "status": result.status,
+            "proposal": result.proposal,
+            "approval_id": result.approval_id,
+            "message": result.message,
+        }
+        if result.status == "installed":
+            agent.action_log.record(
+                "install_extension",
+                "completed",
+                {"proposal_id": proposal_id, "version": version},
+                result.message,
+            )
+            self._drop_user_agents(user_id)
+        return payload
+
+    def disable_extension(self, user_id: str, name: str) -> dict:
+        agent = self.agent_for_user(user_id)
+        result = agent.tool_factory.disable(name)
+        agent.action_log.record(
+            "disable_extension", "completed", {"name": name}, "Extension disabled; version remains recoverable."
+        )
+        self._drop_user_agents(user_id)
+        return result
+
+    def rollback_extension(self, user_id: str, name: str, version: str) -> dict:
+        agent = self.agent_for_user(user_id)
+        result = agent.tool_factory.rollback(name, version)
+        payload = {
+            "status": result.status,
+            "proposal": result.proposal,
+            "approval_id": result.approval_id,
+            "message": result.message,
+        }
+        if result.status == "installed":
+            self._drop_user_agents(user_id)
+        return payload
+
     def open_workspace_folder(self, user_id: str) -> str:
         return self.agent_for_user(user_id).files.open_folder()
 
@@ -727,6 +782,7 @@ class AgentService:
             "action_logs": [_action_log_to_payload(log) for log in agent.action_log.recent(limit=20)],
             "approval_requests": self.database.list_approval_requests(user_id, status="pending"),
             "permission_grants": self.database.list_permission_grants(user_id, active_only=True),
+            "extension_proposals": self.database.list_extension_proposals(user_id),
             "connectors": agent.connectors.list(),
             "security": self.database.security_settings(user_id),
             "workspace_files": [_workspace_file_to_payload(file) for file in agent.files.list_files(limit=20)],

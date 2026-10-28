@@ -34,6 +34,7 @@ from ai_agent.tools.http import HttpSandbox
 from ai_agent.tools.research import BrowserResearchReader
 from ai_agent.tools.presentations import PresentationSandbox
 from ai_agent.tools.shell import ShellSandbox
+from ai_agent.tool_factory import ToolFactory
 from ai_agent.types import Message
 from ai_agent.types import TaskStep
 
@@ -162,6 +163,12 @@ class Agent:
             self.desktop,
             self.executor,
         )
+        self.tool_factory = ToolFactory(
+            self.memory.database,
+            user_id,
+            self.tools,
+            self.policy,
+        )
         self.provider = self._build_provider()
 
     def _build_provider(self):
@@ -185,7 +192,7 @@ class Agent:
             try:
                 tool_definitions = self.tools.list_for_model()
                 context = self.context.build(
-                    self.settings.system_prompt,
+                    self.tool_factory.system_prompt(self.settings.system_prompt),
                     model=self.settings.model_name,
                     tools=tool_definitions,
                 )
@@ -275,7 +282,7 @@ class Agent:
             for attempt in range(4):
                 tool_definitions = self.tools.list_for_model()
                 context = self.context.build(
-                    self.settings.system_prompt,
+                    self.tool_factory.system_prompt(self.settings.system_prompt),
                     model=self.settings.model_name,
                     tools=tool_definitions,
                 )
