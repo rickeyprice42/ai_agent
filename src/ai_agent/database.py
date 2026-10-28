@@ -3213,6 +3213,27 @@ class AvelinDatabase:
                 )
         return self.security_settings(user_id)
 
+    def connector_enabled(self, user_id: str, connector_id: str, *, default: bool = True) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT enabled FROM connector_settings WHERE user_id = ? AND connector_id = ?",
+                (user_id, connector_id),
+            ).fetchone()
+        return default if row is None else bool(row["enabled"])
+
+    def set_connector_enabled(self, user_id: str, connector_id: str, enabled: bool) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO connector_settings (user_id, connector_id, enabled, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, connector_id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (user_id, connector_id, int(enabled)),
+            )
+
     def create_permission_grant(
         self,
         user_id: str,
@@ -3658,6 +3679,14 @@ CREATE TABLE IF NOT EXISTS security_settings (
     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     emergency_stop INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS connector_settings (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    connector_id TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, connector_id)
 );
 
 CREATE TABLE IF NOT EXISTS approval_requests (

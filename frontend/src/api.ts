@@ -13,6 +13,7 @@ import type {
   ProjectItem,
   UserProfile
 } from "./types";
+import type { ConnectorItem } from "./types";
 
 function authHeaders(token: string): HeadersInit {
   return {
@@ -708,6 +709,22 @@ export async function updateModelSettings(
   });
   if (!response.ok) {
     throw await parseError(response, "Не удалось обновить модель.");
+  }
+  return response.json();
+}
+
+export async function setConnectorEnabled(
+  connectorId: string,
+  enabled: boolean,
+  token: string
+): Promise<ConnectorItem> {
+  const response = await fetch(`/api/connectors/${encodeURIComponent(connectorId)}`, {
+    method: "PUT",
+    headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled })
+  });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось изменить connector.");
   }
   return response.json();
 }

@@ -321,3 +321,10 @@
    - [DONE] Добавлен воспроизводимый Ollama-раннер с измерением качества, задержки, скорости и пиковой VRAM.
    - [DONE] Задокументированы кандидаты, лицензии, ограничения и правила честного сравнения.
    - [DONE] Выполнены последовательные локальные прогоны на GTX 1650 Ti 4 ГБ: основной профиль `qwen3:4b-instruct`, быстрый резерв `qwen3:1.7b`.
+
+37. [DONE] MCP и Connector слой (AVE-53)
+   - [DONE] Добавлены Connector Registry/discovery и transport-neutral MCP lifecycle.
+   - [DONE] Внешние schemas/results адаптируются к Tool Registry с provenance и untrusted-data изоляцией.
+   - [DONE] Read-only вызовы разрешены policy, write/send требуют approval; добавлены scopes и rate limits.
+   - [DONE] Credentials остаются внутри transport и отсутствуют в model context, manifests, errors и логах.
+   - [DONE] Добавлены API/UI enable-disable и contract/security tests для двух тестовых источников.

@@ -73,6 +73,24 @@ class OpenWorkspaceResponse(BaseModel):
     result: str
 
 
+class ConnectorItem(BaseModel):
+    id: str
+    name: str
+    description: str
+    kind: str
+    enabled: bool
+    connected: bool
+    status: str
+    scopes: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    rate_limit_per_minute: int
+
+
+class ConnectorStateRequest(BaseModel):
+    enabled: bool
+
+
 class UserProfile(BaseModel):
     id: str
     email: str = ""
@@ -621,6 +639,7 @@ class BootstrapResponse(BaseModel):
     action_logs: list[ActionLogItem]
     approval_requests: list[ApprovalRequestItem] = Field(default_factory=list)
     permission_grants: list[PermissionGrantItem] = Field(default_factory=list)
+    connectors: list[ConnectorItem] = Field(default_factory=list)
     security: SecuritySettingsResponse
     workspace_files: list[WorkspaceFileItem]
     user: UserProfile

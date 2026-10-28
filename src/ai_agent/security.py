@@ -186,7 +186,7 @@ def redact_for_audit(value: Any, key: str = "") -> Any:
 
 
 def mark_untrusted_tool_output(tool_name: str, text: str) -> str:
-    if tool_name not in UNTRUSTED_TOOLS:
+    if tool_name not in UNTRUSTED_TOOLS and not tool_name.startswith("connector_"):
         return text
     if text.startswith("<untrusted_tool_output "):
         return text
@@ -218,7 +218,7 @@ def _scope_contains(granted: dict[str, Any], requested: dict[str, Any]) -> bool:
 
 
 def _attempts_secret_exfiltration(tool_name: str, arguments: dict[str, Any]) -> bool:
-    if tool_name not in {
+    if not tool_name.startswith("connector_") and tool_name not in {
         "http_request", "web_search", "research_read", "browser_read", "browser_interact",
         "analyze_image", "desktop_snapshot", "desktop_interact",
         "open_workspace_folder", "run_shell",

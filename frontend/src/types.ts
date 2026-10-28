@@ -68,6 +68,7 @@ export type BootstrapPayload = {
   action_logs: ActionLogItem[];
   approval_requests: ApprovalRequestItem[];
   permission_grants: PermissionGrantItem[];
+  connectors: ConnectorItem[];
   security: SecuritySettings;
   workspace_files: WorkspaceFileItem[];
   user: UserProfile;
@@ -98,6 +99,20 @@ export type PermissionGrantItem = {
 export type SecuritySettings = {
   emergency_stop: boolean;
   updated_at: string;
+};
+
+export type ConnectorItem = {
+  id: string;
+  name: string;
+  description: string;
+  kind: string;
+  enabled: boolean;
+  connected: boolean;
+  status: string;
+  scopes: string[];
+  capabilities: string[];
+  tools: string[];
+  rate_limit_per_minute: number;
 };
 
 export type TaskStepItem = {

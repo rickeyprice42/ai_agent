@@ -44,6 +44,7 @@ import {
   restoreProject,
   revokePermissionGrant,
   sendMessageStream,
+  setConnectorEnabled,
   setEmergencyStop,
   unarchiveChatThread,
   updateChatMemory,
@@ -113,6 +114,7 @@ const EMPTY_BOOTSTRAP: BootstrapPayload = {
   action_logs: [],
   approval_requests: [],
   permission_grants: [],
+  connectors: [],
   security: { emergency_stop: false, updated_at: "" },
   workspace_files: [],
   user: {
@@ -269,6 +271,7 @@ export default function App() {
   const [automationWeekday, setAutomationWeekday] = useState(0);
   const [automationTime, setAutomationTime] = useState("09:00");
   const [approvingStepId, setApprovingStepId] = useState<string | null>(null);
+  const [updatingConnectorId, setUpdatingConnectorId] = useState<string | null>(null);
   const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false);
   const [isClearingMemory, setIsClearingMemory] = useState(false);
   const [isExportingMemory, setIsExportingMemory] = useState(false);
@@ -1114,6 +1117,20 @@ export default function App() {
     }
   }
 
+  async function handleConnectorState(connectorId: string, enabled: boolean) {
+    if (!authToken || updatingConnectorId) return;
+    setUpdatingConnectorId(connectorId);
+    setError(null);
+    try {
+      await setConnectorEnabled(connectorId, enabled, authToken);
+      await refreshBootstrap(false, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось изменить connector.");
+    } finally {
+      setUpdatingConnectorId(null);
+    }
+  }
+
   async function handleRevokeGrant(grantId: string) {
     if (!authToken) return;
     try {
@@ -1689,6 +1706,41 @@ export default function App() {
               <span className="status-label">Вход</span>
               <strong>{currentUser.auth_provider}</strong>
             </div>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Connectors</p>
+              <h3>Внешние подключения</h3>
+            </div>
+            <span className="muted">{bootstrap.connectors.filter((item) => item.connected).length}/{bootstrap.connectors.length} подключено</span>
+          </div>
+          <p className="muted">Внешние данные считаются недоверенными. Отправка и другие side effects всегда требуют отдельного approval.</p>
+          <div className="task-list security-grants">
+            {bootstrap.connectors.length === 0 ? (
+              <p className="muted">Connectors ещё не настроены.</p>
+            ) : bootstrap.connectors.map((connector) => (
+              <article className="task-item" key={connector.id}>
+                <div className="task-item-head">
+                  <strong>{connector.name}</strong>
+                  <span className={`state-badge state-${connector.connected ? "completed" : "blocked"}`}>{connector.status}</span>
+                </div>
+                <p>{connector.description}</p>
+                <p className="muted">Scopes: {connector.scopes.join(", ") || "нет"}</p>
+                <p className="muted">Capabilities: {connector.capabilities.join(", ") || "нет"}</p>
+                <p className="muted">Tools: {connector.tools.join(", ") || "не обнаружены"}</p>
+                <button
+                  className={`mini-button ${connector.enabled ? "mini-button-danger" : ""}`}
+                  disabled={updatingConnectorId === connector.id}
+                  onClick={() => void handleConnectorState(connector.id, !connector.enabled)}
+                  type="button"
+                >
+                  {updatingConnectorId === connector.id ? "Обновляю..." : connector.enabled ? "Отключить" : "Подключить"}
+                </button>
+              </article>
+            ))}
           </div>
         </section>
 

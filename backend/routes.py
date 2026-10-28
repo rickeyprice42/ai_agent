@@ -28,6 +28,8 @@ from backend.models import (
     ClearMemoryRequest,
     ClearMemoryResponse,
     ClearChatResponse,
+    ConnectorItem,
+    ConnectorStateRequest,
     ChatRequest,
     ChatResponse,
     ChatMemoryResponse,
@@ -175,6 +177,28 @@ def tool_manifest(tool_name: str, user: dict[str, str] = Depends(current_user)) 
         return agent_service.tool_manifest(user["id"], tool_name)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/connectors", response_model=list[ConnectorItem])
+def connectors(
+    query: str = Query(default="", max_length=120),
+    user: dict[str, str] = Depends(current_user),
+) -> list[ConnectorItem]:
+    return [ConnectorItem(**item) for item in agent_service.connectors(user["id"], query)]
+
+
+@router.put("/connectors/{connector_id}", response_model=ConnectorItem)
+def update_connector(
+    connector_id: str,
+    payload: ConnectorStateRequest,
+    user: dict[str, str] = Depends(current_user),
+) -> ConnectorItem:
+    try:
+        return ConnectorItem(**agent_service.set_connector_enabled(user["id"], connector_id, payload.enabled))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/model-settings", response_model=ModelSettings)

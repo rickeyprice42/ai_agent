@@ -18,6 +18,7 @@ from ai_agent.automations import AutomationService
 from ai_agent.autonomous_memory import AutonomousMemoryEngine
 from ai_agent.chat_output import history_for_ui
 from ai_agent.config import Settings
+from ai_agent.connectors import ConnectorFailure, SAFE_FAILURE_MESSAGES
 from ai_agent.database import AvelinDatabase
 from ai_agent.task_reports import TaskReportService
 
@@ -68,17 +69,29 @@ class AgentService:
             default_model_name=self.settings.model_name,
         )
         self._agents: dict[tuple[str, str], Agent] = {}
+        self._connector_factories = []
 
     def agent_for_user(self, user_id: str, thread_id: str | None = None) -> Agent:
         active_thread = self.resolve_thread(user_id, thread_id)
         key = (user_id, active_thread["id"])
         if key not in self._agents:
-            self._agents[key] = Agent(
+            agent = Agent(
                 self.settings_for_user(user_id),
                 user_id=user_id,
                 thread_id=active_thread["id"],
             )
+            for factory in getattr(self, "_connector_factories", []):
+                client = factory(user_id)
+                enabled = self.database.connector_enabled(
+                    user_id, client.descriptor.connector_id, default=True
+                )
+                agent.connectors.register(client, enabled=enabled)
+            self._agents[key] = agent
         return self._agents[key]
+
+    def register_connector_factory(self, factory) -> None:
+        """Register a user-scoped client factory before agents are created."""
+        self._connector_factories.append(factory)
 
     def resolve_thread(self, user_id: str, thread_id: str | None = None) -> dict:
         self.database.ensure_user_defaults(user_id)
@@ -157,6 +170,21 @@ class AgentService:
 
     def tool_capabilities(self, user_id: str) -> dict[str, list[str]]:
         return self.agent_for_user(user_id).tools.capabilities()
+
+    def connectors(self, user_id: str, query: str = "") -> list[dict]:
+        registry = self.agent_for_user(user_id).connectors
+        return registry.search(query) if query.strip() else registry.list()
+
+    def set_connector_enabled(self, user_id: str, connector_id: str, enabled: bool) -> dict:
+        try:
+            result = self.agent_for_user(user_id).connectors.set_enabled(connector_id, enabled)
+        except KeyError as exc:
+            raise ValueError("Connector не найден.") from exc
+        except ConnectorFailure as exc:
+            message = SAFE_FAILURE_MESSAGES.get(exc.code, "Connector request failed.")
+            raise RuntimeError(f"{exc.code}: {message}") from exc
+        self.database.set_connector_enabled(user_id, connector_id, enabled)
+        return result
 
     def _normalized_model_settings(self, user_id: str) -> dict[str, str]:
         settings = self.database.get_model_settings(user_id)
@@ -699,6 +727,7 @@ class AgentService:
             "action_logs": [_action_log_to_payload(log) for log in agent.action_log.recent(limit=20)],
             "approval_requests": self.database.list_approval_requests(user_id, status="pending"),
             "permission_grants": self.database.list_permission_grants(user_id, active_only=True),
+            "connectors": agent.connectors.list(),
             "security": self.database.security_settings(user_id),
             "workspace_files": [_workspace_file_to_payload(file) for file in agent.files.list_files(limit=20)],
             "user": user,

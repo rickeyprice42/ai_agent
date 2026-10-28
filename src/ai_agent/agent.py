@@ -8,6 +8,7 @@ import re
 from ai_agent.action_log import ActionLogStore
 from ai_agent.autonomous_memory import AutonomousMemoryEngine
 from ai_agent.config import Settings
+from ai_agent.connectors import ConnectorRegistry
 from ai_agent.context import ContextBuilder
 from ai_agent.executor import ExecutionEngine
 from ai_agent.executor import _tool_status
@@ -142,6 +143,7 @@ class Agent:
             allow_pyautogui=settings.desktop_allow_pyautogui,
         )
         self.tools = ToolRegistry()
+        self.connectors = ConnectorRegistry(self.tools)
         self.policy = ToolPolicyEngine(self.memory.database, user_id)
         self.executor = ExecutionEngine(self.tasks, self.tools, self.action_log, self.policy)
         register_builtin_tools(
