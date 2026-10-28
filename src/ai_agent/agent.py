@@ -30,6 +30,7 @@ from ai_agent.tools.documents import DocumentSandbox
 from ai_agent.tools.desktop import DesktopRunner
 from ai_agent.tools.files import FileSandbox
 from ai_agent.tools.http import HttpSandbox
+from ai_agent.tools.research import BrowserResearchReader
 from ai_agent.tools.presentations import PresentationSandbox
 from ai_agent.tools.shell import ShellSandbox
 from ai_agent.types import Message
@@ -106,6 +107,7 @@ class Agent:
             allow_private_networks=False,
             max_text_chars=settings.max_http_response_chars,
         )
+        self.research = BrowserResearchReader(self.http, self.browser)
         vision_providers = []
         if settings.ollama_api_key:
             vision_providers.append(
@@ -153,6 +155,7 @@ class Agent:
             self.shell,
             self.http,
             self.browser,
+            self.research,
             self.vision,
             self.desktop,
             self.executor,

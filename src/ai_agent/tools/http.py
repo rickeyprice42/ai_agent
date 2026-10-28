@@ -63,6 +63,23 @@ class HttpSandbox:
         method: str = "GET",
         headers: dict | None = None,
     ) -> str:
+        response = self.fetch(url, method=method, headers=headers)
+        return _format_response(
+            url=response["url"],
+            method=response["method"],
+            status=response["status"],
+            headers=response["headers"],
+            body=response["body"],
+            truncated=response["truncated"],
+        )
+
+    def fetch(
+        self,
+        url: str,
+        method: str = "GET",
+        headers: dict | None = None,
+    ) -> dict:
+        """Return a bounded structured response and validate every redirect before following it."""
         parsed = self._validate_url(url)
         normalized_method = method.strip().upper() or "GET"
         if normalized_method not in ALLOWED_METHODS:
@@ -76,8 +93,9 @@ class HttpSandbox:
             method=normalized_method,
         )
 
+        opener = request.build_opener(_SafeRedirectHandler(self._validate_url))
         try:
-            with request.urlopen(http_request, timeout=self.timeout_seconds) as response:
+            with opener.open(http_request, timeout=self.timeout_seconds) as response:
                 final_url = getattr(response, "geturl", lambda: parsed.geturl())()
                 self._validate_url(str(final_url))
                 status = getattr(response, "status", response.getcode())
@@ -97,14 +115,14 @@ class HttpSandbox:
             self.max_response_chars,
             response_headers,
         )
-        return _format_response(
-            url=parsed.geturl(),
-            method=normalized_method,
-            status=int(status),
-            headers=response_headers,
-            body=body,
-            truncated=truncated,
-        )
+        return {
+            "url": str(final_url),
+            "method": normalized_method,
+            "status": int(status),
+            "headers": response_headers,
+            "body": body,
+            "truncated": truncated,
+        }
 
     def search(self, query: str, limit: int = 5, country: str | None = None) -> str:
         normalized_query = " ".join(query.split())
@@ -265,6 +283,16 @@ class HttpSandbox:
             safe_headers[normalized_key] = str(value)
         safe_headers.setdefault("User-Agent", "Avelin-Agent/0.1")
         return safe_headers
+
+
+class _SafeRedirectHandler(request.HTTPRedirectHandler):
+    def __init__(self, validate_url) -> None:
+        super().__init__()
+        self.validate_url = validate_url
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self.validate_url(parse.urljoin(req.full_url, newurl))
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _reject_private_hostname(hostname: str) -> None:

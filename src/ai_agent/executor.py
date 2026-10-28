@@ -314,6 +314,15 @@ def decide_step_action(step: TaskStep) -> ExecutionDecision:
 
     url = _extract_url(text)
     if url and re.search(
+        r"\b(?:research|extract|evidence|source|verify|исслед|извлек|источник|проверь|каталог)\w*\b",
+        lowered,
+    ):
+        return ExecutionDecision(
+            "research_read",
+            {"url": url, "locale": "ru-RU", "region": "auto", "catalog": "auto"},
+            "evidence-backed page research requested",
+        )
+    if url and re.search(
         r"\b(?:browser|playwright|render|браузер|страниц(?:у|ы|е)|сайт(?:а|е)?)\b",
         lowered,
     ):

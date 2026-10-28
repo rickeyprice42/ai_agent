@@ -254,7 +254,17 @@ class PlaywrightBrowserRunner:
               });
               const main = document.querySelector('main,article,[role="main"]') || document.body;
               const mainText = ((main && main.innerText) || '').trim().replace(/\n{3,}/g, '\n\n').slice(0, maxText);
-              return {mainText, elements};
+              const lists = Array.from(document.querySelectorAll('main ul,main ol,article ul,article ol'))
+                .slice(0, 20).map((list) => Array.from(list.querySelectorAll(':scope > li'))
+                  .slice(0, 50).map((item) => (item.innerText || '').trim().replace(/\s+/g, ' ')).filter(Boolean));
+              const tables = Array.from(document.querySelectorAll('main table,article table,table')).slice(0, 10)
+                .map((table) => Array.from(table.rows).slice(0, 100)
+                  .map((row) => Array.from(row.cells).map((cell) => (cell.innerText || '').trim().replace(/\s+/g, ' '))));
+              const jsonLd = Array.from(document.querySelectorAll('script[type="application/ld+json"]')).slice(0, 20)
+                .map((node) => { try { return JSON.parse(node.textContent || ''); } catch (_) { return null; } }).filter(Boolean);
+              const links = Array.from((main || document).querySelectorAll('a[href]')).slice(0, 100)
+                .map((node) => ({url: node.href, text: (node.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 300)}));
+              return {mainText, elements, lists, tables, jsonLd, links, scriptCount: document.scripts.length};
             }""",
             {"maxElements": self.max_elements, "maxText": self.max_text_chars},
         )
@@ -262,6 +272,11 @@ class PlaywrightBrowserRunner:
         return {
             "main_text": str(raw.get("mainText", "")),
             "elements": raw.get("elements", []),
+            "lists": raw.get("lists", []),
+            "tables": raw.get("tables", []),
+            "json_ld": raw.get("jsonLd", []),
+            "links": raw.get("links", []),
+            "script_count": int(raw.get("scriptCount", 0)),
             "dom_hash": sha256(canonical.encode("utf-8")).hexdigest(),
         }
 

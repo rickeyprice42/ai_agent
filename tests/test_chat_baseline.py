@@ -238,7 +238,8 @@ class ChatRegressionTest(unittest.TestCase):
             },
             fp=BytesIO(gzip.compress('{"error":"invalid media"}'.encode("utf-8"))),
         )
-        with patch("ai_agent.tools.http.request.urlopen", side_effect=failure):
+        with patch("ai_agent.tools.http.request.build_opener") as build_opener:
+            build_opener.return_value.open.side_effect = failure
             result = sandbox.request("https://example.com/search")
         self.assertIn("Status: 400", result)
         self.assertIn("invalid media", result)

@@ -16,7 +16,7 @@ from ai_agent.tools.base import Tool
 PolicyOutcome = Literal["allow", "approval_required", "deny"]
 RISK_ORDER = {"read": 0, "write": 1, "external": 2, "high": 3}
 UNTRUSTED_TOOLS = {
-    "web_search", "http_request", "browser_read", "browser_interact", "analyze_image",
+    "web_search", "http_request", "research_read", "browser_read", "browser_interact", "analyze_image",
     "desktop_snapshot", "desktop_interact",
 }
 PROMPT_INJECTION_PATTERN = re.compile(
@@ -219,7 +219,7 @@ def _scope_contains(granted: dict[str, Any], requested: dict[str, Any]) -> bool:
 
 def _attempts_secret_exfiltration(tool_name: str, arguments: dict[str, Any]) -> bool:
     if tool_name not in {
-        "http_request", "web_search", "browser_read", "browser_interact",
+        "http_request", "web_search", "research_read", "browser_read", "browser_interact",
         "analyze_image", "desktop_snapshot", "desktop_interact",
         "open_workspace_folder", "run_shell",
     }:

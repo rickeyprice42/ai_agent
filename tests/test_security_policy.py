@@ -175,7 +175,8 @@ class SecurityPolicyTests(unittest.TestCase):
             http = HttpSandbox()
             with self.assertRaisesRegex(ValueError, "blocked"):
                 http.request("http://127.0.0.1/private")
-            with patch("ai_agent.tools.http.request.urlopen", return_value=_RedirectResponse("http://127.0.0.1/private")):
+            with patch("ai_agent.tools.http.request.build_opener") as build_opener:
+                build_opener.return_value.open.return_value = _RedirectResponse("http://127.0.0.1/private")
                 def resolve(host, *_args, **_kwargs):
                     address = "127.0.0.1" if host == "127.0.0.1" else "93.184.216.34"
                     return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]

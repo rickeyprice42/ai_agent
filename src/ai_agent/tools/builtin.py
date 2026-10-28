@@ -13,6 +13,7 @@ from ai_agent.tools.documents import DocumentSandbox
 from ai_agent.tools.desktop import DesktopRunner, desktop_interact_result, desktop_snapshot_result
 from ai_agent.tools.files import FileSandbox
 from ai_agent.tools.http import HttpSandbox
+from ai_agent.tools.research import BrowserResearchReader, research_read_result
 from ai_agent.llm.vision import VisionRouter, analyze_image_result
 from ai_agent.tools.presentations import PresentationSandbox
 from ai_agent.tools.shell import ShellSandbox
@@ -30,6 +31,7 @@ def register_builtin_tools(
     shell: ShellSandbox,
     http: HttpSandbox,
     browser: PlaywrightBrowserRunner,
+    research: BrowserResearchReader,
     vision: VisionRouter,
     desktop: DesktopRunner,
     executor: ExecutionEngine,
@@ -398,6 +400,11 @@ def register_builtin_tools(
             "dom_hash": {"type": "string"},
             "main_text": {"type": "string"},
             "elements": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "lists": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+            "tables": {"type": "array", "items": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}},
+            "json_ld": {"type": "array"},
+            "links": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "script_count": {"type": "integer"},
             "actions": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
             "screenshot": {"type": ["object", "null"]},
             "blocked_requests": {"type": "array", "items": {"type": "string"}},
@@ -472,6 +479,54 @@ def register_builtin_tools(
             timeout_seconds=float(browser.timeout_ms / 1000 + 5),
             availability=browser.availability,
             handler=lambda args: browser_interact_result(browser, args),
+        )
+    )
+
+    registry.register(
+        Tool(
+            name="research_read",
+            version="1.0.0",
+            description=(
+                "Извлекает проверяемые данные из публичной страницы: сначала HTTP/JSON-LD reader, "
+                "затем изолированный browser fallback для JavaScript. Возвращает evidence fragments/hashes, "
+                "locale/region, confidence и typed failure для login/paywall/anti-bot/каталога."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "minLength": 8, "maxLength": 2000},
+                    "locale": {"type": "string", "maxLength": 16},
+                    "region": {"type": "string", "maxLength": 8},
+                    "catalog": {"type": "string", "enum": ["auto", "apple_books", "apple_tv", "apple_tv_plus"]},
+                    "force_browser": {"type": "boolean"},
+                },
+                "required": ["url"],
+            },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "retrieved_at": {"type": "string"},
+                    "locale": {"type": "string"},
+                    "region": {"type": "string"},
+                    "status": {"type": ["integer", "null"]},
+                    "extraction_method": {"type": "string"},
+                    "adapter": {"type": "string"},
+                    "confidence": {"type": "number"},
+                    "fields": {"type": "object", "additionalProperties": True},
+                    "evidence": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+                    "safety": {"type": "object", "additionalProperties": True},
+                    "support": {"type": "string"},
+                    "cache_hit": {"type": "boolean"},
+                },
+                "required": ["url", "retrieved_at", "locale", "region", "extraction_method", "adapter", "confidence", "fields", "evidence", "safety", "support", "cache_hit"],
+                "additionalProperties": False,
+            },
+            capabilities=("research.read", "research.evidence", "browser.fallback", "structured_data"),
+            permissions=(ToolPermission("network.read", "read"),),
+            timeout_seconds=float(browser.timeout_ms / 1000 + http.timeout_seconds + 5),
+            availability=research.availability,
+            handler=lambda args: research_read_result(research, args),
         )
     )
 
