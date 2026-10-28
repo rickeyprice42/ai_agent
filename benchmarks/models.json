@@ -1,0 +1,68 @@
+[
+  {
+    "model": "qwen3:1.7b",
+    "family": "Qwen 3",
+    "artifact_size_gb": 1.4,
+    "context_advertised": 40960,
+    "tool_calling": true,
+    "license": "Apache-2.0",
+    "source": "https://ollama.com/library/qwen3:1.7b",
+    "gtx_1650_ti_4gb": "expected_fit",
+    "note": "Быстрый нижний baseline; качество нужно измерить."
+  },
+  {
+    "model": "qwen3:4b-instruct",
+    "family": "Qwen 3",
+    "artifact_size_gb": 2.5,
+    "context_advertised": 262144,
+    "tool_calling": true,
+    "license": "Apache-2.0",
+    "source": "https://ollama.com/library/qwen3:4b-instruct",
+    "gtx_1650_ti_4gb": "expected_fit_limited_context",
+    "note": "Основной кандидат для русского языка и tool calling."
+  },
+  {
+    "model": "phi4-mini",
+    "family": "Phi 4 Mini",
+    "artifact_size_gb": 2.5,
+    "context_advertised": 131072,
+    "tool_calling": true,
+    "license": "MIT",
+    "source": "https://ollama.com/library/phi4-mini",
+    "gtx_1650_ti_4gb": "expected_fit_limited_context",
+    "note": "Альтернатива для reasoning и function calling."
+  },
+  {
+    "model": "llama3.2:3b",
+    "family": "Llama 3.2",
+    "artifact_size_gb": 2.0,
+    "context_advertised": 131072,
+    "tool_calling": true,
+    "license": "Llama 3.2 Community License",
+    "source": "https://ollama.com/library/llama3.2",
+    "gtx_1650_ti_4gb": "expected_fit_limited_context",
+    "note": "Малый multilingual baseline; русский не входит в официальный список поддерживаемых языков."
+  },
+  {
+    "model": "gemma3:4b",
+    "family": "Gemma 3",
+    "artifact_size_gb": 3.4,
+    "context_advertised": 131072,
+    "tool_calling": false,
+    "license": "Gemma Terms of Use",
+    "source": "https://ollama.com/library/gemma3:4b",
+    "gtx_1650_ti_4gb": "tight_cpu_offload_likely",
+    "note": "Vision-кандидат; 4 GB VRAM недостаточно для большого KV cache и runtime overhead."
+  },
+  {
+    "model": "gpt-oss:20b",
+    "family": "gpt-oss",
+    "artifact_size_gb": 14.0,
+    "context_advertised": 131072,
+    "tool_calling": true,
+    "license": "Apache-2.0 plus gpt-oss usage policy",
+    "source": "https://ollama.com/library/gpt-oss:20b",
+    "gtx_1650_ti_4gb": "does_not_fit_vram",
+    "note": "Официально рассчитана примерно на 16 GB памяти; на текущей GPU локальный baseline будет CPU/offload и не сопоставим по latency."
+  }
+]

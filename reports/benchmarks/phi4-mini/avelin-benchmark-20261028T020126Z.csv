@@ -1,0 +1,2 @@
+﻿model,score,passed,tasks,errors,median_latency_ms,mean_tokens_per_second,peak_vram_mib
+phi4-mini,0.5556,18,36,0,3343.82,19.531,2301
