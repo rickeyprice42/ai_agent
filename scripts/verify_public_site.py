@@ -1,4 +1,4 @@
-"""Local, isolated regression check for the AVE-57 public-site prototype."""
+"""Local, isolated regression check for the AVE-57/58 public site."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -54,14 +54,28 @@ def run() -> None:
             expect(page.locator("html")).to_have_attribute("data-theme", "light")
             page.screenshot(path=str(OUT / "site-desktop-light.png"), full_page=True)
 
+            page.evaluate("window.ctaEvents=[]; window.addEventListener('avelin:cta', event => window.ctaEvents.push(event.detail))")
             page.get_by_role("button", name="Скачать", exact=True).first.click()
-            expect(page.get_by_role("dialog")).to_contain_text("Публичная загрузка ещё не открыта")
-            page.get_by_role("button", name="Windows", exact=True).click()
-            expect(page.get_by_role("button", name="Windows", exact=True)).to_have_class("is-selected")
-            page.get_by_role("button", name="Понятно", exact=True).click()
+            expect(page.get_by_role("dialog")).to_contain_text("Выбери платформу")
+            windows = page.locator('[data-platform="windows"]')
+            expect(windows).to_have_attribute("aria-pressed", "true")
+            expect(page.locator("#platform-note")).to_contain_text("Windows: релиз ещё готовится")
+            windows_box = windows.bounding_box()
+            macos_box = page.locator('[data-platform="macos"]').bounding_box()
+            assert windows_box and macos_box and windows_box["y"] == macos_box["y"], "desktop platform picker is not a two-column grid"
+            page.locator('[data-platform="android"]').click()
+            expect(page.locator('[data-platform="android"]')).to_have_attribute("aria-pressed", "true")
+            expect(page.locator("#dialog-action")).to_have_attribute("href", "./download.html")
+            page.screenshot(path=str(OUT / "site-download-dialog.png"))
+            assert page.evaluate("Object.keys(window.ctaEvents.at(-1)).sort().join(',')") == "available,name,platform"
+            assert page.evaluate("AvelinSite.safeReturnPath('/projects/42?tab=chat#last')") == "/projects/42?tab=chat#last"
+            assert page.evaluate("AvelinSite.safeReturnPath('https://evil.example/steal')") == "/"
+            assert page.evaluate("AvelinSite.safeReturnPath('//evil.example/steal')") == "/"
+            assert page.evaluate("AvelinSite.safeConfiguredUrl('javascript:alert(1)', './download.html', true).endsWith('/download.html')")
+            page.locator(".dialog-ok").click()
             page.get_by_role("button", name="Войти / Зарегистрироваться", exact=True).first.click()
             expect(page.get_by_role("dialog")).to_contain_text("не создаёт аккаунт")
-            page.get_by_role("button", name="Понятно", exact=True).click()
+            page.locator(".dialog-ok").click()
 
             page.get_by_role("button", name="Switch to English").click()
             expect(page.get_by_role("heading", name="Remembers what matters. Helps you finish the work.")).to_be_visible()
@@ -79,17 +93,37 @@ def run() -> None:
             page.goto(URL)
             page.screenshot(path=str(OUT / "site-mobile-light.png"), full_page=True)
 
-            for path in ["privacy.html", "terms.html"]:
+            for path in ["privacy.html", "terms.html", "download.html"]:
                 page.goto(f"{URL}/{path}")
                 expect(page.get_by_role("link", name="Вернуться")).to_be_visible()
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+            device_cases = [
+                ("ios", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1", 390, 844),
+                ("ios", "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1", 768, 1024),
+                ("android", "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36", 360, 800),
+                ("macos", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36", 1280, 800),
+            ]
+            for expected_platform, user_agent, width, height in device_cases:
+                context = browser.new_context(user_agent=user_agent, viewport={"width": width, "height": height})
+                device_page = context.new_page()
+                device_page.goto(URL)
+                assert device_page.evaluate("AvelinSite.detectPlatform()") == expected_platform
+                device_page.get_by_role("button", name="Скачать", exact=True).first.click()
+                expect(device_page.locator(f'[data-platform="{expected_platform}"]')).to_have_attribute("aria-pressed", "true")
+                assert device_page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                if expected_platform == "ios" and width == 390:
+                    device_page.screenshot(path=str(OUT / "site-download-iphone.png"))
+                context.close()
             assert not errors, errors
             browser.close()
     finally:
         server.terminate()
         server.wait(timeout=10)
 
-    print("PASS: AVE-57 prototype, CTA fallbacks, theme/language, legal placeholders")
+    print("PASS: AVE-57 presentation, themes/languages, legal and download fallbacks")
+    print("PASS: AVE-58 Windows/macOS/iPhone/iPad/Android routing and explicit override")
+    print("PASS: same-origin auth return guard and privacy-minimal CTA event payload")
     print("PASS: no horizontal overflow at 320/360/390/768/1280/1440px")
 
 

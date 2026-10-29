@@ -346,12 +346,12 @@
    - [DONE] Добавлена изолированная browser-регрессия для 320/390/768/1024/1440 px, обеих тем и ключевых состояний.
    - [DONE] Исправлено восстановление частично запущенного launcher и добавлены регрессионные тесты.
 
-40. [NEXT] Адаптивный публичный сайт Avelin.com (AVE-57)
+40. [DONE] Адаптивный публичный сайт Avelin.com (AVE-57)
    - Отделить presentation-led landing от рабочего интерфейса агента.
    - Согласовать интерактивный prototype dark/light с центральными Download и Auth CTA.
    - Проверить 360/390/768/1280/1440 px, keyboard navigation, reduced motion и performance budget.
 
-41. [BACKLOG] Device-aware Download и вход в web-версию (AVE-58)
+41. [NEXT] Device-aware Download и вход в web-версию (AVE-58)
    - Progressive enhancement и явный выбор iOS/Android/desktop с честным Coming soon fallback.
    - Безопасный возврат после auth без open redirect; URLs магазинов хранятся в конфигурации.
 
