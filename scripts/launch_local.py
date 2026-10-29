@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from urllib import error, request
 import webbrowser
 
@@ -22,12 +23,20 @@ FRONTEND_URL = "http://127.0.0.1:5173"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def launcher_log(message: str) -> None:
+    LOGS.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with (LOGS / "launcher.log").open("a", encoding="utf-8") as handle:
+        handle.write(f"[{timestamp}] {message}\n")
+
+
 def load_paths() -> tuple[Path, Path]:
     configured: dict[str, str] = {}
     if CONFIG.is_file():
         configured = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
     python_path = Path(configured.get("python", ROOT / ".venv" / "Scripts" / "python.exe"))
-    node_raw = configured.get("node") or shutil.which("node") or ""
+    configured_node = Path(configured.get("node", "")) if configured.get("node") else Path()
+    node_raw = str(configured_node) if configured_node.is_file() else (shutil.which("node") or "")
     return python_path, Path(node_raw) if node_raw else Path()
 
 
@@ -73,46 +82,65 @@ class AvelinLauncher:
         self.validate()
         backend = fetch(BACKEND_URL)
         frontend = fetch(FRONTEND_URL)
-        if backend and frontend and backend[0] == 200 and "Avelin" in frontend[1]:
+        backend_ready = bool(backend and backend[0] == 200 and '"status":"ok"' in backend[1].replace(" ", ""))
+        frontend_ready = bool(frontend and frontend[0] == 200 and "Avelin" in frontend[1])
+        launcher_log(
+            f"start requested; backend={'ready' if backend_ready else 'missing' if backend is None else 'occupied'}; "
+            f"frontend={'ready' if frontend_ready else 'missing' if frontend is None else 'occupied'}"
+        )
+        if backend_ready and frontend_ready:
             self.reused = True
             return "Avelin уже запущен — использую работающий экземпляр."
-        if backend or frontend:
-            raise RuntimeError("Порт 8000 или 5173 занят другим/неполным процессом.")
+        if backend is not None and not backend_ready:
+            raise RuntimeError("Порт 8000 занят другим процессом. Закрой его или перезагрузи компьютер.")
+        if frontend is not None and not frontend_ready:
+            raise RuntimeError("Порт 5173 занят другим процессом. Закрой его или перезагрузи компьютер.")
 
         LOGS.mkdir(parents=True, exist_ok=True)
         backend_log = (LOGS / "backend-launcher.log").open("a", encoding="utf-8")
         frontend_log = (LOGS / "frontend-launcher.log").open("a", encoding="utf-8")
         self.log_files.extend([backend_log, frontend_log])
-        self.processes.append(
-            subprocess.Popen(
-                [
-                    str(self.python), "-m", "uvicorn", "backend.main:app",
-                    "--host", "127.0.0.1", "--port", "8000",
-                ],
-                cwd=ROOT,
-                stdout=backend_log,
-                stderr=subprocess.STDOUT,
-                creationflags=NO_WINDOW,
+        if not backend_ready:
+            self.processes.append(
+                subprocess.Popen(
+                    [
+                        str(self.python), "-m", "uvicorn", "backend.main:app",
+                        "--host", "127.0.0.1", "--port", "8000",
+                    ],
+                    cwd=ROOT,
+                    stdout=backend_log,
+                    stderr=subprocess.STDOUT,
+                    creationflags=NO_WINDOW,
+                )
             )
-        )
-        self.processes.append(
-            subprocess.Popen(
-                [
-                    str(self.node),
-                    str(FRONTEND / "node_modules" / "vite" / "bin" / "vite.js"),
-                    "--host", "127.0.0.1", "--port", "5173",
-                ],
-                cwd=FRONTEND,
-                stdout=frontend_log,
-                stderr=subprocess.STDOUT,
-                creationflags=NO_WINDOW,
+        if not frontend_ready:
+            self.processes.append(
+                subprocess.Popen(
+                    [
+                        str(self.node),
+                        str(FRONTEND / "node_modules" / "vite" / "bin" / "vite.js"),
+                        "--host", "127.0.0.1", "--port", "5173",
+                    ],
+                    cwd=FRONTEND,
+                    stdout=frontend_log,
+                    stderr=subprocess.STDOUT,
+                    creationflags=NO_WINDOW,
+                )
             )
-        )
-        backend_ok = wait_for(BACKEND_URL, lambda status, body: status == 200 and '"ok"' in body)
-        frontend_ok = wait_for(FRONTEND_URL, lambda status, body: status == 200 and "Avelin" in body)
+        backend_ok = backend_ready or wait_for(BACKEND_URL, lambda status, body: status == 200 and '"ok"' in body)
+        frontend_ok = frontend_ready or wait_for(FRONTEND_URL, lambda status, body: status == 200 and "Avelin" in body)
         if not backend_ok or not frontend_ok:
+            launcher_log(f"startup timeout; backend_ok={backend_ok}; frontend_ok={frontend_ok}")
             self.stop()
             raise RuntimeError("Сервисы не стали готовы. Проверь .local/logs/*.log.")
+        started = []
+        if not backend_ready:
+            started.append("backend")
+        if not frontend_ready:
+            started.append("frontend")
+        launcher_log(f"startup completed; started={','.join(started)}")
+        if len(started) == 1:
+            return f"Avelin готов — восстановлен {started[0]}."
         return "Backend и frontend готовы."
 
     def stop(self) -> None:
@@ -187,8 +215,10 @@ def run_gui() -> int:
             window.after(0, lambda: open_button.configure(state="normal"))
             window.after(0, lambda: webbrowser.open(FRONTEND_URL))
         except Exception as exc:
-            window.after(0, lambda: status.set("Запуск не удался."))
-            window.after(0, lambda: messagebox.showerror("Avelin", str(exc)))
+            launcher_log(f"startup failed: {exc}\n{traceback.format_exc()}")
+            error_text = f"Запуск не удался: {exc}"
+            window.after(0, lambda: status.set(error_text))
+            window.after(0, lambda: messagebox.showerror("Avelin", error_text))
 
     threading.Thread(target=start_worker, daemon=True).start()
     window.mainloop()

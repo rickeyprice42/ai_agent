@@ -1,6 +1,7 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { WorkspaceIcon, type IconName } from "./WorkspaceIcon";
 import {
   archiveProject,
   archiveChatThread,
@@ -87,6 +88,24 @@ const DRAFT_KEY = "avelin-draft";
 const THEME_KEY = "avelin-theme-mode";
 const AUTH_TOKEN_KEY = "avelin-auth-token";
 const ACTIVE_THREAD_KEY = "avelin-active-thread";
+
+
+type WorkspaceView = "home" | "chat" | "projects" | "memory" | "automations" | "tasks" | "files" | "settings";
+type SettingsView = "general" | "connections" | "tools" | "security" | "activity";
+const WORKSPACE_NAV: { id: WorkspaceView; label: string; icon: IconName }[] = [
+  { id: "home", label: "Главная", icon: "home" },
+  { id: "chat", label: "Диалоги", icon: "chat" },
+  { id: "projects", label: "Проекты", icon: "projects" },
+  { id: "memory", label: "Память", icon: "memory" },
+  { id: "automations", label: "Автоматизации", icon: "clock" },
+  { id: "tasks", label: "Задачи", icon: "tasks" },
+  { id: "files", label: "Файлы", icon: "files" },
+];
+const SETTINGS_NAV: { id: SettingsView; label: string }[] = [
+  { id: "general", label: "Общие" }, { id: "connections", label: "Подключения" },
+  { id: "tools", label: "Инструменты" }, { id: "security", label: "Разрешения" },
+  { id: "activity", label: "Журнал" },
+];
 
 type ThemeMode = "auto" | "light" | "dark";
 type ResolvedTheme = "light" | "dark";
@@ -328,6 +347,59 @@ export default function App() {
   const [compactionBusyId, setCompactionBusyId] = useState<string | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readStoredThemeMode());
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveTheme(readStoredThemeMode()));
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [view, setView] = useState<WorkspaceView>("home");
+  const [settingsView, setSettingsView] = useState<SettingsView>("general");
+  const [chatSearch, setChatSearch] = useState("");
+  const [isChatListOpen, setIsChatListOpen] = useState(false);
+  const [isStartingChat, setIsStartingChat] = useState(false);
+  const navigationRef = useRef<HTMLElement | null>(null);
+  const workspaceRef = useRef<HTMLElement | null>(null);
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const followLatestMessageRef = useRef(true);
+
+  function navigate(next: WorkspaceView) {
+    setView(next);
+    setIsSidebarOpen(false);
+    if (next === "chat") setIsChatListOpen(true);
+  }
+
+  useEffect(() => {
+    const desktop = window.matchMedia("(min-width: 901px)");
+    const closeOnDesktop = () => { if (desktop.matches) setIsSidebarOpen(false); };
+    desktop.addEventListener("change", closeOnDesktop);
+    return () => desktop.removeEventListener("change", closeOnDesktop);
+  }, []);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }, [view]);
+
+  useEffect(() => {
+    if (!isSidebarOpen) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const workspace = workspaceRef.current;
+    if (workspace) workspace.inert = true;
+    const first = navigationRef.current?.querySelector<HTMLButtonElement>("button");
+    first?.focus();
+    function onKey(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") { setIsSidebarOpen(false); return; }
+      if (event.key !== "Tab") return;
+      const elements = Array.from(navigationRef.current?.querySelectorAll<HTMLElement>("button:not(:disabled), input") ?? []).filter((item) => item.getClientRects().length);
+      const first = elements[0], last = elements[elements.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previousOverflow;
+      if (workspace) workspace.inert = false;
+      if (previous?.isConnected) previous.focus({ preventScroll: true });
+    };
+  }, [isSidebarOpen]);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -355,8 +427,25 @@ export default function App() {
   }, [input]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const container = messagesEndRef.current?.parentElement;
+    if (container && followLatestMessageRef.current) container.scrollTop = container.scrollHeight;
   }, [messages, isSending, animatedMessageKey]);
+
+  useEffect(() => {
+    followLatestMessageRef.current = true;
+    const container = messagesEndRef.current?.parentElement;
+    if (container) container.scrollTop = container.scrollHeight;
+  }, [view, activeThreadId]);
+
+  useEffect(() => {
+    const container = messagesEndRef.current?.parentElement;
+    if (!container) return;
+    const observer = new ResizeObserver(() => {
+      if (followLatestMessageRef.current) container.scrollTop = container.scrollHeight;
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [view]);
 
   useEffect(() => {
     if (!authToken || !activeProjectId) {
@@ -477,7 +566,7 @@ export default function App() {
     }
   }
 
-  async function submitMessage(message: string) {
+  async function submitMessage(message: string, targetThreadId = activeThreadId) {
     const normalized = message.trim();
     if (!normalized || isSending || !authToken) {
       return;
@@ -485,6 +574,7 @@ export default function App() {
 
     const optimisticMessage: ChatMessage = { role: "user", content: normalized, status: "complete" };
     const pendingMessage: ChatMessage = { role: "assistant", content: "", status: "pending" };
+    followLatestMessageRef.current = true;
     setMessages((current) => [...current, optimisticMessage, pendingMessage]);
     setInput("");
     setIsSending(true);
@@ -498,7 +588,7 @@ export default function App() {
       await sendMessageStream(
         normalized,
         authToken,
-        activeThreadId || null,
+        targetThreadId || null,
         controller.signal,
         (event) => {
           if (event.thread_id) {
@@ -528,11 +618,11 @@ export default function App() {
       );
       await refreshBootstrap(false, false, authToken, window.localStorage.getItem(ACTIVE_THREAD_KEY));
       window.localStorage.removeItem(DRAFT_KEY);
-      textareaRef.current?.focus();
+      if (window.matchMedia("(pointer: fine)").matches) textareaRef.current?.focus({ preventScroll: true });
     } catch (err) {
       const cancelled = err instanceof DOMException && err.name === "AbortError";
       const fallback = cancelled
-        ? "Генерация остановлена. Частичный ответ сохранён в истории."
+        ? "Генерация остановлена."
         : err instanceof Error ? err.message : "Неизвестная ошибка.";
       setError(fallback);
       setMessages((current) => current.map((item) =>
@@ -548,6 +638,23 @@ export default function App() {
 
   function handleStopGeneration() {
     generationControllerRef.current?.abort();
+  }
+
+  async function handleHomeSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const message = input.trim();
+    if (!message || isSending || isStartingChat || !authToken) return;
+    setIsStartingChat(true);
+    try {
+      const payload = await createChatThread(authToken, undefined, null);
+      await refreshBootstrap(false, false, authToken, payload.thread.id);
+      navigate("chat");
+      setChatSearch("");
+      setIsChatListOpen(false);
+      await submitMessage(message, payload.thread.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось начать диалог.");
+    } finally { setIsStartingChat(false); }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -596,13 +703,19 @@ export default function App() {
       setInput("");
       setAnimatedMessageKey(null);
       await refreshBootstrap(false, false, authToken, payload.thread.id);
+      navigate("chat");
+      setChatSearch("");
+      setIsChatListOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось создать чат.");
     }
   }
 
   async function handleSelectChat(threadId: string) {
-    if (!authToken || threadId === activeThreadId) return;
+    if (!authToken || isSending) return;
+    navigate("chat");
+    setIsChatListOpen(false);
+    if (threadId === activeThreadId) return;
     setActiveThreadId(threadId);
     window.localStorage.setItem(ACTIVE_THREAD_KEY, threadId);
     setInput("");
@@ -616,6 +729,7 @@ export default function App() {
     if (firstThread) {
       await handleSelectChat(firstThread.id);
     }
+    navigate("projects");
   }
 
   async function handleCreateProject() {
@@ -1431,7 +1545,7 @@ export default function App() {
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       void submitMessage(input);
     }
@@ -1441,10 +1555,10 @@ export default function App() {
   const selectedProviderModels = selectedProviderOption?.models ?? [selectedModel];
   const activeProject = bootstrap.projects.find((project) => project.id === activeProjectId) ?? bootstrap.active_project;
   const isSharedViewer = Boolean(activeProject?.shared && activeProject.role === "viewer");
-  const projectThreads = activeProjectId
-    ? bootstrap.chat_threads.filter((thread) => thread.project_id === activeProjectId)
-    : [];
-  const unassignedThreads = bootstrap.chat_threads.filter((thread) => !thread.project_id);
+
+  if (authToken && !currentUser && isLoading) {
+    return <main className="workspace-splash" role="status"><span className="nav-logo" aria-hidden="true">A</span><p>Открываем твоё пространство…</p></main>;
+  }
 
   if (!authToken || !currentUser) {
     return (
@@ -1454,24 +1568,23 @@ export default function App() {
             <img src={resolvedTheme === "dark" ? "/brand/avelin-dark.png" : "/brand/avelin-light.png"} alt="Avelin" />
           </div>
           <p className="eyebrow">Avelin</p>
-          <h1>Личный AI-агент с памятью, заметками и будущей desktop-сборкой</h1>
+          <h1>Пространство для твоих идей.</h1>
           <p className="hero-text">
-            Создай аккаунт, чтобы отделить свою историю, заметки и настройки модели. Дальше подключим Google,
-            ВКонтакте и выбор AI-модели прямо из интерфейса.
+            Обсуждай задачи, работай с документами и возвращайся к важному. Твои диалоги, проекты и память — в одном месте.
           </p>
           <div className="auth-features">
-            <span>Чат и память</span>
-            <span>SQLite-хранилище</span>
-            <span>Темы и Tauri-ready</span>
+            <span>Диалоги</span>
+            <span>Проекты</span>
+            <span>Память</span>
           </div>
         </section>
 
         <section className="auth-card">
           <div className="auth-tabs">
-            <button className={authMode === "login" ? "theme-option theme-option-active" : "theme-option"} onClick={() => setAuthMode("login")} type="button">
+            <button aria-pressed={authMode === "login"} className={authMode === "login" ? "theme-option theme-option-active" : "theme-option"} onClick={() => setAuthMode("login")} type="button">
               Вход
             </button>
-            <button className={authMode === "register" ? "theme-option theme-option-active" : "theme-option"} onClick={() => setAuthMode("register")} type="button">
+            <button aria-pressed={authMode === "register"} className={authMode === "register" ? "theme-option theme-option-active" : "theme-option"} onClick={() => setAuthMode("register")} type="button">
               Регистрация
             </button>
           </div>
@@ -1481,241 +1594,41 @@ export default function App() {
               <>
                 <label>
                   Имя
-                  <input value={authDisplayName} onChange={(event) => setAuthDisplayName(event.target.value)} required minLength={2} />
+                  <input autoComplete="name" value={authDisplayName} onChange={(event) => setAuthDisplayName(event.target.value)} required minLength={2} />
                 </label>
                 <label>
                   Email
-                  <input value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} required type="email" />
+                  <input autoComplete="email" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} required type="email" />
                 </label>
                 <label>
                   Логин
-                  <input value={authUsername} onChange={(event) => setAuthUsername(event.target.value)} required minLength={2} />
+                  <input autoComplete="username" autoCapitalize="none" value={authUsername} onChange={(event) => setAuthUsername(event.target.value)} required minLength={2} />
                 </label>
               </>
             ) : (
               <label>
                 Email или логин
-                <input value={authLoginValue} onChange={(event) => setAuthLoginValue(event.target.value)} required minLength={2} />
+                <input autoComplete="username" autoCapitalize="none" value={authLoginValue} onChange={(event) => setAuthLoginValue(event.target.value)} required minLength={2} />
               </label>
             )}
             <label>
               Пароль
-              <input value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} required minLength={8} type="password" />
+              <input autoComplete={authMode === "register" ? "new-password" : "current-password"} value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} required minLength={8} type="password" />
             </label>
 
             <button disabled={isAuthSubmitting} type="submit">
               {isAuthSubmitting ? "Подключаем..." : authMode === "login" ? "Войти" : "Создать аккаунт"}
             </button>
-            {authError ? <p className="muted muted-error">{authError}</p> : null}
+            {authError ? <p className="muted muted-error" role="alert">{authError}</p> : null}
           </form>
 
-          <div className="oauth-row">
-            <button className="ghost-button" type="button" onClick={() => setAuthError("Google OAuth подготовлен на backend и будет включен после настройки client id.")}>
-              Google
-            </button>
-            <button className="ghost-button" type="button" onClick={() => setAuthError("ВКонтакте OAuth подготовлен на backend и будет включен после настройки приложения VK.")}>
-              ВКонтакте
-            </button>
-          </div>
         </section>
       </main>
     );
   }
 
-  return (
-    <div className="shell">
-      <aside className="sidebar">
-        <div className="brand-card">
-          <div className="brand-mark">
-            <img src={resolvedTheme === "dark" ? "/brand/avelin-dark.png" : "/brand/avelin-light.png"} alt="Avelin" />
-          </div>
-          <div>
-            <p className="eyebrow">Личный агент</p>
-            <h1>{bootstrap.agent_name || "Avelin"}</h1>
-          </div>
-        </div>
-
-        <section className="panel project-panel">
-          <div className="panel-heading panel-heading-compact">
-            <div>
-              <p className="eyebrow">Projects</p>
-              <h3>Рабочие области</h3>
-            </div>
-            <button className="ghost-button" onClick={() => void handleCreateProject()} type="button">
-              Новый
-            </button>
-          </div>
-
-          <div className="project-list">
-            {bootstrap.projects.length === 0 ? (
-              <p className="muted">Проектов пока нет.</p>
-            ) : (
-              bootstrap.projects.map((project) => (
-                <button
-                  className={project.id === activeProjectId ? "project-item project-item-active" : "project-item"}
-                  key={project.id}
-                  onClick={() => void handleFocusProject(project.id)}
-                  type="button"
-                >
-                  <span>{project.title}</span>
-                  <small>{project.shared ? `${project.role} · shared` : `${project.chat_count} чатов`}</small>
-                </button>
-              ))
-            )}
-          </div>
-
-          <div className="thread-actions">
-            <button className="mini-button" disabled={!activeProjectId || activeProject?.role === "viewer"} onClick={() => void handleRenameProject()} type="button">
-              Назвать
-            </button>
-            <button className="mini-button" disabled={!activeProjectId || activeProject?.role !== "owner"} onClick={() => void handleArchiveProject()} type="button">
-              Архив
-            </button>
-            <button className="mini-button" disabled={!activeProjectId || activeProject?.role !== "owner"} onClick={() => void handleDeleteProject()} type="button">
-              Удалить
-            </button>
-            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleAssignActiveChatToProject(null)} type="button">
-              Без проекта
-            </button>
-            <button className="mini-button" disabled={workspaceBusy} onClick={() => void handleAcceptInvitation()} type="button">
-              Принять invite
-            </button>
-          </div>
-
-          {bootstrap.projects.length > 0 ? (
-            <label className="project-select">
-              Чат в проекте
-              <select
-                value={bootstrap.active_thread.project_id ?? ""}
-                onChange={(event) => void handleAssignActiveChatToProject(event.target.value || null)}
-              >
-                <option value="">Без проекта</option>
-                {bootstrap.projects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-
-          {activeProject ? (
-            <details className="workspace-panel" open={activeProject.shared}>
-              <summary>Shared workspace · {activeProject.role}</summary>
-              <label className="project-select">
-                Режим Avelin
-                <select
-                  value={activeProject.agent_mode}
-                  disabled={activeProject.role === "viewer" || workspaceBusy}
-                  onChange={(event) => void handleAgentMode(event.target.value as "mention_only" | "explicit" | "off")}
-                >
-                  <option value="mention_only">Только по @Avelin</option>
-                  <option value="explicit">На каждый явный запрос</option>
-                  <option value="off">Выключен</option>
-                </select>
-              </label>
-              <div className="workspace-actions">
-                {activeProject.role === "owner" ? (
-                  <button className="mini-button" disabled={workspaceBusy} onClick={() => void handleInviteMember()} type="button">Пригласить</button>
-                ) : null}
-                {activeProject.role !== "viewer" ? (
-                  <button className="mini-button" disabled={workspaceBusy} onClick={() => void handleCreateSharedItem()} type="button">Поделиться</button>
-                ) : null}
-              </div>
-              <div className="workspace-members">
-                {projectMembers.map((member) => (
-                  <div className="workspace-row" key={member.user_id}>
-                    <span>{member.display_name} · {member.role}</span>
-                    {activeProject.role === "owner" && member.role !== "owner" ? (
-                      <button className="mini-button mini-button-danger" disabled={workspaceBusy} onClick={() => void handleRemoveMember(member)} type="button">Удалить</button>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-              {projectInvitations.filter((item) => item.status === "pending").map((invite) => (
-                <small key={invite.id}>Invite: {invite.email} · {invite.role} · до {formatFileTime(invite.expires_at)}</small>
-              ))}
-              <div className="workspace-board">
-                {sharedProjectItems.length === 0 ? <small>Общая доска пуста. Личная память и файлы сюда не попадают автоматически.</small> : sharedProjectItems.map((item) => (
-                  <article className="workspace-board-item" key={item.id}>
-                    <b>{item.kind} · {item.title}</b>
-                    <span>{String(item.content.text ?? "")}</span>
-                    <small>revision {item.revision}</small>
-                  </article>
-                ))}
-              </div>
-            </details>
-          ) : null}
-
-          {bootstrap.archived_projects.length > 0 ? (
-            <details className="thread-archive">
-              <summary>Архив проектов ({bootstrap.archived_projects.length})</summary>
-              <div className="project-list">
-                {bootstrap.archived_projects.map((project) => (
-                  <button
-                    className="project-item"
-                    key={project.id}
-                    onClick={() => void handleRestoreProject(project.id)}
-                    type="button"
-                  >
-                    <span>{project.title}</span>
-                    <small>Вернуть в активные</small>
-                  </button>
-                ))}
-              </div>
-            </details>
-          ) : null}
-        </section>
-
+  const chatManagement = (
         <section className="panel chat-workspace-panel">
-          <div className="panel-heading panel-heading-compact">
-            <div>
-              <p className="eyebrow">Chats</p>
-              <h3>{activeProject ? activeProject.title : "Диалоги"}</h3>
-            </div>
-            <button className="ghost-button" disabled={isSharedViewer} onClick={() => void handleCreateChat()} type="button">
-              Новый
-            </button>
-          </div>
-
-          {activeProjectId ? (
-            <div className="thread-list">
-              {projectThreads.length === 0 ? (
-                <p className="muted">В проекте пока нет чатов.</p>
-              ) : (
-                projectThreads.map((thread) => (
-                  <button
-                    className={thread.id === activeThreadId ? "thread-item thread-item-active" : "thread-item"}
-                    key={thread.id}
-                    onClick={() => void handleSelectChat(thread.id)}
-                    type="button"
-                  >
-                    <span>{thread.title}</span>
-                    <small>{thread.message_count} сообщений</small>
-                  </button>
-                ))
-              )}
-            </div>
-          ) : null}
-
-          <div className="thread-list">
-            <p className="thread-group-title">Без проекта</p>
-            {unassignedThreads.length === 0 ? (
-              <p className="muted">Свободных чатов пока нет.</p>
-            ) : (
-              unassignedThreads.map((thread) => (
-                <button
-                  className={thread.id === activeThreadId ? "thread-item thread-item-active" : "thread-item"}
-                  key={thread.id}
-                  onClick={() => void handleSelectChat(thread.id)}
-                  type="button"
-                >
-                  <span>{thread.title}</span>
-                  <small>{thread.message_count} сообщений</small>
-                </button>
-              ))
-            )}
-          </div>
 
           <div className="thread-actions">
             <button className="mini-button" disabled={!activeThreadId || isSharedViewer} onClick={() => void handleRenameChat()} type="button">
@@ -1882,140 +1795,140 @@ export default function App() {
             </details>
           ) : null}
         </section>
-
-        <section className="panel panel-compact">
-          <div className="panel-heading panel-heading-compact">
-            <p className="eyebrow">Среда</p>
-            <div className="theme-switcher" aria-label="Режим темы">
-              {(["auto", "light", "dark"] as const).map((mode) => (
-                <button
-                  className={themeMode === mode ? "theme-option theme-option-active" : "theme-option"}
-                  key={mode}
-                  onClick={() => setThemeMode(mode)}
-                  type="button"
-                >
-                  {mode === "auto" ? "Авто" : mode === "light" ? "Свет" : "Тьма"}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="status-grid">
-            <div className="status-pill">
-              <span className="status-dot" />
-              <strong>{bootstrap.provider}</strong>
-            </div>
-            <div className="status-box">
-              <span className="status-label">Модель</span>
-              <strong>{bootstrap.model}</strong>
-            </div>
-            <div className="status-box">
-              <span className="status-label">Заметки</span>
-              <strong>{bootstrap.notes.length}</strong>
-            </div>
-          </div>
-        </section>
-
-        <section className="panel panel-compact">
+  );
+  const panels = {
+    projects: (        <section className="panel project-panel">
           <div className="panel-heading panel-heading-compact">
             <div>
-              <p className="eyebrow">Модель</p>
-              <h3>AI-режим</h3>
+              <p className="eyebrow">Projects</p>
+              <h3>Рабочие области</h3>
             </div>
-            <button className="ghost-button" onClick={() => void handleSaveModelSettings()} disabled={isModelSaving} type="button">
-              {isModelSaving ? "Сохраняю..." : "Сохранить"}
+            <button className="ghost-button" onClick={() => void handleCreateProject()} type="button">
+              Новый
             </button>
           </div>
-          <div className="model-controls">
-            <label>
-              Provider
+
+          <div className="project-list">
+            {bootstrap.projects.length === 0 ? (
+              <p className="muted">Проектов пока нет.</p>
+            ) : (
+              bootstrap.projects.map((project) => (
+                <button
+                  className={project.id === activeProjectId ? "project-item project-item-active" : "project-item"}
+                  key={project.id}
+                  onClick={() => void handleFocusProject(project.id)}
+                  type="button"
+                >
+                  <span>{project.title}</span>
+                  <small>{project.shared ? `${project.role} · shared` : `${project.chat_count} чатов`}</small>
+                </button>
+              ))
+            )}
+          </div>
+
+          <div className="thread-actions">
+            <button className="mini-button" disabled={!activeProjectId || activeProject?.role === "viewer"} onClick={() => void handleRenameProject()} type="button">
+              Назвать
+            </button>
+            <button className="mini-button" disabled={!activeProjectId || activeProject?.role !== "owner"} onClick={() => void handleArchiveProject()} type="button">
+              Архив
+            </button>
+            <button className="mini-button" disabled={!activeProjectId || activeProject?.role !== "owner"} onClick={() => void handleDeleteProject()} type="button">
+              Удалить
+            </button>
+            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleAssignActiveChatToProject(null)} type="button">
+              Без проекта
+            </button>
+            <button className="mini-button" disabled={workspaceBusy} onClick={() => void handleAcceptInvitation()} type="button">
+              Принять invite
+            </button>
+          </div>
+
+          {bootstrap.projects.length > 0 ? (
+            <label className="project-select">
+              Чат в проекте
               <select
-                value={selectedProvider}
-                onChange={(event) => {
-                  const nextProvider = event.target.value;
-                  const nextOption = modelProviders.find((item) => item.provider === nextProvider);
-                  setSelectedProvider(nextProvider);
-                  setSelectedModel(nextOption?.models[0] ?? "");
-                }}
+                value={bootstrap.active_thread.project_id ?? ""}
+                onChange={(event) => void handleAssignActiveChatToProject(event.target.value || null)}
               >
-                {modelProviders.map((provider) => (
-                  <option key={provider.provider} value={provider.provider}>
-                    {provider.label}
+                <option value="">Без проекта</option>
+                {bootstrap.projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.title}
                   </option>
                 ))}
               </select>
             </label>
-            <label>
-              Модель
-              <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}>
-                {selectedProviderModels.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <p className="muted">{selectedProviderOption?.description ?? "Выбери provider и модель."}</p>
-          </div>
-        </section>
+          ) : null}
 
-        <section className="panel panel-compact">
-          <div className="panel-heading panel-heading-compact">
-            <div>
-              <p className="eyebrow">Профиль</p>
-              <h3>{currentUser.display_name}</h3>
-            </div>
-            <button className="ghost-button" onClick={() => void handleLogout()} type="button">
-              Выйти
-            </button>
-          </div>
-          <div className="status-grid">
-            <div className="status-box">
-              <span className="status-label">Логин</span>
-              <strong>{currentUser.username || "—"}</strong>
-            </div>
-            <div className="status-box">
-              <span className="status-label">Вход</span>
-              <strong>{currentUser.auth_provider}</strong>
-            </div>
-          </div>
-        </section>
-
-        <section className="panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Connectors</p>
-              <h3>Внешние подключения</h3>
-            </div>
-            <span className="muted">{bootstrap.connectors.filter((item) => item.connected).length}/{bootstrap.connectors.length} подключено</span>
-          </div>
-          <p className="muted">Внешние данные считаются недоверенными. Отправка и другие side effects всегда требуют отдельного approval.</p>
-          <div className="task-list security-grants">
-            {bootstrap.connectors.length === 0 ? (
-              <p className="muted">Connectors ещё не настроены.</p>
-            ) : bootstrap.connectors.map((connector) => (
-              <article className="task-item" key={connector.id}>
-                <div className="task-item-head">
-                  <strong>{connector.name}</strong>
-                  <span className={`state-badge state-${connector.connected ? "completed" : "blocked"}`}>{connector.status}</span>
-                </div>
-                <p>{connector.description}</p>
-                <p className="muted">Scopes: {connector.scopes.join(", ") || "нет"}</p>
-                <p className="muted">Capabilities: {connector.capabilities.join(", ") || "нет"}</p>
-                <p className="muted">Tools: {connector.tools.join(", ") || "не обнаружены"}</p>
-                <button
-                  className={`mini-button ${connector.enabled ? "mini-button-danger" : ""}`}
-                  disabled={updatingConnectorId === connector.id}
-                  onClick={() => void handleConnectorState(connector.id, !connector.enabled)}
-                  type="button"
+          {activeProject ? (
+            <details className="workspace-panel" open={activeProject.shared}>
+              <summary>Shared workspace · {activeProject.role}</summary>
+              <label className="project-select">
+                Режим Avelin
+                <select
+                  value={activeProject.agent_mode}
+                  disabled={activeProject.role === "viewer" || workspaceBusy}
+                  onChange={(event) => void handleAgentMode(event.target.value as "mention_only" | "explicit" | "off")}
                 >
-                  {updatingConnectorId === connector.id ? "Обновляю..." : connector.enabled ? "Отключить" : "Подключить"}
-                </button>
-              </article>
-            ))}
-          </div>
-        </section>
+                  <option value="mention_only">Только по @Avelin</option>
+                  <option value="explicit">На каждый явный запрос</option>
+                  <option value="off">Выключен</option>
+                </select>
+              </label>
+              <div className="workspace-actions">
+                {activeProject.role === "owner" ? (
+                  <button className="mini-button" disabled={workspaceBusy} onClick={() => void handleInviteMember()} type="button">Пригласить</button>
+                ) : null}
+                {activeProject.role !== "viewer" ? (
+                  <button className="mini-button" disabled={workspaceBusy} onClick={() => void handleCreateSharedItem()} type="button">Поделиться</button>
+                ) : null}
+              </div>
+              <div className="workspace-members">
+                {projectMembers.map((member) => (
+                  <div className="workspace-row" key={member.user_id}>
+                    <span>{member.display_name} · {member.role}</span>
+                    {activeProject.role === "owner" && member.role !== "owner" ? (
+                      <button className="mini-button mini-button-danger" disabled={workspaceBusy} onClick={() => void handleRemoveMember(member)} type="button">Удалить</button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+              {projectInvitations.filter((item) => item.status === "pending").map((invite) => (
+                <small key={invite.id}>Invite: {invite.email} · {invite.role} · до {formatFileTime(invite.expires_at)}</small>
+              ))}
+              <div className="workspace-board">
+                {sharedProjectItems.length === 0 ? <small>Общая доска пуста. Личная память и файлы сюда не попадают автоматически.</small> : sharedProjectItems.map((item) => (
+                  <article className="workspace-board-item" key={item.id}>
+                    <b>{item.kind} · {item.title}</b>
+                    <span>{String(item.content.text ?? "")}</span>
+                    <small>revision {item.revision}</small>
+                  </article>
+                ))}
+              </div>
+            </details>
+          ) : null}
 
-        <section className="panel">
+          {bootstrap.archived_projects.length > 0 ? (
+            <details className="thread-archive">
+              <summary>Архив проектов ({bootstrap.archived_projects.length})</summary>
+              <div className="project-list">
+                {bootstrap.archived_projects.map((project) => (
+                  <button
+                    className="project-item"
+                    key={project.id}
+                    onClick={() => void handleRestoreProject(project.id)}
+                    type="button"
+                  >
+                    <span>{project.title}</span>
+                    <small>Вернуть в активные</small>
+                  </button>
+                ))}
+              </div>
+            </details>
+          ) : null}
+        </section>),
+    memory: (        <section className="panel">
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Память</p>
@@ -2108,13 +2021,13 @@ export default function App() {
               value={memoryDraft}
             />
             <div className="memory-editor-controls">
-              <select value={memoryKind} onChange={(event) => setMemoryKind(event.target.value as PersonalMemoryItem["kind"])}>
+              <select aria-label="Тип записи памяти" value={memoryKind} onChange={(event) => setMemoryKind(event.target.value as PersonalMemoryItem["kind"])}>
                 <option value="fact">Факт</option>
                 <option value="preference">Предпочтение</option>
                 <option value="profile">Профиль</option>
                 <option value="episode">Эпизод</option>
               </select>
-              <select value={memoryScope} onChange={(event) => setMemoryScope(event.target.value as PersonalMemoryItem["scope"])}>
+              <select aria-label="Область памяти" value={memoryScope} onChange={(event) => setMemoryScope(event.target.value as PersonalMemoryItem["scope"])}>
                 <option value="global">Глобально</option>
                 <option value="project" disabled={!activeProjectId}>Текущий проект</option>
                 <option value="chat">Текущий чат</option>
@@ -2211,180 +2124,8 @@ export default function App() {
               ))
             )}
           </div>
-        </section>
-
-        <section className="panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Tool Factory</p>
-              <h3>Skills и локальные инструменты</h3>
-            </div>
-            <span className="muted">{bootstrap.extension_proposals.filter((item) => item.status === "installed").length} установлено</span>
-          </div>
-          <p className="muted">Сначала Avelin ищет готовый tool/connector/Skill. Новый код проходит статическую проверку и contract tests в изолированном процессе; установка требует отдельного approval.</p>
-          <form className="automation-form" onSubmit={handleCreateExtension}>
-            <label>
-              Тип
-              <select value={extensionKind} onChange={(event) => {
-                const kind = event.target.value as "skill" | "tool";
-                setExtensionKind(kind);
-                setExtensionContent(kind === "skill" ? "# New Skill\n\nОпиши повторяемую процедуру без исполняемого кода.\n" : 'def run(arguments):\n    return {"message": "Hello " + arguments["name"]}\n');
-              }}>
-                <option value="skill">Skill без кода</option>
-                <option value="tool">Sandboxed tool</option>
-              </select>
-            </label>
-            <label>
-              Имя
-              <input value={extensionName} onChange={(event) => setExtensionName(event.target.value)} pattern="[a-z][a-z0-9_]+" required />
-            </label>
-            <label>
-              Версия
-              <input value={extensionVersion} onChange={(event) => setExtensionVersion(event.target.value)} pattern="\d+\.\d+\.\d+" required />
-            </label>
-            <label className="automation-prompt-field">
-              Описание
-              <input value={extensionDescription} onChange={(event) => setExtensionDescription(event.target.value)} required />
-            </label>
-            <label className="automation-prompt-field">
-              Threat model
-              <textarea value={extensionThreatModel} onChange={(event) => setExtensionThreatModel(event.target.value)} minLength={20} required />
-            </label>
-            <label className="automation-prompt-field">
-              {extensionKind === "skill" ? "SKILL.md" : "Python: только def run(arguments), без imports/calls/attributes"}
-              <textarea className="factory-source" value={extensionContent} onChange={(event) => setExtensionContent(event.target.value)} required />
-            </label>
-            {extensionKind === "tool" ? (
-              <label className="automation-prompt-field">
-                Contract tests (JSON)
-                <textarea value={extensionTests} onChange={(event) => setExtensionTests(event.target.value)} required />
-              </label>
-            ) : null}
-            <button className="primary-button" disabled={extensionBusyId === "create"} type="submit">
-              {extensionBusyId === "create" ? "Проверяю…" : "Создать proposal и проверить"}
-            </button>
-          </form>
-          <div className="task-list factory-list">
-            {bootstrap.extension_proposals.length === 0 ? <p className="muted">Proposal пока нет.</p> : bootstrap.extension_proposals.map((proposal) => (
-              <article className="task-item" key={proposal.id}>
-                <div className="task-item-head">
-                  <strong>{proposal.name} · {proposal.version}</strong>
-                  <span className={`state-badge state-${proposal.status}`}>{proposal.kind} · {proposal.status}</span>
-                </div>
-                <p>{proposal.description}</p>
-                <p className="muted">Permissions: {proposal.permissions.length ? JSON.stringify(proposal.permissions) : "нет"}</p>
-                <div className="factory-checks">
-                  {proposal.checks.map((check) => (
-                    <small key={check.name} className={check.passed ? "factory-check-pass" : "factory-check-fail"}>
-                      {check.passed ? "PASS" : "FAIL"} · {check.name}: {check.detail}
-                    </small>
-                  ))}
-                </div>
-                {proposal.diff ? <details><summary>Показать diff</summary><pre className="factory-diff">{proposal.diff}</pre></details> : null}
-                <div className="memory-actions">
-                  {proposal.status === "ready" ? (
-                    <button className="mini-button" disabled={extensionBusyId === proposal.id} onClick={() => void handleInstallExtension(proposal.id, proposal.version)} type="button">Установить</button>
-                  ) : null}
-                  {proposal.status === "installed" ? (
-                    <button className="mini-button mini-button-danger" disabled={extensionBusyId === proposal.name} onClick={() => void handleDisableExtension(proposal.name)} type="button">Отключить</button>
-                  ) : null}
-                  {["superseded", "disabled"].includes(proposal.status) ? (
-                    <button className="mini-button" disabled={extensionBusyId === `${proposal.name}@${proposal.version}`} onClick={() => void handleRollbackExtension(proposal.name, proposal.version)} type="button">Откатить к этой версии</button>
-                  ) : null}
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Security</p>
-              <h3>Разрешения инструментов</h3>
-            </div>
-            <button
-              className={`ghost-button ${bootstrap.security.emergency_stop ? "" : "mini-button-danger"}`}
-              onClick={() => void handleEmergencyStop()}
-              type="button"
-            >
-              {bootstrap.security.emergency_stop ? "Возобновить" : "Emergency stop"}
-            </button>
-          </div>
-          {bootstrap.security.emergency_stop ? (
-            <div className="memory-rule-box security-stop-banner">
-              <strong>Инструменты остановлены</strong>
-              <span>Активные approval и длительные grants отозваны.</span>
-            </div>
-          ) : null}
-          {bootstrap.notifications.some((item) => !item.read_at) ? (
-            <div className="task-list security-grants">
-              <strong>Уведомления</strong>
-              {bootstrap.notifications.filter((item) => !item.read_at).slice(0, 5).map((item) => (
-                <article className="task-item" key={item.id}>
-                  <div className="task-item-head">
-                    <strong>{item.title}</strong>
-                    <button className="mini-button" onClick={() => void handleReadNotification(item.id)} type="button">Прочитано</button>
-                  </div>
-                  <p className="muted">{item.body}</p>
-                  <small>{formatFileTime(item.created_at)}</small>
-                </article>
-              ))}
-            </div>
-          ) : null}
-          <div className="task-list">
-            {bootstrap.approval_requests.length === 0 ? (
-              <p className="muted">Нет действий, ожидающих решения.</p>
-            ) : (
-              bootstrap.approval_requests.map((approval) => (
-                <article className="task-item" key={approval.id}>
-                  <div className="task-item-head">
-                    <strong>{approval.tool_name}</strong>
-                    <span className={`state-badge state-${approval.risk}`}>{approval.risk}</span>
-                  </div>
-                  <p className="muted">Область: {JSON.stringify(approval.scope)}</p>
-                  <p className="muted">Аргументы: {JSON.stringify(approval.arguments)}</p>
-                  <small>Истекает: {formatFileTime(approval.expires_at)}</small>
-                  <div className="memory-actions">
-                    <button
-                      className="mini-button"
-                      disabled={approvingStepId === approval.id}
-                      onClick={() => void handleApprovalDecision(approval.id, "approved", approval.step_id)}
-                      type="button"
-                    >
-                      Разрешить один раз
-                    </button>
-                    <button
-                      className="mini-button mini-button-danger"
-                      disabled={approvingStepId === approval.id}
-                      onClick={() => void handleApprovalDecision(approval.id, "denied")}
-                      type="button"
-                    >
-                      Запретить
-                    </button>
-                  </div>
-                </article>
-              ))
-            )}
-          </div>
-          {bootstrap.permission_grants.length > 0 ? (
-            <div className="task-list security-grants">
-              <strong>Длительные разрешения</strong>
-              {bootstrap.permission_grants.map((grant) => (
-                <article className="task-item" key={grant.id}>
-                  <div className="task-item-head">
-                    <span>{grant.permission} · {JSON.stringify(grant.scope)}</span>
-                    <button className="mini-button mini-button-danger" onClick={() => void handleRevokeGrant(grant.id)} type="button">
-                      Отозвать
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          ) : null}
-        </section>
-
-        <section className="panel">
+        </section>),
+    automations: (        <section className="panel">
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Automations</p>
@@ -2457,9 +2198,8 @@ export default function App() {
               </article>
             ))}
           </div>
-        </section>
-
-        <section className="panel">
+        </section>),
+    tasks: (        <section className="panel">
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Execution</p>
@@ -2546,9 +2286,8 @@ export default function App() {
               ))}
             </div>
           ) : null}
-        </section>
-
-        <section className="panel">
+        </section>),
+    files: (        <section className="panel">
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Files</p>
@@ -2563,21 +2302,302 @@ export default function App() {
               <p className="muted">Рабочая папка пока пуста.</p>
             ) : (
               bootstrap.workspace_files.slice(0, 6).map((file) => (
-                <article className="workspace-file" key={file.path}>
-                  <div>
-                    <strong>{file.name}</strong>
-                    <span>{file.path}</span>
+                <button className="artifact-card" key={file.path} title={file.path} type="button" disabled={downloadingArtifactPath === file.path} onClick={() => void handleDownloadArtifact(file)}>
+                  <span className="artifact-icon" aria-hidden="true">{file.extension.replace(".", "").slice(0, 4).toUpperCase() || "FILE"}</span>
+                  <span className="artifact-copy"><strong>{file.name}</strong><small>{formatFileSize(file.size_bytes)} · {formatFileTime(file.modified_at)}</small></span>
+                  <span className="artifact-action">{downloadingArtifactPath === file.path ? "Скачивание…" : "Скачать ↓"}</span>
+                </button>
+              ))
+            )}
+          </div>
+        </section>),
+    settings: (<div className="settings-content">
+      {settingsView === "general" ? <>        <section className="panel panel-compact">
+          <div className="panel-heading panel-heading-compact">
+            <h3>Оформление</h3>
+            <div className="theme-switcher" aria-label="Режим темы">
+              {(["auto", "light", "dark"] as const).map((mode) => (
+                <button
+                  className={themeMode === mode ? "theme-option theme-option-active" : "theme-option"}
+                  aria-pressed={themeMode === mode}
+                  key={mode}
+                  onClick={() => setThemeMode(mode)}
+                  type="button"
+                >
+                  {mode === "auto" ? "Авто" : mode === "light" ? "Светлая" : "Тёмная"}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="muted">Выбери тему пространства. В режиме «Авто» светлая тема действует с 07:00 до 21:00.</p>
+        </section>
+        <section className="panel panel-compact">
+          <div className="panel-heading panel-heading-compact">
+            <div>
+              <p className="eyebrow">Модель</p>
+              <h3>Модель для диалога</h3>
+            </div>
+            <button className="ghost-button" onClick={() => void handleSaveModelSettings()} disabled={isModelSaving} type="button">
+              {isModelSaving ? "Сохраняю..." : "Сохранить"}
+            </button>
+          </div>
+          <div className="model-controls">
+            <label>
+              Провайдер
+              <select
+                value={selectedProvider}
+                onChange={(event) => {
+                  const nextProvider = event.target.value;
+                  const nextOption = modelProviders.find((item) => item.provider === nextProvider);
+                  setSelectedProvider(nextProvider);
+                  setSelectedModel(nextOption?.models[0] ?? "");
+                }}
+              >
+                {modelProviders.map((provider) => (
+                  <option key={provider.provider} value={provider.provider}>
+                    {provider.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Модель
+              <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}>
+                {selectedProviderModels.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="muted">{selectedProviderOption?.description ?? "Выбери provider и модель."}</p>
+          </div>
+        </section>
+        <section className="panel panel-compact">
+          <div className="panel-heading panel-heading-compact">
+            <div>
+              <p className="eyebrow">Профиль</p>
+              <h3>{currentUser.display_name}</h3>
+            </div>
+            <button className="ghost-button" onClick={() => void handleLogout()} type="button">
+              Выйти
+            </button>
+          </div>
+          <div className="status-grid">
+            <div className="status-box">
+              <span className="status-label">Логин</span>
+              <strong>{currentUser.username || "—"}</strong>
+            </div>
+            <div className="status-box">
+              <span className="status-label">Вход</span>
+              <strong>{currentUser.auth_provider}</strong>
+            </div>
+          </div>
+        </section></> : null}
+      {settingsView === "connections" ?         <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Connectors</p>
+              <h3>Внешние подключения</h3>
+            </div>
+            <span className="muted">{bootstrap.connectors.filter((item) => item.connected).length}/{bootstrap.connectors.length} подключено</span>
+          </div>
+          <p className="muted">Внешние данные считаются недоверенными. Отправка и другие side effects всегда требуют отдельного approval.</p>
+          <div className="task-list security-grants">
+            {bootstrap.connectors.length === 0 ? (
+              <p className="muted">Connectors ещё не настроены.</p>
+            ) : bootstrap.connectors.map((connector) => (
+              <article className="task-item" key={connector.id}>
+                <div className="task-item-head">
+                  <strong>{connector.name}</strong>
+                  <span className={`state-badge state-${connector.connected ? "completed" : "blocked"}`}>{connector.status}</span>
+                </div>
+                <p>{connector.description}</p>
+                <p className="muted">Scopes: {connector.scopes.join(", ") || "нет"}</p>
+                <p className="muted">Capabilities: {connector.capabilities.join(", ") || "нет"}</p>
+                <p className="muted">Tools: {connector.tools.join(", ") || "не обнаружены"}</p>
+                <button
+                  className={`mini-button ${connector.enabled ? "mini-button-danger" : ""}`}
+                  disabled={updatingConnectorId === connector.id}
+                  onClick={() => void handleConnectorState(connector.id, !connector.enabled)}
+                  type="button"
+                >
+                  {updatingConnectorId === connector.id ? "Обновляю..." : connector.enabled ? "Отключить" : "Подключить"}
+                </button>
+              </article>
+            ))}
+          </div>
+        </section> : null}
+      {settingsView === "tools" ?         <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Tool Factory</p>
+              <h3>Skills и локальные инструменты</h3>
+            </div>
+            <span className="muted">{bootstrap.extension_proposals.filter((item) => item.status === "installed").length} установлено</span>
+          </div>
+          <p className="muted">Сначала Avelin ищет готовый tool/connector/Skill. Новый код проходит статическую проверку и contract tests в изолированном процессе; установка требует отдельного approval.</p>
+          <form className="automation-form" onSubmit={handleCreateExtension}>
+            <label>
+              Тип
+              <select value={extensionKind} onChange={(event) => {
+                const kind = event.target.value as "skill" | "tool";
+                setExtensionKind(kind);
+                setExtensionContent(kind === "skill" ? "# New Skill\n\nОпиши повторяемую процедуру без исполняемого кода.\n" : 'def run(arguments):\n    return {"message": "Hello " + arguments["name"]}\n');
+              }}>
+                <option value="skill">Skill без кода</option>
+                <option value="tool">Sandboxed tool</option>
+              </select>
+            </label>
+            <label>
+              Имя
+              <input value={extensionName} onChange={(event) => setExtensionName(event.target.value)} pattern="[a-z][a-z0-9_]+" required />
+            </label>
+            <label>
+              Версия
+              <input value={extensionVersion} onChange={(event) => setExtensionVersion(event.target.value)} pattern="\d+\.\d+\.\d+" required />
+            </label>
+            <label className="automation-prompt-field">
+              Описание
+              <input value={extensionDescription} onChange={(event) => setExtensionDescription(event.target.value)} required />
+            </label>
+            <label className="automation-prompt-field">
+              Threat model
+              <textarea value={extensionThreatModel} onChange={(event) => setExtensionThreatModel(event.target.value)} minLength={20} required />
+            </label>
+            <label className="automation-prompt-field">
+              {extensionKind === "skill" ? "SKILL.md" : "Python: только def run(arguments), без imports/calls/attributes"}
+              <textarea className="factory-source" value={extensionContent} onChange={(event) => setExtensionContent(event.target.value)} required />
+            </label>
+            {extensionKind === "tool" ? (
+              <label className="automation-prompt-field">
+                Contract tests (JSON)
+                <textarea value={extensionTests} onChange={(event) => setExtensionTests(event.target.value)} required />
+              </label>
+            ) : null}
+            <button className="primary-button" disabled={extensionBusyId === "create"} type="submit">
+              {extensionBusyId === "create" ? "Проверяю…" : "Создать proposal и проверить"}
+            </button>
+          </form>
+          <div className="task-list factory-list">
+            {bootstrap.extension_proposals.length === 0 ? <p className="muted">Proposal пока нет.</p> : bootstrap.extension_proposals.map((proposal) => (
+              <article className="task-item" key={proposal.id}>
+                <div className="task-item-head">
+                  <strong>{proposal.name} · {proposal.version}</strong>
+                  <span className={`state-badge state-${proposal.status}`}>{proposal.kind} · {proposal.status}</span>
+                </div>
+                <p>{proposal.description}</p>
+                <p className="muted">Permissions: {proposal.permissions.length ? JSON.stringify(proposal.permissions) : "нет"}</p>
+                <div className="factory-checks">
+                  {proposal.checks.map((check) => (
+                    <small key={check.name} className={check.passed ? "factory-check-pass" : "factory-check-fail"}>
+                      {check.passed ? "PASS" : "FAIL"} · {check.name}: {check.detail}
+                    </small>
+                  ))}
+                </div>
+                {proposal.diff ? <details><summary>Показать diff</summary><pre className="factory-diff">{proposal.diff}</pre></details> : null}
+                <div className="memory-actions">
+                  {proposal.status === "ready" ? (
+                    <button className="mini-button" disabled={extensionBusyId === proposal.id} onClick={() => void handleInstallExtension(proposal.id, proposal.version)} type="button">Установить</button>
+                  ) : null}
+                  {proposal.status === "installed" ? (
+                    <button className="mini-button mini-button-danger" disabled={extensionBusyId === proposal.name} onClick={() => void handleDisableExtension(proposal.name)} type="button">Отключить</button>
+                  ) : null}
+                  {["superseded", "disabled"].includes(proposal.status) ? (
+                    <button className="mini-button" disabled={extensionBusyId === `${proposal.name}@${proposal.version}`} onClick={() => void handleRollbackExtension(proposal.name, proposal.version)} type="button">Откатить к этой версии</button>
+                  ) : null}
+                </div>
+              </article>
+            ))}
+          </div>
+        </section> : null}
+      {settingsView === "security" ?         <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Security</p>
+              <h3>Разрешения инструментов</h3>
+            </div>
+            <button
+              className={`ghost-button ${bootstrap.security.emergency_stop ? "" : "mini-button-danger"}`}
+              onClick={() => void handleEmergencyStop()}
+              type="button"
+            >
+              {bootstrap.security.emergency_stop ? "Возобновить" : "Emergency stop"}
+            </button>
+          </div>
+          {bootstrap.security.emergency_stop ? (
+            <div className="memory-rule-box security-stop-banner">
+              <strong>Инструменты остановлены</strong>
+              <span>Активные approval и длительные grants отозваны.</span>
+            </div>
+          ) : null}
+          {bootstrap.notifications.some((item) => !item.read_at) ? (
+            <div className="task-list security-grants">
+              <strong>Уведомления</strong>
+              {bootstrap.notifications.filter((item) => !item.read_at).slice(0, 5).map((item) => (
+                <article className="task-item" key={item.id}>
+                  <div className="task-item-head">
+                    <strong>{item.title}</strong>
+                    <button className="mini-button" onClick={() => void handleReadNotification(item.id)} type="button">Прочитано</button>
                   </div>
-                  <p>
-                    {formatFileSize(file.size_bytes)} · {formatFileTime(file.modified_at)}
-                  </p>
+                  <p className="muted">{item.body}</p>
+                  <small>{formatFileTime(item.created_at)}</small>
+                </article>
+              ))}
+            </div>
+          ) : null}
+          <div className="task-list">
+            {bootstrap.approval_requests.length === 0 ? (
+              <p className="muted">Нет действий, ожидающих решения.</p>
+            ) : (
+              bootstrap.approval_requests.map((approval) => (
+                <article className="task-item" key={approval.id}>
+                  <div className="task-item-head">
+                    <strong>{approval.tool_name}</strong>
+                    <span className={`state-badge state-${approval.risk}`}>{approval.risk}</span>
+                  </div>
+                  <p className="muted">Область: {JSON.stringify(approval.scope)}</p>
+                  <p className="muted">Аргументы: {JSON.stringify(approval.arguments)}</p>
+                  <small>Истекает: {formatFileTime(approval.expires_at)}</small>
+                  <div className="memory-actions">
+                    <button
+                      className="mini-button"
+                      disabled={approvingStepId === approval.id}
+                      onClick={() => void handleApprovalDecision(approval.id, "approved", approval.step_id)}
+                      type="button"
+                    >
+                      Разрешить один раз
+                    </button>
+                    <button
+                      className="mini-button mini-button-danger"
+                      disabled={approvingStepId === approval.id}
+                      onClick={() => void handleApprovalDecision(approval.id, "denied")}
+                      type="button"
+                    >
+                      Запретить
+                    </button>
+                  </div>
                 </article>
               ))
             )}
           </div>
-        </section>
-
-        <section className="panel">
+          {bootstrap.permission_grants.length > 0 ? (
+            <div className="task-list security-grants">
+              <strong>Длительные разрешения</strong>
+              {bootstrap.permission_grants.map((grant) => (
+                <article className="task-item" key={grant.id}>
+                  <div className="task-item-head">
+                    <span>{grant.permission} · {JSON.stringify(grant.scope)}</span>
+                    <button className="mini-button mini-button-danger" onClick={() => void handleRevokeGrant(grant.id)} type="button">
+                      Отозвать
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : null}
+        </section> : null}
+      {settingsView === "activity" ?         <section className="panel">
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Audit</p>
@@ -2599,50 +2619,95 @@ export default function App() {
               ))
             )}
           </div>
-        </section>
+        </section> : null}
+    </div>),
+  };
 
-        <section className="panel">
-          <p className="eyebrow">Desktop</p>
-          <h3>Готовим основу под Tauri</h3>
-          <p className="muted">
-            Интерфейс отделен от backend, поэтому позже мы сможем упаковать Avelin в настольное приложение
-            без переписывания логики чата.
-          </p>
-        </section>
-      </aside>
-
-      <main className="workspace">
-        <header className="hero">
-          <div className="hero-copy">
-            <p className="eyebrow">Диалог</p>
-            <h2>Avelin помогает держать мысли, задачи и память в одном спокойном рабочем окне</h2>
-            <p className="hero-text">
-              Здесь можно разговаривать с агентом, сохранять заметки и постепенно превращать его в полноценное
-              личное приложение.
-            </p>
-          </div>
-          <div className="hero-signet" aria-hidden="true">
-            <span>A</span>
-          </div>
-        </header>
-
-        <section className="quick-actions" aria-label="Быстрые действия">
-          {QUICK_ACTIONS.map((item) => (
-            <button
-              className="action-chip"
-              key={item}
-              onClick={() => void handleQuickAction(item)}
-              type="button"
-            >
-              {item}
+  return (
+    <div className={`shell workspace-shell ${isSidebarOpen ? "sidebar-open" : ""}`}>
+      <button
+        className="sidebar-backdrop"
+        tabIndex={-1}
+        aria-label="Закрыть навигацию"
+        onClick={() => setIsSidebarOpen(false)}
+        type="button"
+      />
+      <aside id="workspace-navigation" className="sidebar workspace-navigation" aria-label="Навигация Avelin" ref={navigationRef}>
+        <div className="nav-brand"><span className="nav-logo">A</span><h1>Avelin</h1><button className="icon-button nav-close" aria-label="Закрыть навигацию" onClick={() => setIsSidebarOpen(false)} type="button"><WorkspaceIcon name="close" /></button></div>
+        <button className="nav-search" onClick={() => navigate("chat")} type="button"><WorkspaceIcon name="search" /><span>Найти диалог</span></button>
+        <nav className="primary-nav" aria-label="Разделы">
+          {WORKSPACE_NAV.map((item) => (
+            <button key={item.id} className={view === item.id ? "nav-item is-active" : "nav-item"} aria-label={item.label} aria-current={view === item.id ? "page" : undefined} onClick={() => navigate(item.id)} type="button">
+              <WorkspaceIcon name={item.icon} /><span>{item.label}</span>
+              {item.id === "chat" && bootstrap.chat_threads.length > 0 ? <small>{bootstrap.chat_threads.length}</small> : null}
             </button>
           ))}
-        </section>
+        </nav>
+        <div className="nav-projects"><div className="nav-caption"><span>Рабочие области</span><button className="icon-button" aria-label="Новый проект" onClick={() => { navigate("projects"); void handleCreateProject(); }} type="button"><WorkspaceIcon name="plus" /></button></div>
+          {bootstrap.projects.slice(0, 5).map((project) => <button key={project.id} className="nav-project" disabled={isSending} onClick={() => void handleFocusProject(project.id)} type="button" title={project.title}><i /><span>{project.title}</span></button>)}
+          {bootstrap.projects.length === 0 ? <p className="nav-empty">Место для твоих идей</p> : null}
+          {bootstrap.projects.length > 5 ? <button className="text-button" type="button" onClick={() => navigate("projects")}>Все проекты</button> : null}
+        </div>
+        <div className="nav-footer">
+          <button className={view === "settings" ? "nav-item is-active" : "nav-item"} aria-current={view === "settings" ? "page" : undefined} onClick={() => navigate("settings")} type="button"><WorkspaceIcon name="settings" /><span>Настройки</span></button>
+          <div className="nav-user"><button className="nav-profile" onClick={() => navigate("settings")} type="button"><span className="avatar">{currentUser.display_name.slice(0, 1).toUpperCase() || "A"}</span><span><b>{currentUser.display_name}</b><small>Личное пространство</small></span></button><button className="icon-button" aria-label={resolvedTheme === "dark" ? "Включить светлую тему" : "Включить тёмную тему"} onClick={() => setThemeMode(resolvedTheme === "dark" ? "light" : "dark")} type="button"><WorkspaceIcon name="sun" /></button></div>
+        </div>
+      </aside>
 
+      <main className={`workspace workspace-view-${view}`} ref={workspaceRef}>
+        <div className="workspace-toolbar"><button ref={menuButtonRef} className="icon-button mobile-menu-button" aria-label="Открыть навигацию" aria-expanded={isSidebarOpen} aria-controls="workspace-navigation" onClick={() => setIsSidebarOpen(true)} type="button"><WorkspaceIcon name="menu" /></button><span>{view === "home" ? "Личное пространство" : view === "settings" ? "Настройки" : WORKSPACE_NAV.find((item) => item.id === view)?.label}</span><button className="icon-button" aria-label="Уведомления и задачи" onClick={() => navigate("tasks")} type="button"><WorkspaceIcon name="bell" />{bootstrap.notifications.some((item) => !item.read_at) ? <i className="notification-dot" /> : null}</button></div>
+        {error ? <div className="workspace-error" role="alert">{error}<button className="icon-button" aria-label="Закрыть сообщение об ошибке" onClick={() => setError(null)} type="button"><WorkspaceIcon name="close" /></button></div> : null}
+        {isLoading ? <p className="workspace-loading" role="status">Загружаем твоё пространство…</p> : null}
+        {view === "home" ? (
+          <div className="workspace-home">
+            <header className="home-heading"><p>{new Date().getHours() < 12 ? "Доброе утро" : new Date().getHours() < 18 ? "Добрый день" : "Добрый вечер"}, {currentUser.display_name.split(" ")[0] || currentUser.username}</p><h2>На чём продолжим?</h2></header>
+            <form className="home-composer" onSubmit={handleHomeSubmit}>
+              <textarea ref={textareaRef} aria-label="Новая задача" value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="Попроси Avelin сделать что-нибудь…" rows={3} disabled={isStartingChat} />
+              <div className="home-composer-bottom"><span>Новый диалог · {bootstrap.model}</span><button className="send-icon" aria-label="Начать диалог" type="submit" disabled={!input.trim() || isSending || isStartingChat || isLoading}><WorkspaceIcon name="arrow" /></button></div>
+            </form>
+            <div className="home-suggestions">{QUICK_ACTIONS.slice(2).map((action) => <button className="text-button" type="button" key={action} onClick={() => void handleQuickAction(action)}>{action}<WorkspaceIcon name="arrow" /></button>)}</div>
+            <section className="home-recent" aria-labelledby="recent-heading">
+              <div className="section-heading"><div><h3 id="recent-heading">Продолжить работу</h3><p>Твои последние диалоги</p></div><button className="text-button" type="button" onClick={() => navigate("chat")}>Все диалоги <WorkspaceIcon name="arrow" /></button></div>
+              <div className="recent-grid">
+                {bootstrap.chat_threads.slice(0, 3).map((thread) => <button className="recent-card" type="button" key={thread.id} disabled={isSending} onClick={() => void handleSelectChat(thread.id)}><div className="recent-card-top"><span className="card-icon"><WorkspaceIcon name={thread.project_id ? "projects" : "chat"} /></span><small>{bootstrap.projects.find((project) => project.id === thread.project_id)?.title ?? "Личное"}</small></div><h4>{thread.title}</h4><p>{thread.message_count} сообщений</p><footer><span>{formatFileTime(thread.updated_at)}</span><WorkspaceIcon name="arrow" /></footer></button>)}
+                {bootstrap.chat_threads.length === 0 ? <div className="quiet-empty"><WorkspaceIcon name="chat" /><p>Здесь появятся твои диалоги.</p><span>Начни с первого запроса выше.</span></div> : null}
+              </div>
+            </section>
+            <section className="home-activity"><div className="section-heading"><div><h3>Активность</h3><p>Последние действия Avelin</p></div><button className="text-button" type="button" onClick={() => { setSettingsView("activity"); navigate("settings"); }}>Журнал <WorkspaceIcon name="arrow" /></button></div>
+              {bootstrap.action_logs.slice(0, 3).map((log) => <div className="activity-row" key={log.id}><span className="card-icon"><WorkspaceIcon name="tasks" /></span><div><strong>{({ create_docx: "Документ Word", write_file: "Сохранение файла", web_search: "Поиск в интернете", browser_read: "Чтение страницы", http_request: "Запрос к сайту" } as Record<string, string>)[log.tool_name] ?? log.tool_name}</strong><span>{log.status === "completed" ? "Завершено" : log.status === "failed" ? "Не удалось выполнить" : log.status === "blocked" ? "Ожидает разрешения" : log.status}</span></div><time>{formatFileTime(log.created_at)}</time></div>)}
+              {bootstrap.action_logs.length === 0 ? <p className="activity-empty">Пока здесь тихо. Выполненные действия появятся автоматически.</p> : null}
+            </section>
+          </div>
+        ) : null}
+        {view === "chat" ? <div className={`chat-layout ${isChatListOpen ? "chat-list-open" : ""}`}>
+          <button className="mobile-chat-toggle text-button" type="button" aria-expanded={isChatListOpen} onClick={() => setIsChatListOpen(!isChatListOpen)}>
+            <WorkspaceIcon name="chat" />{isChatListOpen ? "Вернуться к сообщению" : "Все диалоги"}
+          </button>
+          <div className="chat-browser">
+            <div className="section-heading">
+              <h2>Диалоги</h2>
+              <button className="icon-button" aria-label="Новый диалог" disabled={isSending || isSharedViewer} type="button" onClick={() => void handleCreateChat()}><WorkspaceIcon name="plus" /></button>
+            </div>
+            <label className="chat-search">
+              <WorkspaceIcon name="search" />
+              <input aria-label="Поиск диалогов" placeholder="Поиск диалогов" value={chatSearch} onChange={(event) => setChatSearch(event.target.value)} />
+            </label>
+            <div className="chat-browser-list">
+              {bootstrap.chat_threads.filter((thread) => thread.title.toLocaleLowerCase().includes(chatSearch.toLocaleLowerCase())).map((thread) => (
+                <button type="button" key={thread.id} disabled={isSending} aria-current={thread.id === activeThreadId ? "true" : undefined} className={thread.id === activeThreadId ? "chat-list-item is-active" : "chat-list-item"} onClick={() => void handleSelectChat(thread.id)} title={thread.title}>
+                  <span>{thread.title}</span><small>{thread.message_count} сообщений</small>
+                </button>
+              ))}
+              {!bootstrap.chat_threads.some((thread) => thread.title.toLocaleLowerCase().includes(chatSearch.toLocaleLowerCase())) ? (
+                <p className="chat-search-empty" role="status">{chatSearch ? "Диалоги не найдены. Попробуй другое название." : "Здесь появятся твои диалоги."}</p>
+              ) : null}
+            </div>
+            <details className="chat-management"><summary>Управление диалогом</summary>{chatManagement}</details>
+          </div>
         <section className="chat-card">
           <div className="chat-header">
             <div>
-              <strong>{bootstrap.active_thread.title || "Диалог"}</strong>
+              <strong title={bootstrap.active_thread.title || "Диалог"}>{bootstrap.active_thread.title || "Диалог"}</strong>
               <p className="muted">{messageCountLabel}</p>
             </div>
             <div className="header-tags">
@@ -2653,7 +2718,10 @@ export default function App() {
             </div>
           </div>
 
-          <div className="messages">
+          <div className="messages" role="region" aria-label="Сообщения диалога" tabIndex={0} onScroll={(event) => {
+            const element = event.currentTarget;
+            followLatestMessageRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+          }}>
             {messages.length === 0 && !isLoading ? (
               <div className="empty-state">
                 <p>Напиши первое сообщение агенту.</p>
@@ -2669,14 +2737,19 @@ export default function App() {
                   <span className="message-role">{formatRoleLabel(message, bootstrap.agent_name, Boolean(activeProject?.shared))}</span>
                   <div className="message-content">
                     {message.status === "pending" && !message.content ? (
-                      <div className="typing-dots" aria-label="Avelin печатает"><span /><span /><span /></div>
+                      <div className="typing-dots" role="status" aria-label="Avelin печатает"><span /><span /><span /></div>
                     ) : animatedMessageKey === messageKey ? (
                       <TypewriterText text={message.content} />
                     ) : message.role === "assistant" ? (
                       <ReactMarkdown
                         remarkPlugins={[remarkGfm]}
                         components={{
-                          a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />
+                          a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+                          table: ({ node: _node, ...props }) => (
+                            <div className="markdown-table" role="region" aria-label="Таблица в ответе" tabIndex={0}>
+                              <table {...props} />
+                            </div>
+                          )
                         }}
                       >
                         {message.content}
@@ -2692,6 +2765,7 @@ export default function App() {
                             className="artifact-card"
                             disabled={downloadingArtifactPath === artifact.path}
                             key={artifact.path}
+                            title={artifact.name}
                             onClick={() => void handleDownloadArtifact(artifact)}
                             type="button"
                           >
@@ -2720,17 +2794,16 @@ export default function App() {
           <form className="composer" onSubmit={handleSubmit}>
             <textarea
               ref={textareaRef}
+              aria-label="Сообщение Avelin"
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleComposerKeyDown}
               placeholder={isSharedViewer ? "Viewer имеет доступ только для чтения" : activeProject?.shared && activeProject.agent_mode === "mention_only" ? "Упомяни @Avelin, чтобы агент ответил…" : "Спроси что-нибудь у Avelin..."}
               disabled={isSharedViewer}
-              rows={3}
+              rows={2}
             />
             <div className="composer-row">
-              <span className={`muted ${error ? "muted-error" : ""}`}>
-                {error ? error : "Enter отправляет сообщение, Shift+Enter переносит строку."}
-              </span>
+              <span className="muted">Enter — отправить · Shift + Enter — новая строка</span>
               <div className="composer-actions">
                 <button
                   className="ghost-button"
@@ -2748,7 +2821,8 @@ export default function App() {
               </div>
             </div>
           </form>
-        </section>
+        </section></div> : null}
+        {view !== "home" && view !== "chat" ? <div className="workspace-page"><header className="page-heading"><h2>{view === "settings" ? "Настройки" : WORKSPACE_NAV.find((item) => item.id === view)?.label}</h2></header>{view === "settings" ? <nav className="settings-tabs" aria-label="Разделы настроек">{SETTINGS_NAV.map((item) => <button type="button" key={item.id} aria-current={settingsView === item.id ? "page" : undefined} className={settingsView === item.id ? "is-active" : ""} onClick={() => setSettingsView(item.id)}>{item.label}</button>)}</nav> : null}{panels[view]}</div> : null}
       </main>
     </div>
   );

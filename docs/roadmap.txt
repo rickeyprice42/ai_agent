@@ -338,3 +338,29 @@
    - [DONE] Личная память, личные чаты, Skills и файлы изолированы; shared context принимает только явно опубликованные элементы.
    - [DONE] Viewer не изменяет чаты и доску, editor не управляет участниками, удаление участника не удаляет его личные данные.
    - [DONE] Добавлены tenant/IDOR/invitation/concurrency regression tests и PostgreSQL RLS migration.
+
+39. [DONE] Desktop-first Workspace дизайн-система (AVE-56)
+   - [DONE] Выбран и перенесён Workspace-вариант: компактная навигация, отдельные рабочие экраны и спокойная главная.
+   - [DONE] Реализованы light/dark/high-contrast, reduced motion, keyboard focus и fallback без blur.
+   - [DONE] Исправлены desktop/mobile сетки чата, длинные ответы, Markdown-таблицы, файлы, ошибки и переполнения.
+   - [DONE] Добавлена изолированная browser-регрессия для 320/390/768/1024/1440 px, обеих тем и ключевых состояний.
+   - [DONE] Исправлено восстановление частично запущенного launcher и добавлены регрессионные тесты.
+
+40. [NEXT] Адаптивный публичный сайт Avelin.com (AVE-57)
+   - Отделить presentation-led landing от рабочего интерфейса агента.
+   - Согласовать интерактивный prototype dark/light с центральными Download и Auth CTA.
+   - Проверить 360/390/768/1280/1440 px, keyboard navigation, reduced motion и performance budget.
+
+41. [BACKLOG] Device-aware Download и вход в web-версию (AVE-58)
+   - Progressive enhancement и явный выбор iOS/Android/desktop с честным Coming soon fallback.
+   - Безопасный возврат после auth без open redirect; URLs магазинов хранятся в конфигурации.
+
+42. [BACKLOG] Безопасный удалённый launcher для мобильных тестов (AVE-59)
+   - Local-only по умолчанию; private preview через Tailscale Serve.
+   - Проверить реальный iPhone/Android, HTTPS, остановку tunnel и недоступность API без авторизации.
+
+43. [BACKLOG] Production runtime Avelin Core (AVE-60)
+   - Отделить домашний preview от server runtime, PostgreSQL/object storage/secrets/backups.
+
+44. [BACKLOG] Безопасный CI/CD и обновления (AVE-61)
+   - GitHub tests/build/security checks, staging, production approval, immutable artifacts и rollback.
