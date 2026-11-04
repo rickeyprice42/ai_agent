@@ -22,6 +22,11 @@ BACKEND_URL = "http://127.0.0.1:8000/api/health"
 FRONTEND_URL = "http://127.0.0.1:5173"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.remote_preview import TailscalePreview
+
 
 def launcher_log(message: str) -> None:
     LOGS.mkdir(parents=True, exist_ok=True)
@@ -180,28 +185,93 @@ def run_check() -> int:
         launcher.stop()
 
 
+def run_remote_check() -> int:
+    preview = TailscalePreview()
+    state = preview.status()
+    payload = preview.smoke() if state.active else state.payload()
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0 if payload.get("installed") and payload.get("online") else 1
+
+
+def run_remote_stop() -> int:
+    state = TailscalePreview().stop()
+    print(json.dumps(state.payload(), ensure_ascii=False))
+    return 0
+
+
 def run_gui() -> int:
     import tkinter as tk
     from tkinter import messagebox
 
     launcher = AvelinLauncher()
+    remote = TailscalePreview()
     window = tk.Tk()
     window.title("Avelin Core Agent")
-    window.geometry("520x290")
+    window.geometry("620x420")
     window.resizable(False, False)
     window.configure(bg="#f3f0e8")
     status = tk.StringVar(value="Запускаю Avelin…")
 
     tk.Label(window, text="AVELIN", font=("Segoe UI", 28, "bold"), bg="#f3f0e8", fg="#191919").pack(pady=(28, 4))
     tk.Label(window, text=provider_label(), font=("Segoe UI", 10), bg="#f3f0e8", fg="#666666").pack()
-    tk.Label(window, textvariable=status, wraplength=450, justify="center", font=("Segoe UI", 11), bg="#f3f0e8", fg="#333333").pack(pady=24)
+    tk.Label(window, textvariable=status, wraplength=540, justify="center", font=("Segoe UI", 11), bg="#f3f0e8", fg="#333333").pack(pady=(22, 16))
     buttons = tk.Frame(window, bg="#f3f0e8")
     buttons.pack()
     open_button = tk.Button(buttons, text="Открыть Avelin", width=18, state="disabled", command=lambda: webbrowser.open(FRONTEND_URL))
     open_button.pack(side="left", padx=6)
     tk.Button(buttons, text="Открыть логи", width=14, command=lambda: subprocess.Popen(["explorer.exe", str(LOGS)], creationflags=NO_WINDOW)).pack(side="left", padx=6)
 
+    remote_frame = tk.Frame(window, bg="#e8e4da", padx=16, pady=12)
+    remote_frame.pack(fill="x", padx=34, pady=(24, 0))
+    remote_status = tk.StringVar(value="Проверяю Tailscale…")
+    remote_url = tk.StringVar(value="")
+    tk.Label(remote_frame, text="PRIVATE PREVIEW", font=("Segoe UI", 9, "bold"), bg="#e8e4da", fg="#666666").grid(row=0, column=0, sticky="w")
+    tk.Label(remote_frame, textvariable=remote_status, wraplength=520, justify="left", font=("Segoe UI", 10), bg="#e8e4da", fg="#242424").grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 2))
+    tk.Label(remote_frame, textvariable=remote_url, font=("Segoe UI", 9), bg="#e8e4da", fg="#555555").grid(row=2, column=0, columnspan=3, sticky="w")
+
+    def copy_remote_url() -> None:
+        if remote_url.get():
+            window.clipboard_clear()
+            window.clipboard_append(remote_url.get())
+
+    remote_button = tk.Button(remote_frame, text="Включить", width=16, state="disabled")
+    remote_button.grid(row=3, column=0, sticky="w", pady=(10, 0))
+    open_remote_button = tk.Button(remote_frame, text="Открыть", width=10, state="disabled", command=lambda: webbrowser.open(remote_url.get()))
+    open_remote_button.grid(row=3, column=1, padx=6, pady=(10, 0))
+    copy_button = tk.Button(remote_frame, text="Копировать URL", width=14, state="disabled", command=copy_remote_url)
+    copy_button.grid(row=3, column=2, pady=(10, 0))
+
+    def render_remote_state(remote_state) -> None:
+        remote_status.set(remote_state.message)
+        remote_url.set(remote_state.url)
+        if not remote_state.installed or not remote_state.online:
+            remote_button.configure(state="disabled", text="Включить")
+        else:
+            remote_button.configure(state="normal", text="Остановить доступ" if remote_state.active else "Включить")
+        target_state = "normal" if remote_state.active and remote_state.url else "disabled"
+        open_remote_button.configure(state=target_state)
+        copy_button.configure(state=target_state)
+
+    def toggle_remote_worker() -> None:
+        try:
+            current = remote.status()
+            pending = "Останавливаю private preview…" if current.active else "Запускаю HTTPS private preview…"
+            window.after(0, lambda: remote_status.set(pending))
+            remote_state = remote.stop() if current.active else remote.start()
+            window.after(0, lambda: render_remote_state(remote_state))
+        except Exception as exc:
+            launcher_log(f"remote preview failed: {exc}")
+            remote_error = f"Remote preview недоступен: {exc}"
+            window.after(0, lambda: remote_status.set(remote_error))
+
+    remote_button.configure(command=lambda: threading.Thread(target=toggle_remote_worker, daemon=True).start())
+
     def close_window() -> None:
+        if remote.started_here:
+            try:
+                remote.stop()
+            except Exception as exc:
+                launcher_log(f"remote preview stop failed: {exc}")
         launcher.stop()
         window.destroy()
 
@@ -213,6 +283,7 @@ def run_gui() -> int:
             message = launcher.start()
             window.after(0, lambda: status.set(message))
             window.after(0, lambda: open_button.configure(state="normal"))
+            window.after(0, lambda: render_remote_state(remote.status()))
             window.after(0, lambda: webbrowser.open(FRONTEND_URL))
         except Exception as exc:
             launcher_log(f"startup failed: {exc}\n{traceback.format_exc()}")
@@ -228,5 +299,13 @@ def run_gui() -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--remote-check", action="store_true")
+    parser.add_argument("--remote-stop", action="store_true")
     args = parser.parse_args()
-    raise SystemExit(run_check() if args.check else run_gui())
+    if args.check:
+        raise SystemExit(run_check())
+    if args.remote_check:
+        raise SystemExit(run_remote_check())
+    if args.remote_stop:
+        raise SystemExit(run_remote_stop())
+    raise SystemExit(run_gui())

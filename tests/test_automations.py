@@ -72,12 +72,13 @@ class AutomationTests(unittest.TestCase):
             self.assertEqual(task["steps"][0]["description"], once["prompt"])
             result = agent.executor.execute_next_step()
             self.assertIn("create_docx", result)
-            self.assertTrue((settings.tool_workspace_dir / "automation-draft.docx").is_file())
+            expected_path = f"automations/{once['id']}/{queued[0]['task_run_id']}/automation-draft.docx"
+            self.assertTrue((settings.tool_workspace_dir / expected_path).is_file())
             checkpoint = agent.memory.database.list_task_checkpoints(
                 "alice", queued[0]["task_run_id"]
             )[0]
             self.assertTrue(checkpoint["evidence"]["verified"])
-            self.assertEqual(checkpoint["artifacts"][0]["path"], "automation-draft.docx")
+            self.assertEqual(checkpoint["artifacts"][0]["path"], expected_path)
 
             weekly = scheduler.create(
                 name="Weekly research draft",

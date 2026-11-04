@@ -9,6 +9,8 @@ from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import Tool, ToolPermission, ToolRegistry
 from ai_agent.tools.browser import PlaywrightBrowserRunner, browser_interact_result, browser_read_result
 from ai_agent.tools.coding_pack import register_coding_tool_pack
+from ai_agent.tools.media import register_image_tools
+from ai_agent.tools.office_files import register_office_tools
 from ai_agent.tools.documents import DocumentSandbox
 from ai_agent.tools.desktop import DesktopRunner, desktop_interact_result, desktop_snapshot_result
 from ai_agent.tools.files import FileSandbox
@@ -37,6 +39,8 @@ def register_builtin_tools(
     executor: ExecutionEngine,
 ) -> None:
     register_coding_tool_pack(registry, files)
+    register_image_tools(registry, files)
+    register_office_tools(registry, files)
     registry.register(
         Tool(
             name="get_time",
@@ -191,10 +195,12 @@ def register_builtin_tools(
                     "title": {"type": "string", "description": "Заголовок документа"},
                     "paragraphs": {
                         "type": "array",
+                        "items": {"type": "string"},
                         "description": "Абзацы документа. Можно использовать **жирный** и *курсив*.",
                     },
                     "bullets": {
                         "type": "array",
+                        "items": {"type": "string"},
                         "description": "Пункты простого списка",
                     },
                     "overwrite": {
@@ -234,10 +240,12 @@ def register_builtin_tools(
                     },
                     "paragraphs": {
                         "type": "array",
+                        "items": {"type": "string"},
                         "description": "Новые абзацы. Можно использовать **жирный** и *курсив*.",
                     },
                     "bullets": {
                         "type": "array",
+                        "items": {"type": "string"},
                         "description": "Новые пункты простого списка",
                     },
                 },
@@ -277,6 +285,19 @@ def register_builtin_tools(
                     "title": {"type": "string", "description": "Название презентации"},
                     "slides": {
                         "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "layout": {"type": "string"},
+                                "title": {"type": "string"},
+                                "subtitle": {"type": "string"},
+                                "body": {"type": "string"},
+                                "bullets": {"type": "array", "items": {"type": "string"}},
+                                "caption": {"type": "string"},
+                                "source": {"type": "string"},
+                                "image_path": {"type": "string"},
+                            },
+                        },
                         "description": (
                             "Слайды презентации. Каждый слайд: layout title/agenda/content/section/image/quote/comparison/metrics/closing, "
                             "title, subtitle, body, bullets, caption, source, image_path."
@@ -285,7 +306,7 @@ def register_builtin_tools(
                     "topic": {"type": "string", "description": "Тема презентации, если слайды нужно сгенерировать автоматически"},
                     "audience": {"type": "string", "description": "Аудитория презентации"},
                     "purpose": {"type": "string", "description": "Цель презентации или ожидаемое действие аудитории"},
-                    "slide_count": {"type": "integer", "description": "Желаемое количество слайдов, обычно от 4 до 12"},
+                    "slide_count": {"type": "integer", "description": "Точное количество слайдов от 1 до 30; явный список slides не дополняется автоматически"},
                     "style": {"type": "string", "description": "Стиль: строгий деловой, учебный, pitch, product, report и т.п."},
                     "theme": {
                         "type": "string",
@@ -405,6 +426,7 @@ def register_builtin_tools(
             "json_ld": {"type": "array"},
             "links": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
             "script_count": {"type": "integer"},
+            "catalog_item": {"type": "object", "additionalProperties": True},
             "actions": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
             "screenshot": {"type": ["object", "null"]},
             "blocked_requests": {"type": "array", "items": {"type": "string"}},
@@ -490,6 +512,8 @@ def register_builtin_tools(
                 "Извлекает проверяемые данные из публичной страницы: сначала HTTP/JSON-LD reader, "
                 "затем изолированный browser fallback для JavaScript. Возвращает evidence fragments/hashes, "
                 "locale/region, confidence и typed failure для login/paywall/anti-bot/каталога."
+                " Для Apple возвращает catalog_item: автор/цена/валюта или провайдер подписки; "
+                "Apple TV subscription подтверждается по предложению конкретного фильма, не по бренду или free trial другого канала."
             ),
             schema={
                 "type": "object",
@@ -537,12 +561,15 @@ def register_builtin_tools(
             description=(
                 "Анализирует PNG/JPEG/WEBP/GIF из безопасного workspace. "
                 "Изображение отправляется сначала в Gemma 4, затем при ошибке в OpenAI fallback."
+                " Для мелких надписей, идентификации товара/модели и неоднозначных деталей используй detail=precise: "
+                "он предпочитает настроенный OpenAI vision, с резервированием. Не подменяй видимые признаки догадкой."
             ),
             schema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "minLength": 1, "maxLength": 240},
                     "prompt": {"type": "string", "maxLength": 2000},
+                    "detail": {"type": "string", "enum": ["standard", "precise"]},
                 },
                 "required": ["path"],
             },
@@ -671,6 +698,7 @@ def register_builtin_tools(
                     },
                     "steps": {
                         "type": "array",
+                        "items": {"type": "string"},
                         "description": "Начальный список шагов выполнения",
                     },
                 },

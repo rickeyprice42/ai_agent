@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+from html import unescape
 from html.parser import HTMLParser
 from time import monotonic
 from typing import Any, Callable
@@ -63,7 +64,13 @@ class BrowserResearchReader:
         cache_ttl_seconds: int = 300,
         max_fragments: int = 8,
     ) -> None:
-        self.http = http
+        # The plain HTTP tool returns short raw bodies. Research parses a larger,
+        # still bounded document and only returns extracted content to the model.
+        self.http = HttpSandbox(
+            timeout_seconds=http.timeout_seconds,
+            max_response_chars=max(http.max_response_chars, 2_000_000),
+            allow_private_networks=http.allow_private_networks,
+        ) if type(http) is HttpSandbox else http
         self.browser = browser
         self.cache_ttl_seconds = max(0, min(int(cache_ttl_seconds), 3600))
         self.max_fragments = max(1, min(int(max_fragments), 20))
@@ -141,11 +148,16 @@ class BrowserResearchReader:
     ) -> dict:
         http_fields: dict[str, Any] = {}
         http_response: dict[str, Any] | None = None
+        http_offer_failure: ResearchFailure | None = None
         if not force_browser:
             try:
                 http_response = self.http.fetch(
                     url,
-                    headers={"Accept": "text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.5"},
+                    headers={
+                        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.5",
+                        "Accept-Language": locale,
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Avelin/0.1",
+                    },
                 )
                 _validate_http_response(http_response)
                 http_fields = extract_public_page(
@@ -156,17 +168,26 @@ class BrowserResearchReader:
                 if refusal:
                     raise refusal
                 if not _needs_browser(http_fields):
-                    return _research_result(
-                        url=http_response["url"],
-                        locale=locale,
-                        region=region,
-                        adapter=adapter,
-                        method="http",
-                        status=http_response["status"],
-                        fields=http_fields,
-                        catalog=catalog,
-                        max_fragments=self.max_fragments,
-                    )
+                    try:
+                        return _research_result(
+                            url=http_response["url"],
+                            locale=locale,
+                            region=region,
+                            adapter=adapter,
+                            method="http",
+                            status=http_response["status"],
+                            fields=http_fields,
+                            catalog=catalog,
+                            max_fragments=self.max_fragments,
+                        )
+                    except ResearchFailure as exc:
+                        if exc.code != "availability_unconfirmed":
+                            raise
+                        # SSR may contain the item but hydrate its playback offers.
+                        # Retry a public DOM read, not a guessed subscription claim.
+                        if not self.browser.availability()[0]:
+                            raise
+                        http_offer_failure = exc
             except ResearchFailure:
                 raise
             except ValueError as exc:
@@ -196,11 +217,14 @@ class BrowserResearchReader:
             "json_ld": snapshot.get("json_ld", []),
             "links": snapshot.get("links", []),
             "script_count": snapshot.get("script_count", 0),
+            **({"catalog_item": snapshot["catalog_item"]} if snapshot.get("catalog_item") else {}),
         }
         refusal = _classify_refusal(snapshot.get("status") or 200, browser_fields, snapshot.get("url", url))
         if refusal:
             raise refusal
         if not str(browser_fields.get("main_text", "")).strip() and not browser_fields["json_ld"]:
+            if http_offer_failure:
+                raise http_offer_failure
             raise ResearchFailure("unsupported_dynamic_page", "Страница не предоставила извлекаемых публичных данных.")
         return _research_result(
             url=snapshot.get("url", url),
@@ -236,6 +260,8 @@ class _PublicPageParser(HTMLParser):
         self.lists: list[list[str]] = []
         self.tables: list[list[list[str]]] = []
         self.json_ld: list[Any] = []
+        self.metadata: dict[str, str] = {}
+        self.embedded_data: list[Any] = []
         self.links: list[dict[str, str]] = []
         self.script_count = 0
         self._title_depth = 0
@@ -247,10 +273,15 @@ class _PublicPageParser(HTMLParser):
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
         self._json_ld_parts: list[str] | None = None
+        self._embedded_parts: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.casefold()
         attributes = {key.casefold(): value or "" for key, value in attrs}
+        if tag == "meta":
+            key = attributes.get("property") or attributes.get("name", "")
+            if key.casefold() in {"description", "og:title", "og:description", "og:url", "twitter:title", "twitter:description"}:
+                self.metadata[key.casefold()] = attributes.get("content", "")[:4000]
         if tag == "title":
             self._title_depth += 1
         if tag in {"main", "article"} or attributes.get("role", "").casefold() == "main":
@@ -261,6 +292,8 @@ class _PublicPageParser(HTMLParser):
             self.script_count += 1
             if attributes.get("type", "").casefold() == "application/ld+json":
                 self._json_ld_parts = []
+            elif attributes.get("type", "").casefold() in {"application/json", "text/json"}:
+                self._embedded_parts = []
             else:
                 self._skip_depth += 1
         if tag in {"ul", "ol"} and self._skip_depth == 0:
@@ -295,6 +328,14 @@ class _PublicPageParser(HTMLParser):
                     except json.JSONDecodeError:
                         pass
                 self._json_ld_parts = None
+            elif self._embedded_parts is not None:
+                raw = "".join(self._embedded_parts).strip()
+                try:
+                    if raw and len(raw) <= 1_500_000 and len(self.embedded_data) < 8:
+                        self.embedded_data.append(json.loads(raw))
+                except (json.JSONDecodeError, RecursionError):
+                    pass
+                self._embedded_parts = None
             elif self._skip_depth:
                 self._skip_depth -= 1
         if tag == "li" and self._list is not None and self._list_item is not None:
@@ -321,6 +362,9 @@ class _PublicPageParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._json_ld_parts is not None:
             self._json_ld_parts.append(data)
+            return
+        if self._embedded_parts is not None:
+            self._embedded_parts.append(data)
             return
         cleaned = _clean_text(data)
         if not cleaned or self._skip_depth:
@@ -361,6 +405,8 @@ def extract_public_page(body: str, headers: dict[str, str] | None = None) -> dic
         "lists": parser.lists[:20],
         "tables": parser.tables[:10],
         "json_ld": parser.json_ld[:20],
+        "metadata": parser.metadata,
+        "embedded_data": parser.embedded_data,
         "links": parser.links[:100],
         "script_count": parser.script_count,
     }
@@ -381,6 +427,13 @@ def research_read_result(reader: BrowserResearchReader, arguments: dict) -> Tool
 
 
 def _research_result(*, url: str, locale: str, region: str, adapter: str, method: str, status: int | None, fields: dict, catalog: str, max_fragments: int) -> dict:
+    fields = dict(fields)
+    if adapter in {"apple_tv", "apple_books"}:
+        browser_item = fields.get("catalog_item", {})
+        if not browser_item or browser_item.get("url") != url:
+            fields["catalog_item"] = _catalog_item(adapter, url, fields)
+    # Hydration payload is source data for item extraction, never raw model context.
+    fields.pop("embedded_data", None)
     _validate_adapter(adapter, url, region, catalog, fields)
     evidence = _evidence(fields, max_fragments)
     if not evidence:
@@ -416,7 +469,11 @@ def _classify_refusal(status: int, fields: dict, url: str) -> ResearchFailure | 
     searchable = f"{fields.get('title', '')} {fields.get('main_text', '')} {url}".casefold()
     if status == 451 or any(marker in searchable for marker in POLICY_MARKERS):
         return ResearchFailure("robots_or_policy", "Страница недоступна из-за robots или policy-ограничения.")
-    if status in {401, 407} or any(marker in searchable for marker in LOGIN_MARKERS) and len(str(fields.get("main_text", ""))) < 1500:
+    main_text = str(fields.get("main_text", ""))
+    login_gate = bool(re.match(r"\s*(?:sign\s+in|log\s*in|войти|авторизация)\b", str(fields.get("title", "")), flags=re.I)) or bool(
+        re.search(r"please\s+log\s*in|sign\s+in\s+to\s+(?:continue|read|view)|войдите\s+(?:для|чтобы)", main_text, flags=re.I)
+    )
+    if status in {401, 407} or login_gate and len(main_text) < 1500:
         return ResearchFailure("requires_login", "Для чтения страницы требуется вход; личные сессии не используются.")
     if status == 402 or any(marker in searchable for marker in PAYWALL_MARKERS):
         return ResearchFailure("paywall", "Публичный контент скрыт paywall.")
@@ -452,14 +509,20 @@ def _validate_adapter(adapter: str, url: str, region: str, catalog: str, fields:
     elif adapter == "apple_tv":
         if parsed.hostname != "tv.apple.com" or not any(part in path for part in ("/movie/", "/show/")):
             raise ResearchFailure("catalog_unconfirmed", "Не подтверждена прямая карточка Apple TV.")
-        if catalog == "apple_tv_plus" and not any(marker in searchable for marker in ("apple tv+", "apple tv plus", "included with apple tv+")):
+        if catalog == "apple_tv_plus" and fields.get("catalog_item", {}).get("access") != "subscription":
             raise ResearchFailure("availability_unconfirmed", "Страница не подтверждает доступность по подписке Apple TV+.")
+    actual_region = _region_from_path(path)
+    if adapter in {"apple_books", "apple_tv"} and region != "auto" and actual_region and region != actual_region:
+        raise ResearchFailure("region_mismatch", "Страница перенаправила на другой storefront; доступность и цены для запрошенного региона не подтверждены.")
     if adapter in {"apple_books", "apple_tv"} and region == "auto" and _region_from_path(path) is None:
         raise ResearchFailure("region_unknown", "Storefront/region страницы не удалось подтвердить.")
 
 
 def _evidence(fields: dict, limit: int) -> list[dict[str, str]]:
     fragments: list[tuple[str, str]] = []
+    item = fields.get("catalog_item", {})
+    if item:
+        fragments.append(("catalog_item", _clean_text(json.dumps(item, ensure_ascii=False))[:1800]))
     title = _clean_text(str(fields.get("title", "")))
     if title:
         fragments.append(("title", title))
@@ -489,6 +552,87 @@ def _evidence(fields: dict, limit: int) -> list[dict[str, str]]:
         seen.add(digest)
         result.append({"source": source, "fragment": fragment, "sha256": digest})
     return result[:limit]
+
+
+def _json_objects(value: Any, budget: int = 5000):
+    """Bound traversal of public structured data, including JSON-LD @graph."""
+    pending = [value]
+    seen = 0
+    while pending and seen < budget:
+        current = pending.pop()
+        seen += 1
+        if isinstance(current, dict):
+            yield current
+            pending.extend(reversed(list(current.values())))
+        elif isinstance(current, list):
+            pending.extend(reversed(current))
+
+
+def _catalog_item(adapter: str, url: str, fields: dict) -> dict:
+    expected_types = {"book", "product"} if adapter == "apple_books" else {"movie", "tvseries", "tvepisode", "videoobject"}
+    nodes = list(_json_objects(fields.get("json_ld", [])))
+    primary = next((node for node in nodes if set(str(value).casefold() for value in (node.get("@type") if isinstance(node.get("@type"), list) else [node.get("@type", "")])) & expected_types and node.get("name")), {})
+    title = _clean_text(str(primary.get("name") or fields.get("metadata", {}).get("og:title") or fields.get("title", "")))
+    title = re.sub(r"^(?:‎)?Watch\s+|\s+(?:[-–]|by).{0,120}Apple\s+(?:TV|Books).*$", "", title, flags=re.I).strip()
+    description = _clean_text(str(primary.get("description") or fields.get("metadata", {}).get("og:description") or fields.get("metadata", {}).get("description", "")))[:4000]
+    result = {"title": title, "url": url, "region": _region_from_path(parse.urlparse(url).path) or "unknown", "access": "unconfirmed"}
+    if description:
+        result["description"] = description
+    for key in ("genre", "datePublished", "duration", "contentRating"):
+        if primary.get(key):
+            result[key] = primary[key]
+    author = primary.get("author")
+    if author:
+        authors = author if isinstance(author, list) else [author]
+        result["authors"] = [_clean_text(str(item.get("name", "")) if isinstance(item, dict) else str(item)) for item in authors][:10]
+    offers = []
+    for offer in _json_objects([primary.get("offers", []), primary.get("potentialAction", [])], budget=100):
+        if "price" in offer or "priceCurrency" in offer or "availability" in offer:
+            offers.append({key: offer[key] for key in ("price", "priceCurrency", "availability", "url", "name", "category") if key in offer})
+    if offers:
+        result["offers"] = offers[:10]
+    # Apple TV aggregates other paid channels. Even a free-trial CTA is not
+    # Apple TV subscription evidence without a title-bound first-party offer.
+    text = str(fields.get("main_text", ""))
+    head = text[:2500]
+    subscription_offer = _apple_tv_subscription_offer(fields, title) if adapter == "apple_tv" else None
+    if subscription_offer:
+        result["access"] = "subscription"
+        result.update(subscription_offer)
+    elif adapter == "apple_tv" and re.search(r"\b(?:buy|rent|purchase)\b|купить|аренд", head, flags=re.I):
+        result["access"] = "purchase_or_rental"
+    elif adapter == "apple_books" and offers:
+        result["access"] = "purchase"
+    return result
+
+
+def _apple_tv_subscription_offer(fields: dict, title: str) -> dict | None:
+    for node in _json_objects(fields.get("embedded_data", [])):
+        if (node.get("$kind") != "SuperheroLockup"
+                or _clean_text(str(node.get("title", ""))).casefold() != title.casefold()
+                or node.get("type") not in {"Movie", "Show", "TVSeries", "Episode"}
+                or node.get("brandId") != "tvs.sbd.4000"):
+            continue
+        for button in node.get("buttons", []) if isinstance(node.get("buttons"), list) else []:
+            if not isinstance(button, dict):
+                continue
+            action = button.get("action", {})
+            if not isinstance(action, dict) or action.get("$kind") != "commerceOfferAction":
+                continue
+            modal = action.get("modalParams", {})
+            query = modal.get("queryParams", {}) if isinstance(modal, dict) else {}
+            data = modal.get("data", {}) if isinstance(modal, dict) else {}
+            if not isinstance(query, dict) or not isinstance(data, dict):
+                continue
+            if query.get("brandId") != "tvs.sbd.4000" or data.get("type") != "TV_PLUS":
+                continue
+            return {
+                "provider": "Apple TV",
+                "provider_id": "tvs.sbd.4000",
+                "offer_type": "TV_PLUS",
+                "access_evidence": _clean_text(str(button.get("availabilityText") or data.get("legalLine") or button.get("title") or "Apple TV subscription offer"))[:400],
+            }
+    return None
 
 
 def _normalize_url(value: str) -> str:
@@ -526,7 +670,7 @@ def _region_from_path(path: str) -> str | None:
 
 
 def _clean_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", unescape(value or "")).strip()
 
 
 def _header(headers: dict[str, str] | None, name: str) -> str:

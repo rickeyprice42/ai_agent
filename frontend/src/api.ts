@@ -18,6 +18,8 @@ import type {
   SharedProjectItem,
   UserProfile
 } from "./types";
+import type { ChatApprovalItem } from "./types";
+import type { AutomationRunItem } from "./types";
 import type { ConnectorItem } from "./types";
 
 function authHeaders(token: string): HeadersInit {
@@ -68,20 +70,38 @@ export async function sendMessage(
 }
 
 export type ChatStreamEvent = {
-  type: "delta" | "status" | "done" | "error";
+  type: "delta" | "status" | "done" | "error" | "approval";
   text?: string;
   code?: string;
   thread_id: string;
   provider?: string;
   model?: string;
+  tool?: string;
+  phase?: "started" | "completed" | "failed" | "blocked";
+  round?: number;
+  approval?: ChatApprovalItem;
 };
+
+export type ChatAttachment = { path: string; name: string; mime_type: string; size_bytes: number };
+
+export async function uploadChatAttachment(file: File, token: string): Promise<ChatAttachment> {
+  const response = await fetch("/api/attachments", {
+    method: "POST",
+    headers: { ...authHeaders(token), "Content-Type": file.type || "application/octet-stream", "X-Filename": encodeURIComponent(file.name) },
+    body: file
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось прикрепить файл.");
+  return response.json();
+}
 
 export async function sendMessageStream(
   message: string,
   token: string,
   threadId: string | null,
   signal: AbortSignal,
-  onEvent: (event: ChatStreamEvent) => void
+  onEvent: (event: ChatStreamEvent) => void,
+  attachments: string[] = [],
+  onAccepted?: () => void
 ): Promise<void> {
   const response = await fetch("/api/chat/stream", {
     method: "POST",
@@ -90,12 +110,55 @@ export async function sendMessageStream(
       Accept: "application/x-ndjson",
       ...authHeaders(token)
     },
-    body: JSON.stringify({ message, thread_id: threadId }),
+    body: JSON.stringify({ message, thread_id: threadId, attachments }),
     signal
   });
   if (!response.ok) {
     throw await parseError(response, "Не удалось получить ответ агента.");
   }
+  onAccepted?.();
+  return consumeChatStream(response, onEvent);
+}
+
+export async function fetchAvatar(token: string): Promise<Blob | null> {
+  const response = await fetch("/api/profile/avatar", { headers: authHeaders(token), cache: "no-store" });
+  if (response.status === 404) return null;
+  if (!response.ok) throw await parseError(response, "Не удалось загрузить аватар.");
+  return response.blob();
+}
+
+export async function fetchImagePreview(path: string, token: string): Promise<Blob> {
+  const response = await fetch(`/api/workspace/preview?path=${encodeURIComponent(path)}&size=1024`, { headers: authHeaders(token) });
+  if (!response.ok) throw await parseError(response, "Не удалось открыть изображение.");
+  return response.blob();
+}
+
+export async function saveAvatar(blob: Blob, token: string): Promise<void> {
+  const response = await fetch("/api/profile/avatar", { method: "PUT", headers: { ...authHeaders(token), "Content-Type": "image/png", "X-Filename": "avatar.png" }, body: blob });
+  if (!response.ok) throw await parseError(response, "Не удалось сохранить аватар.");
+}
+
+export async function previewAvatar(file: File, token: string): Promise<Blob> {
+  const response = await fetch("/api/profile/avatar/preview", { method: "POST", headers: { ...authHeaders(token), "Content-Type": file.type || "application/octet-stream", "X-Filename": encodeURIComponent(file.name) }, body: file });
+  if (!response.ok) throw await parseError(response, "Не удалось открыть изображение.");
+  return response.blob();
+}
+
+export async function deleteAvatar(token: string): Promise<void> {
+  const response = await fetch("/api/profile/avatar", { method: "DELETE", headers: authHeaders(token) });
+  if (!response.ok) throw await parseError(response, "Не удалось удалить аватар.");
+}
+
+export async function decideChatApproval(threadId: string, approvalId: string, decision: "approved" | "denied", token: string, signal: AbortSignal, onEvent: (event: ChatStreamEvent) => void): Promise<void> {
+  const response = await fetch(`/api/chats/${encodeURIComponent(threadId)}/approvals/${encodeURIComponent(approvalId)}/decision`, {
+    method: "POST", headers: { ...authHeaders(token), "Content-Type": "application/json", Accept: "application/x-ndjson" },
+    body: JSON.stringify({ decision }), signal
+  });
+  if (!response.ok) throw await parseError(response, "Не удалось подтвердить действие.");
+  return consumeChatStream(response, onEvent);
+}
+
+async function consumeChatStream(response: Response, onEvent: (event: ChatStreamEvent) => void): Promise<void> {
   if (!response.body) {
     throw new Error("Браузер не получил поток ответа.");
   }
@@ -103,32 +166,36 @@ export async function sendMessageStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      const event = JSON.parse(line) as ChatStreamEvent;
-      onEvent(event);
-      if (event.type === "error") {
-        throw new Error(event.text || "Провайдер прервал генерацию.");
-      }
-    }
-    if (done) break;
-  }
-  if (buffer.trim()) {
-    const event = JSON.parse(buffer) as ChatStreamEvent;
+  let completed = false;
+  function consume(line: string) {
+    if (!line.trim()) return;
+    const event = JSON.parse(line) as ChatStreamEvent;
     onEvent(event);
+    if (event.type === "done") completed = true;
     if (event.type === "error") throw new Error(event.text || "Провайдер прервал генерацию.");
+  }
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) consume(line);
+      if (done) break;
+    }
+    consume(buffer);
+    if (!completed) throw new Error("Соединение прервалось до завершения ответа. Частичный текст сохранён в чате.");
+  } finally {
+    try { await reader.cancel(); } catch { /* The request may already have been aborted. */ }
+    reader.releaseLock();
   }
 }
 
 export async function createChatThread(
   token: string,
   title?: string,
-  projectId?: string | null
+  projectId?: string | null,
+  reuseEmpty = false
 ): Promise<{ thread: ChatThreadItem }> {
   const response = await fetch("/api/chats", {
     method: "POST",
@@ -136,7 +203,7 @@ export async function createChatThread(
       "Content-Type": "application/json",
       ...authHeaders(token)
     },
-    body: JSON.stringify({ title, project_id: projectId })
+    body: JSON.stringify({ title, project_id: projectId, reuse_empty: reuseEmpty })
   });
   if (!response.ok) {
     throw await parseError(response, "Не удалось создать чат.");
@@ -372,7 +439,8 @@ export async function clearAgentMemory(
 export async function createProject(
   token: string,
   title: string,
-  description = ""
+  description = "",
+  shared = false
 ): Promise<{ project: ProjectItem }> {
   const response = await fetch("/api/projects", {
     method: "POST",
@@ -380,7 +448,7 @@ export async function createProject(
       "Content-Type": "application/json",
       ...authHeaders(token)
     },
-    body: JSON.stringify({ title, description })
+    body: JSON.stringify({ title, description, shared })
   });
   if (!response.ok) {
     throw await parseError(response, "Не удалось создать проект.");
@@ -619,6 +687,17 @@ export async function deleteAutomation(automationId: string, token: string): Pro
     headers: authHeaders(token)
   });
   if (!response.ok) throw await parseError(response, "Не удалось удалить автоматизацию.");
+}
+
+export async function runAutomationNow(automationId: string, token: string): Promise<void> {
+  const response = await fetch(`/api/automations/${encodeURIComponent(automationId)}/run`, { method: "POST", headers: authHeaders(token) });
+  if (!response.ok) throw await parseError(response, "Не удалось запустить автоматизацию.");
+}
+
+export async function fetchAutomationRuns(automationId: string, token: string): Promise<AutomationRunItem[]> {
+  const response = await fetch(`/api/automations/${encodeURIComponent(automationId)}/runs?limit=20`, { headers: authHeaders(token) });
+  if (!response.ok) throw await parseError(response, "Не удалось загрузить результаты.");
+  return response.json();
 }
 
 export async function createRunReport(runId: string, token: string): Promise<void> {

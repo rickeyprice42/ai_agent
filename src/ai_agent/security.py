@@ -48,6 +48,7 @@ class ToolPolicyEngine:
         self.database = database
         self.user_id = user_id
         self.approval_ttl_minutes = max(1, min(int(approval_ttl_minutes), 60))
+        self.image_attachment_consent: set[str] = set()
 
     def authorize(
         self,
@@ -68,6 +69,8 @@ class ToolPolicyEngine:
                 "Запрос заблокирован: секреты нельзя передавать во внешние инструменты.",
                 scope=scope,
             )
+        if tool.name == "analyze_image" and str(arguments.get("path", "")).replace("\\", "/") in self.image_attachment_consent:
+            return PolicyDecision("allow", risk, "Явно прикреплённое изображение разрешено для анализа в текущем запросе.", scope=scope)
         if not requires_approval(tool, arguments):
             return PolicyDecision("allow", risk, "Разрешено центральной policy-моделью.", scope=scope)
 

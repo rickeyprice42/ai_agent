@@ -77,6 +77,21 @@ def isolated_settings(root: Path) -> Settings:
 
 
 class MultimodalFailoverTests(unittest.TestCase):
+    def test_precise_vision_prefers_configured_openai_and_keeps_normal_routing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            from PIL import Image
+            Image.new('RGB', (40, 40), 'red').save(root / 'watch.png')
+            gemma = StubVision("ollama_cloud", "gemma", text="Collection guessed")
+            openai = StubVision("openai", "configured-vision", text="Visible SWISSMATIC and date window")
+            router = VisionRouter(root, [gemma, openai])
+            self.assertEqual(router.analyze_path("watch.png", "Describe").provider, "ollama_cloud")
+            detailed = router.analyze_path("watch.png", "Read fine markings", detail="precise")
+            self.assertEqual(detailed.provider, "openai")
+            self.assertIn("SWISSMATIC", detailed.text)
+            openai.fail = True
+            self.assertEqual(router.analyze_path("watch.png", "Read fine markings", detail="precise").provider, "ollama_cloud")
+
     def test_sectioned_secret_file_loads_both_keys_without_environment(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "API_KEY.txt"
@@ -120,7 +135,8 @@ class MultimodalFailoverTests(unittest.TestCase):
             root = Path(directory)
             workspace = root / "workspace"
             workspace.mkdir()
-            (workspace / "screen.png").write_bytes(b"not-a-real-png-but-provider-is-stubbed")
+            from PIL import Image
+            Image.new('RGB', (40, 40), 'red').save(workspace / 'screen.png')
             router = VisionRouter(
                 workspace,
                 [

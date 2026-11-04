@@ -4,13 +4,15 @@ from __future__ import annotations
 FILE_TOOLS = {"write_file", "create_docx", "append_docx", "create_presentation"}
 
 
-def history_for_ui(history: list[dict], files) -> list[dict]:
+def history_for_ui(history: list[dict], files, *, attachment_display=None) -> list[dict]:
     visible: list[dict] = []
     pending_artifacts: list[dict] = []
     pending_tool_results: list[tuple[str, str]] = []
 
     for raw_item in history:
         item = dict(raw_item)
+        if item.get('role')=='user':
+            _user_attachment_display(item,files,attachment_display)
         if item.get("role") == "tool":
             pending_tool_results.append(
                 (str(item.get("name", "")), str(item.get("content", "")))
@@ -49,6 +51,29 @@ def history_for_ui(history: list[dict], files) -> list[dict]:
         visible.append(item)
 
     return visible
+
+
+def _user_attachment_display(item: dict,files,legacy_display=None) -> None:
+    stored=[artifact for artifact in item.get('artifacts',[]) if isinstance(artifact,dict) and artifact.get('_user_attachment') is True]
+    descriptors=[]
+    for artifact in stored:
+        path=str(artifact.get('path',''))
+        if not path.startswith('attachments/'):
+            return
+        try:
+            file=files.describe_file(path)
+        except (ValueError,OSError):
+            return
+        if file.path!=path:
+            return
+        descriptors.append({'path':file.path,'name':file.name,'extension':file.extension,'size_bytes':file.size_bytes})
+    if descriptors and isinstance(stored[0].get('_display_content'),str):
+        item['content']=stored[0]['_display_content']
+        item['artifacts']=descriptors
+    elif legacy_display is not None:
+        result=legacy_display(str(item.get('content','')))
+        if result is not None:
+            item['content'],item['artifacts']=result
 
 
 def artifact_completion_text(artifacts: list[dict]) -> str:

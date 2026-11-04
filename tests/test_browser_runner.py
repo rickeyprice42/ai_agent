@@ -24,6 +24,25 @@ class BrowserFixtureHandler(BaseHTTPRequestHandler):
     version = 1
 
     def do_GET(self):
+        if self.path in {"/notfound", "/empty", "/delayed"}:
+            body = b"<!doctype html><html><body><main></main>"
+            if self.path == "/delayed":
+                body += b"<script>setTimeout(() => document.querySelector('main').textContent='Hydrated evidence', 200)</script>"
+            body += b"</body></html>"
+            self.send_response(404 if self.path == "/notfound" else 200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/structured":
+            body = b'<title>Structured</title><main>Public catalog data with useful text.<a href="/source">Source</a><ul><li>One</li></ul><table><tr><td>42</td></tr></table></main><script type="application/ld+json">{"@type":"Book","name":"Structured Book"}</script>'
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/slow":
             sleep(2)
         marker = f"Version {self.version}"
@@ -159,6 +178,8 @@ class BrowserRunnerTests(unittest.TestCase):
             timed_out = browser_read_result(local, {"url": self.base_url + "/slow"})
             self.assertFalse(timed_out.ok)
             self.assertEqual(timed_out.error.code, "timeout")
+            self.assertEqual(timed_out.error.details["stage"], "navigation")
+            self.assertEqual(timed_out.error.details["timeout_ms"], 1000)
 
             settings = isolated_settings(root / "agent")
             agent = Agent(settings, user_id="alice")
@@ -208,6 +229,31 @@ class BrowserRunnerTests(unittest.TestCase):
             self.assertEqual(decision.tool_name, "browser_read")
             self.assertEqual(decision.arguments["url"], "https://example.com")
             self.assertTrue(decision.arguments["screenshot"])
+
+    def test_http_error_and_empty_page_are_not_successful_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = PlaywrightBrowserRunner(Path(directory), timeout_seconds=5, allowed_hosts=("127.0.0.1",), allow_private_networks=True)
+            missing = browser_read_result(runner, {"url": self.base_url + "/notfound", "screenshot": True})
+            self.assertEqual(missing.status, "failed")
+            self.assertEqual(missing.error.code, "http_error")
+            self.assertEqual(missing.error.details["status"], 404)
+            self.assertIn("HTTP 404", missing.text())
+            blank = browser_read_result(runner, {"url": self.base_url + "/empty", "screenshot": False})
+            self.assertEqual(blank.status, "failed")
+            self.assertEqual(blank.error.code, "empty_content")
+            hydrated = browser_read_result(runner, {"url": self.base_url + "/delayed", "screenshot": False})
+            self.assertEqual(hydrated.status, "completed")
+            self.assertIn("Hydrated evidence", hydrated.output["main_text"])
+
+    def test_snapshot_returns_structured_evidence_not_only_visible_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner = PlaywrightBrowserRunner(Path(directory), timeout_seconds=5, allowed_hosts=("127.0.0.1",), allow_private_networks=True)
+            snapshot = runner.read(url=self.base_url + "/structured", screenshot=False)
+            self.assertEqual(snapshot["json_ld"][0]["name"], "Structured Book")
+            self.assertEqual(snapshot["tables"], [[["42"]]])
+            self.assertEqual(snapshot["lists"], [["One"]])
+            self.assertEqual(snapshot["links"][0]["url"], self.base_url + "/source")
+            self.assertEqual(snapshot["script_count"], 1)
 
 
 if __name__ == "__main__":

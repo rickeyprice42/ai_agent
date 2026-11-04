@@ -123,7 +123,7 @@ class AutonomousMemoryTests(unittest.TestCase):
             engine.process_completed_turn("m3", "Я люблю острый соус")
             active = database.list_memory_records("alice")
             self.assertEqual(len(active), 1)
-            self.assertEqual(len(active[0]["provenance"]), 2)
+            self.assertEqual({source["source_id"] for source in active[0]["provenance"]}, {"m1", "m2", "m3"})
 
             trace = engine.process_completed_turn("m4", "Больше не люблю острый соус")
             self.assertEqual(trace["superseded_count"], 1)

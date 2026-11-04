@@ -109,12 +109,25 @@ export type BootstrapPayload = {
   notifications: InAppNotificationItem[];
   action_logs: ActionLogItem[];
   approval_requests: ApprovalRequestItem[];
+  chat_approvals?: ChatApprovalItem[];
   permission_grants: PermissionGrantItem[];
   extension_proposals: ExtensionProposalItem[];
   connectors: ConnectorItem[];
   security: SecuritySettings;
   workspace_files: WorkspaceFileItem[];
   user: UserProfile;
+};
+
+export type ChatApprovalItem = {
+  id: string;
+  thread_id?: string | null;
+  tool_name: string;
+  risk: string;
+  scope: Record<string, unknown>;
+  arguments?: Record<string, unknown>;
+  summary?: string;
+  status: string;
+  expires_at: string;
 };
 
 export type ApprovalRequestItem = {
@@ -230,6 +243,8 @@ export type AutomationRunItem = {
   started_at?: string | null;
   finished_at?: string | null;
   created_at: string;
+  result?: string;
+  artifacts?: Array<{path: string; name?: string; extension?: string; size_bytes?: number}>;
 };
 
 export type AutomationItem = {
@@ -363,6 +378,11 @@ export type MemorySummary = {
   settings: AutonomousMemorySettings;
   sections: Record<PersonalMemoryItem["kind"], PersonalMemoryItem[]>;
   record_count: number;
+  status?: "ready" | "empty" | "disabled";
+  method?: "structured_records";
+  explanation?: string;
+  autonomous_record_count?: number;
+  manual_record_count?: number;
 };
 
 export type UserProfile = {

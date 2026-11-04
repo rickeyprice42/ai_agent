@@ -32,7 +32,7 @@ def build_provider_registry(settings: Settings) -> ProviderRegistry:
     registry.register(
         "openai",
         lambda: OpenAIProvider(
-            model=settings.openai_model,
+            model=settings.model_name if settings.model_provider == "openai" else settings.openai_model,
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
             timeout_seconds=settings.llm_timeout_seconds,

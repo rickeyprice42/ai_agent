@@ -70,9 +70,13 @@ class OllamaProvider:
                             "Ollama вернула некорректный поток данных.",
                             "invalid_stream",
                         ) from exc
+                    if not isinstance(chunk, dict):
+                        raise ProviderError("Ollama вернула некорректный поток данных.", "invalid_stream")
                     if chunk.get("error"):
                         raise ProviderError("Ollama прервала генерацию.", "provider_error")
                     message = chunk.get("message") or {}
+                    if not isinstance(message, dict):
+                        raise ProviderError("Ollama вернула некорректное сообщение.", "invalid_stream")
                     delta = str(message.get("content") or "")
                     if delta:
                         content += delta
@@ -101,6 +105,11 @@ class OllamaProvider:
         ollama_messages = [{"role": "system", "content": system_prompt}]
         for message in messages:
             item = {"role": message.role, "content": message.content}
+            if message.role == "assistant" and message.tool_calls:
+                item["tool_calls"] = [
+                    {"function": {"name": call.name, "arguments": call.arguments}}
+                    for call in message.tool_calls
+                ]
             if message.role == "tool" and message.name:
                 item["tool_name"] = message.name
             ollama_messages.append(item)
@@ -165,14 +174,18 @@ class OllamaProvider:
 
     def _tool_call(self, item: dict) -> ToolCall:
         function = item.get("function") or item
+        if not isinstance(function, dict):
+            raise ProviderError("Ollama вернула некорректный вызов инструмента.", "invalid_tool_call")
         name = str(function.get("name") or "").strip()
         arguments = function.get("arguments") or {}
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                arguments = {}
-        return ToolCall(name=name, arguments=arguments if isinstance(arguments, dict) else {})
+            except json.JSONDecodeError as exc:
+                raise ProviderError("Ollama вернула некорректные аргументы инструмента.", "invalid_tool_call") from exc
+        if not name or not isinstance(arguments, dict):
+            raise ProviderError("Ollama вернула некорректный вызов инструмента.", "invalid_tool_call")
+        return ToolCall(name=name, arguments=arguments, call_id=str(item.get("id") or "") or None)
 
     def _merge_tool_calls(self, target: dict[int, dict], raw_calls) -> None:
         if not isinstance(raw_calls, list):
@@ -181,7 +194,12 @@ class OllamaProvider:
             if not isinstance(raw_call, dict):
                 continue
             function = raw_call.get("function") or raw_call
-            index = int(raw_call.get("index", function.get("index", position)))
+            if not isinstance(function, dict):
+                raise ProviderError("Ollama вернула некорректный вызов инструмента.", "invalid_tool_call")
+            try:
+                index = int(raw_call.get("index", function.get("index", position)))
+            except (TypeError, ValueError) as exc:
+                raise ProviderError("Ollama вернула некорректный индекс инструмента.", "invalid_tool_call") from exc
             slot = target.setdefault(index, {"function": {"name": "", "arguments": {}}})
             slot_function = slot["function"]
             if function.get("name"):

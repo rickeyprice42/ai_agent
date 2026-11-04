@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, Request
+from urllib.parse import unquote
+from backend.attachments import MAX_ATTACHMENT_BYTES
 from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.auth import hash_password, hash_token, issue_session_token, verify_password
@@ -79,7 +81,7 @@ from backend.models import (
     TaskRunItem,
     UserProfile,
 )
-from backend.service import CompactionConflictError, agent_service
+from backend.service import CompactionConflictError, ChatBusyError, agent_service
 from ai_agent.llm.base import ProviderError
 
 
@@ -251,7 +253,10 @@ def bootstrap(
 @router.post("/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest, user: dict[str, str] = Depends(current_user)) -> ChatResponse:
     try:
-        result = agent_service.chat(payload.message, user["id"], thread_id=payload.thread_id)
+        message = agent_service.message_with_attachments(user['id'], payload.message, payload.attachments)
+        result = agent_service.chat(message, user["id"], thread_id=payload.thread_id,attachment_paths=payload.attachments,display_message=payload.message)
+    except ChatBusyError as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -264,11 +269,16 @@ def chat(payload: ChatRequest, user: dict[str, str] = Depends(current_user)) -> 
 @router.post("/chat/stream")
 def chat_stream(payload: ChatRequest, user: dict[str, str] = Depends(current_user)) -> StreamingResponse:
     try:
+        message = agent_service.message_with_attachments(user['id'], payload.message, payload.attachments)
         thread_id, events = agent_service.chat_stream(
-            payload.message,
+            message,
             user["id"],
             thread_id=payload.thread_id,
+            attachment_paths=payload.attachments,
+            display_message=payload.message,
         )
+    except ChatBusyError as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -291,6 +301,37 @@ def chat_stream(payload: ChatRequest, user: dict[str, str] = Depends(current_use
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post('/chats/{thread_id}/approvals/{approval_id}/decision')
+def decide_chat_approval(thread_id: str,approval_id: str,payload: ApprovalDecisionRequest,user: dict[str,str]=Depends(current_user)):
+    try:
+        resolved,events=agent_service.decide_chat_approval(user['id'],thread_id,approval_id,payload.decision)
+    except ChatBusyError as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc
+
+    def stream():
+        try:
+            for event in events:
+                yield json.dumps({**event,'thread_id':resolved},ensure_ascii=False)+'\n'
+        finally:
+            events.close()
+    return StreamingResponse(stream(),media_type='application/x-ndjson',headers={'Cache-Control':'no-cache, no-transform','X-Accel-Buffering':'no'})
+
+
+@router.post('/attachments')
+async def upload_attachment(request: Request, x_filename: str = Header(default=''), user: dict[str,str] = Depends(current_user)) -> dict:
+    content = bytearray()
+    async for chunk in request.stream():
+        content.extend(chunk)
+        if len(content) > MAX_ATTACHMENT_BYTES:
+            raise HTTPException(status_code=413, detail='Вложение превышает 10 МБ.')
+    try:
+        return agent_service.upload_attachment(user['id'], unquote(x_filename), bytes(content))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/chats/{thread_id}/read")
@@ -409,6 +450,7 @@ def create_chat_thread(
             user["id"],
             title=payload.title,
             project_id=payload.project_id,
+            reuse_empty=payload.reuse_empty,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -702,6 +744,7 @@ def create_project(
         user["id"],
         title=payload.title,
         description=payload.description,
+        shared=payload.shared,
     )
     return ProjectActionResponse(project=ProjectItem(**project))
 
@@ -917,6 +960,17 @@ def update_automation(
                 user["id"], automation_id, payload.model_dump(exclude_none=True)
             )
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/automations/{automation_id}/run", response_model=AutomationOccurrenceItem)
+def run_automation_now(
+    automation_id: str,
+    user: dict[str, str] = Depends(current_user),
+) -> AutomationOccurrenceItem:
+    try:
+        return AutomationOccurrenceItem(**agent_service.run_automation_now(user["id"], automation_id))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

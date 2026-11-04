@@ -544,6 +544,7 @@ class AvelinDatabase:
         user_id: str,
         title: str | None = None,
         project_id: str | None = None,
+        reuse_empty: bool = False,
     ) -> dict:
         self.ensure_user_defaults(user_id)
         if project_id and self.project_role(user_id, project_id) not in {"owner", "editor"}:
@@ -551,13 +552,33 @@ class AvelinDatabase:
         thread_id = str(uuid4())
         normalized_title = (title or "New chat").strip() or "New chat"
         with self.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO chat_threads (id, user_id, title, project_id)
-                VALUES (?, ?, ?, ?)
-                """,
-                (thread_id, user_id, normalized_title, project_id),
-            )
+            # Serialize lookup + insert so simultaneous New clicks cannot create
+            # multiple drafts. Explicit titles and shared rooms keep their existing
+            # creation semantics; no historical row is deleted or renamed here.
+            connection.execute("BEGIN IMMEDIATE")
+            shared = bool(project_id and connection.execute("SELECT shared FROM projects WHERE id=?", (project_id,)).fetchone()[0])
+            candidate = None
+            if reuse_empty and not (title or "").strip() and not shared:
+                candidate = connection.execute(
+                    """SELECT c.id FROM chat_threads c
+                       WHERE c.user_id=? AND c.project_id IS ? AND c.status='active'
+                         AND c.archived_at IS NULL AND c.deleted_at IS NULL AND c.pinned=0
+                         AND (c.title IN ('New chat', 'Новый диалог')
+                              OR (c.title='Main conversation' AND c.id=c.user_id))
+                         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.thread_id=c.id)
+                       ORDER BY c.updated_at DESC, c.id LIMIT 1""",
+                    (user_id, project_id),
+                ).fetchone()
+            if candidate:
+                thread_id = candidate[0]
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO chat_threads (id, user_id, title, project_id)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (thread_id, user_id, normalized_title, project_id),
+                )
         return self.get_chat_thread(user_id, thread_id) or {
             "id": thread_id,
             "user_id": user_id,
@@ -620,19 +641,22 @@ class AvelinDatabase:
                 """,
                 params,
             )
+            if title is not None:
+                connection.execute("""INSERT INTO app_metadata(key,value) VALUES(?, '1')
+                    ON CONFLICT(key) DO UPDATE SET value='1'""", (f"manual_chat_title:{thread_id}",))
         return self.get_chat_thread(user_id, thread_id)
 
-    def create_project(self, user_id: str, title: str, description: str = "") -> dict:
+    def create_project(self, user_id: str, title: str, description: str = "", shared: bool = False) -> dict:
         self.ensure_user_defaults(user_id)
         project_id = str(uuid4())
         normalized_title = title.strip() or "Untitled project"
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO projects (id, user_id, title, description)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO projects (id, user_id, title, description, shared)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (project_id, user_id, normalized_title, description.strip()),
+                (project_id, user_id, normalized_title, description.strip(), int(shared)),
             )
             connection.execute(
                 """INSERT INTO project_members (project_id, user_id, role, status, invited_by)
@@ -843,8 +867,10 @@ class AvelinDatabase:
         if self.project_role(user_id, project_id) != "owner":
             raise PermissionError("Только owner управляет участниками.")
         normalized_email = email.strip().casefold()
-        if role not in {"editor", "viewer"} or not normalized_email:
-            raise ValueError("Укажи email и роль editor/viewer.")
+        if role not in {"editor", "viewer"}:
+            raise ValueError("Укажи роль editor/viewer.")
+        if normalized_email and ("@" not in normalized_email or any(c.isspace() for c in normalized_email)):
+            raise ValueError("Укажи корректный email или оставь его пустым для приглашения по ссылке.")
         token = secrets.token_urlsafe(32)
         invitation_id = str(uuid4())
         with self.connect() as connection:
@@ -883,6 +909,7 @@ class AvelinDatabase:
         user = self.get_user(user_id)
         digest = sha256(token.encode()).hexdigest()
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """SELECT * FROM project_invitations
                    WHERE token_hash = ? AND status = 'pending'""",
@@ -892,9 +919,16 @@ class AvelinDatabase:
                 raise ValueError("Приглашение недействительно или уже использовано.")
             if str(row["expires_at"]) <= datetime.now(timezone.utc).isoformat():
                 connection.execute("UPDATE project_invitations SET status = 'expired' WHERE id = ?", (row["id"],))
+                connection.commit()
                 raise ValueError("Срок приглашения истёк.")
-            if str(user.get("email", "")).casefold() != str(row["email"]).casefold():
+            if str(row["email"]) and str(user.get("email", "")).casefold() != str(row["email"]).casefold():
                 raise PermissionError("Приглашение предназначено другому пользователю.")
+            project = connection.execute("SELECT status, user_id FROM projects WHERE id = ?", (row["project_id"],)).fetchone()
+            if project is None or project["status"] != "active":
+                raise ValueError("Группа недоступна.")
+            member = connection.execute("SELECT status FROM project_members WHERE project_id = ? AND user_id = ?", (row["project_id"], user_id)).fetchone()
+            if project["user_id"] == user_id or (member and member["status"] == "active"):
+                raise ValueError("Ты уже участник этой группы.")
             connection.execute(
                 """INSERT INTO project_members (project_id, user_id, role, status, invited_by)
                    VALUES (?, ?, ?, 'active', ?)
@@ -1128,17 +1162,10 @@ class AvelinDatabase:
 
     def auto_title_chat_thread(self, user_id: str, thread_id: str) -> dict | None:
         thread = self.get_chat_thread(user_id, thread_id)
-        if thread is None or thread["title"] not in {"New chat", "Main conversation", "Untitled chat"}:
+        if thread is None or thread["title"] not in {"New chat", "Main conversation", "Untitled chat", "Новый диалог", "Новый чат"}:
             return thread
-        messages = self.list_messages(thread_id)
-        first_user_message = next(
-            (message["content"] for message in messages if message["role"] == "user" and message["content"]),
-            "",
-        )
-        title = _title_from_message(first_user_message)
-        if not title:
-            return thread
-        return self.update_chat_thread(user_id, thread_id, title=title)
+        from ai_agent.chat_titles import ChatTitleService
+        return ChatTitleService(self).enqueue(user_id, thread_id)
 
     def _thread_payload(self, row: sqlite3.Row) -> dict:
         return {
@@ -1337,18 +1364,22 @@ class AvelinDatabase:
             else:
                 candidate_id = str(existing["id"])
                 source_ids = list(json.loads(str(existing["source_message_ids_json"] or "[]")))
+                # A changed value for the same profile key is new evidence, not
+                # another confirmation of the previous value (for example city).
+                if " ".join(str(existing["content"]).casefold().split()) != " ".join(content.casefold().split()):
+                    source_ids = []
                 if source_message_id not in source_ids:
                     source_ids.append(source_message_id)
                 connection.execute(
                     """
                     UPDATE memory_candidates
-                    SET content = ?, observation_count = observation_count + 1,
+                    SET content = ?, observation_count = ?,
                         confidence = MAX(confidence, ?), source_message_ids_json = ?,
                         decision = ?, reason = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
                     (
-                        content, max(0.0, min(float(confidence), 1.0)),
+                        content, len(source_ids), max(0.0, min(float(confidence), 1.0)),
                         json.dumps(source_ids), decision, reason, candidate_id,
                     ),
                 )
@@ -1369,6 +1400,7 @@ class AvelinDatabase:
             )
 
     def find_active_memory_by_key(self, user_id: str, memory_key: str) -> dict | None:
+        self._expire_due_memory(user_id)
         with self.connect() as connection:
             row = connection.execute(
                 """
@@ -1560,11 +1592,21 @@ class AvelinDatabase:
         table = _memory_table(sensitive)
         store = "health" if sensitive else "personal"
         with self.connect() as connection:
+            # remember_note historically dual-wrote the notes table. Keep its
+            # legacy copy from resurrecting a record explicitly deleted here.
+            legacy_note_ids = [str(row["source_id"]) for row in connection.execute(
+                """SELECT source_id FROM memory_provenance
+                   WHERE user_id = ? AND memory_store = ? AND memory_id = ?
+                     AND source_type = 'remember_note_tool' AND source_id IS NOT NULL""",
+                (user_id, store, memory_id),
+            ).fetchall()]
             cursor = connection.execute(
                 f"DELETE FROM {table} WHERE user_id = ? AND id = ?",
                 (user_id, memory_id),
             )
             if cursor.rowcount:
+                for note_id in legacy_note_ids:
+                    connection.execute("DELETE FROM notes WHERE user_id = ? AND id = ?", (user_id, note_id))
                 connection.execute(
                     "DELETE FROM memory_provenance WHERE user_id = ? AND memory_store = ? AND memory_id = ?",
                     (user_id, store, memory_id),
@@ -2634,7 +2676,7 @@ class AvelinDatabase:
             ).fetchall()
         return [_task_run_payload(row) for row in rows]
 
-    def acquire_task_run(self, user_id: str, worker_id: str, lease_seconds: int = 120) -> dict | None:
+    def acquire_task_run(self, user_id: str, worker_id: str, lease_seconds: int = 120, run_id: str | None = None) -> dict | None:
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(seconds=max(5, min(int(lease_seconds), 900)))).isoformat()
         with self.connect() as connection:
@@ -2656,10 +2698,11 @@ class AvelinDatabase:
                 FROM task_runs
                 JOIN tasks ON tasks.id = task_runs.task_id
                 WHERE task_runs.user_id = ? AND task_runs.state = 'queued'
+                  AND (? IS NULL OR task_runs.id = ?)
                 ORDER BY tasks.priority ASC, task_runs.created_at ASC
                 LIMIT 1
                 """,
-                (user_id,),
+                (user_id, run_id, run_id),
             ).fetchone()
             if row is None:
                 return None
@@ -3192,6 +3235,7 @@ class AvelinDatabase:
         task_description: str,
         task_step: str,
         budget: dict,
+        manual: bool = False,
     ) -> dict | None:
         task_id = str(uuid4())
         step_id = str(uuid4())
@@ -3200,17 +3244,31 @@ class AvelinDatabase:
         deduplication_key = f"automation:{automation_id}:{scheduled_for}"
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            claimed = connection.execute(
-                """
-                UPDATE automations
-                SET next_run_at = ?, status = CASE WHEN ? THEN 'completed' ELSE status END,
-                    last_scheduled_for = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND user_id = ? AND status = 'active' AND next_run_at = ?
-                """,
-                (next_run_at, 1 if terminal else 0, scheduled_for, automation_id, user_id, expected_next_run_at),
-            )
-            if claimed.rowcount != 1:
+            current = connection.execute(
+                "SELECT status, max_parallel_runs FROM automations WHERE id = ? AND user_id = ?",
+                (automation_id, user_id),
+            ).fetchone()
+            if current is None or current["status"] == "deleted":
                 return None
+            active = connection.execute(
+                """SELECT COUNT(*) FROM automation_runs ar JOIN task_runs tr ON tr.id = ar.task_run_id
+                   WHERE ar.automation_id = ? AND tr.state IN ('queued', 'running', 'waiting_approval', 'paused')""",
+                (automation_id,),
+            ).fetchone()[0]
+            if active >= current["max_parallel_runs"]:
+                return None
+            if not manual:
+                claimed = connection.execute(
+                    """
+                    UPDATE automations
+                    SET next_run_at = ?, status = CASE WHEN ? THEN 'completed' ELSE status END,
+                        last_scheduled_for = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND user_id = ? AND status = 'active' AND next_run_at = ?
+                    """,
+                    (next_run_at, 1 if terminal else 0, scheduled_for, automation_id, user_id, expected_next_run_at),
+                )
+                if claimed.rowcount != 1:
+                    return None
             duplicate = connection.execute(
                 "SELECT id FROM automation_runs WHERE automation_id = ? AND scheduled_for = ?",
                 (automation_id, scheduled_for),
@@ -3499,10 +3557,11 @@ class AvelinDatabase:
                 """
                 SELECT * FROM approval_requests
                 WHERE user_id = ? AND tool_name = ? AND arguments_digest = ?
+                  AND task_id IS ? AND step_id IS ?
                   AND status IN ('pending', 'approved')
                 ORDER BY created_at DESC LIMIT 1
                 """,
-                (user_id, tool_name, arguments_digest),
+                (user_id, tool_name, arguments_digest, task_id, step_id),
             ).fetchone()
             if existing is not None and not _approval_is_expired(existing):
                 return _approval_request_payload(existing)
@@ -4594,11 +4653,10 @@ def _memory_candidate_payload(row: sqlite3.Row) -> dict:
 
 
 def _title_from_message(content: str) -> str:
-    normalized = " ".join(content.split())
-    if not normalized:
+    if not content.strip():
         return ""
-    title = normalized[:48].rstrip(".,!?;:")
-    return f"{title}..." if len(normalized) > len(title) else title
+    from ai_agent.chat_titles import topic_fallback
+    return topic_fallback(content)
 
 
 def _memory_table(sensitive: bool) -> str:

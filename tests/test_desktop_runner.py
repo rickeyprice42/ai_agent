@@ -121,7 +121,9 @@ class DesktopRunnerTests(unittest.TestCase):
             if not available:
                 self.skipTest(reason or "desktop runner unavailable")
             process = Popen(
-                [sys.executable, str(ROOT / "tests" / "fixtures" / "desktop_fixture.py")],
+                # Windows venv redirector spawns a second interpreter; terminating
+                # the redirector can orphan the real fixture and poison later runs.
+                [getattr(sys, '_base_executable', sys.executable), str(ROOT / "tests" / "fixtures" / "desktop_fixture.py")],
                 creationflags=CREATE_NO_WINDOW,
             )
             try:

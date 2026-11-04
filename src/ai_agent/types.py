@@ -10,18 +10,23 @@ class Message:
     content: str
     name: str | None = None
     artifacts: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    tool_call_id: str | None = None
+    provider_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class ToolCall:
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    call_id: str | None = None
 
 
 @dataclass(slots=True)
 class ModelResponse:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    provider_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)

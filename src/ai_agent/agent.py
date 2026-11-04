@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import json
 import logging
 import re
 
 from ai_agent.action_log import ActionLogStore
 from ai_agent.autonomous_memory import AutonomousMemoryEngine
+from ai_agent.chat_approvals import PendingChatActions
 from ai_agent.config import Settings
 from ai_agent.connectors import ConnectorRegistry
-from ai_agent.context import ContextBuilder
+from ai_agent.context import ContextBuilder, ModelTokenEstimator
 from ai_agent.executor import ExecutionEngine
 from ai_agent.executor import _tool_status
 from ai_agent.executor import decide_step_action
@@ -20,9 +22,9 @@ from ai_agent.llm.vision import (
     OpenAIVisionProvider,
     VisionRouter,
 )
-from ai_agent.memory import MemoryStore
+from ai_agent.memory import MemoryStore, user_authored_text
 from ai_agent.planner import Planner
-from ai_agent.security import ToolPolicyEngine, mark_untrusted_tool_output
+from ai_agent.security import ToolPolicyEngine, mark_untrusted_tool_output, requires_approval
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import ToolRegistry
 from ai_agent.tools.browser import PlaywrightBrowserRunner
@@ -35,7 +37,7 @@ from ai_agent.tools.research import BrowserResearchReader
 from ai_agent.tools.presentations import PresentationSandbox
 from ai_agent.tools.shell import ShellSandbox
 from ai_agent.tool_factory import ToolFactory
-from ai_agent.types import Message
+from ai_agent.types import Message, ToolCall
 from ai_agent.types import TaskStep
 
 
@@ -45,9 +47,26 @@ class ToolOutcome:
     artifacts: list[dict] = field(default_factory=list)
     tool_names: list[str] = field(default_factory=list)
     statuses: list[str] = field(default_factory=list)
+    messages: list[Message] = field(default_factory=list)
+    calls: dict[str, str] = field(default_factory=dict)
+    preliminary_research: bool = False
+    approvals: list[dict] = field(default_factory=list)
+
+    def merge(self, other: "ToolOutcome") -> None:
+        self.results.extend(other.results)
+        self.artifacts.extend(other.artifacts)
+        self.tool_names.extend(other.tool_names)
+        self.statuses.extend(other.statuses)
+        self.messages.extend(other.messages)
+        self.calls.update(other.calls)
+        self.preliminary_research = self.preliminary_research or other.preliminary_research
+        self.approvals.extend(other.approvals)
 
 
 MIN_RESEARCH_RESULTS = 2
+MAX_TOOL_ROUNDS = 12
+MAX_TOOL_CALLS = 24
+MAX_SEARCHES_BEFORE_READ = 3
 logger = logging.getLogger("avelin.agent")
 
 
@@ -146,6 +165,7 @@ class Agent:
         self.tools = ToolRegistry()
         self.connectors = ConnectorRegistry(self.tools)
         self.policy = ToolPolicyEngine(self.memory.database, user_id)
+        self.pending_chat_actions = PendingChatActions(self.memory.database)
         self.executor = ExecutionEngine(self.tasks, self.tools, self.action_log, self.policy)
         register_builtin_tools(
             self.tools,
@@ -168,6 +188,7 @@ class Agent:
             user_id,
             self.tools,
             self.policy,
+            workspace_dir=settings.tool_workspace_dir,
         )
         self.provider = self._build_provider()
 
@@ -175,37 +196,49 @@ class Agent:
         return build_provider(self.settings)
 
     def respond(self, user_text: str) -> str:
-        user_message = Message(role="user", content=user_text, name=self._shared_author_name())
+        self.last_turn_outcome = "running"
+        self.last_turn_message_id = None
+        user_message = Message(role="user", content=user_text, name=self._shared_author_name(),artifacts=list(getattr(self,'incoming_attachments',[])))
         user_message_id = self.memory.append_message(user_message)
 
         direct_result = self._try_direct_tool_action(user_text)
         if direct_result is not None:
             assistant_text = _tool_completion_text(direct_result)
-            self.memory.append_message(
+            self.last_turn_message_id = self.memory.append_message(
                 Message(role="assistant", content=assistant_text, artifacts=direct_result.artifacts)
             )
             self._extract_autonomous_memory(user_message_id, user_text)
+            self.last_turn_outcome = _completed_turn_outcome(direct_result)
             return assistant_text
 
         completed_tools = ToolOutcome()
-        for attempt in range(4):
+        turn_messages: list[Message] = []
+        context = None
+        last_phase = "normal"
+        for attempt in range(MAX_TOOL_ROUNDS):
             try:
                 shared_workspace = self.memory.shared_project() is not None
-                tool_definitions = [] if shared_workspace else self.tools.list_for_model()
-                context = self.context.build(
+                phase = _turn_phase(completed_tools, attempt)
+                tool_definitions = _tools_for_phase(self.tools.list_for_model(), phase) if not shared_workspace else []
+                if phase != last_phase and phase != "normal":
+                    turn_messages.append(Message(role="user", name="agent_runtime", content=_turn_hint(phase)))
+                last_phase = phase
+                context = context or self.context.build(
                     self.settings.system_prompt if shared_workspace else self.tool_factory.system_prompt(self.settings.system_prompt),
                     model=self.settings.model_name,
                     tools=tool_definitions,
                 )
                 response = self.provider.generate(
                     system_prompt=context.system_prompt,
-                    messages=context.messages,
+                    messages=self._provider_messages(context, turn_messages),
                     tools=tool_definitions,
                 )
             except ProviderError as exc:
+                self.last_turn_outcome = "failed"
                 if completed_tools.artifacts:
-                    assistant_text = _tool_completion_text(completed_tools)
-                    self.memory.append_message(
+                    self.last_turn_outcome = "partial"
+                    assistant_text = _provider_failure_artifact_text(completed_tools, exc)
+                    self.last_turn_message_id = self.memory.append_message(
                         Message(
                             role="assistant",
                             content=assistant_text,
@@ -224,54 +257,77 @@ class Agent:
                 raise
 
             if response.tool_calls:
-                outcome = self._execute_tool_calls(response.tool_calls, user_text)
-                completed_tools.results.extend(outcome.results)
-                completed_tools.artifacts.extend(outcome.artifacts)
-                completed_tools.tool_names.extend(outcome.tool_names)
+                if phase == "final":
+                    break
+                turn_messages.append(Message(role="assistant", content=response.text, tool_calls=response.tool_calls, provider_items=response.provider_items))
+                outcome = self._execute_tool_calls(response.tool_calls, user_text, previous=completed_tools)
+                completed_tools.merge(outcome)
+                turn_messages.extend(outcome.messages)
+                if outcome.approvals:
+                    self.last_turn_outcome = "waiting_approval"
+                    assistant_text = "Ожидаю подтверждения действия в этом чате."
+                    self.last_turn_message_id = self.memory.append_message(Message(role="assistant", content=assistant_text, artifacts=completed_tools.artifacts))
+                    return assistant_text
+                if _stop_tool_loop(completed_tools):
+                    break
                 continue
 
+            self._ensure_requested_research_docx(user_text, completed_tools)
             if (
                 not response.text.strip()
                 and completed_tools.results
                 and not completed_tools.artifacts
-                and attempt < 3
+                and attempt < MAX_TOOL_ROUNDS - 1
             ):
                 self.memory.append_message(Message(role="tool", name="agent_runtime", content=_CONTINUE_AFTER_TOOL))
+                turn_messages.append(Message(role="user", content=_CONTINUE_AFTER_TOOL))
                 continue
-            self._ensure_requested_research_docx(user_text, completed_tools)
             assistant_text = response.text.strip() or _tool_completion_text(completed_tools)
-            self.memory.append_message(
+            if completed_tools.preliminary_research and _PRELIMINARY_RESEARCH not in assistant_text:
+                assistant_text = _PRELIMINARY_RESEARCH + "\n\n" + assistant_text
+            self.last_turn_message_id = self.memory.append_message(
                 Message(role="assistant", content=assistant_text, artifacts=completed_tools.artifacts)
             )
             self._extract_autonomous_memory(user_message_id, user_text)
+            self.last_turn_outcome = _completed_turn_outcome(completed_tools)
             return assistant_text
 
         self._ensure_requested_research_docx(user_text, completed_tools)
         fallback = (
-            _tool_completion_text(completed_tools)
+            _unfinished_completion_text(completed_tools, user_text)
             if completed_tools.results
             else "Достигнут предел шагов агента. Уточни запрос."
         )
-        self.memory.append_message(
+        self.last_turn_message_id = self.memory.append_message(
             Message(role="assistant", content=fallback, artifacts=completed_tools.artifacts)
         )
         self._extract_autonomous_memory(user_message_id, user_text)
+        self.last_turn_outcome = "partial" if completed_tools.results else "failed"
         return fallback
 
-    def respond_stream(self, user_text: str):
-        user_message_id = self.memory.append_message(
-            Message(role="user", content=user_text, name=self._shared_author_name())
-        )
-        direct_result = self._try_direct_tool_action(user_text)
-        if direct_result is not None:
+    def respond_stream(self, user_text: str, *, resume_outcome: ToolOutcome | None = None, resume_messages: list[Message] | None = None):
+        self.last_turn_outcome = "running"
+        self.last_turn_message_id = None
+        if resume_outcome is None:
+            user_message_id = self.memory.append_message(
+                Message(role="user", content=user_text, name=self._shared_author_name(),artifacts=list(getattr(self,'incoming_attachments',[])))
+            )
+        else:
+            rows=self.memory.database.list_messages(self.memory.thread_id)
+            user_message_id=next((row['id'] for row in reversed(rows) if row['role']=='user'),None)
+        decision = self._direct_tool_decision(user_text) if resume_outcome is None else None
+        if decision is not None:
+            direct_result = yield from self._execute_tool_calls_stream([ToolCall(decision.tool_name, decision.arguments)], user_text)
             assistant_text = _tool_completion_text(direct_result)
-            self.memory.append_message(
+            self.last_turn_message_id = self.memory.append_message(
                 Message(role="assistant", content=assistant_text, artifacts=direct_result.artifacts)
             )
             self._extract_autonomous_memory(user_message_id, user_text)
+            self.last_turn_outcome = _completed_turn_outcome(direct_result)
             yield {"type": "delta", "text": assistant_text}
             yield {
                 "type": "done",
+                "outcome": self.last_turn_outcome,
                 "provider": self.settings.model_provider,
                 "model": self.settings.model_name,
             }
@@ -280,12 +336,19 @@ class Agent:
         partial = ""
         message_id = None
         completed = False
-        completed_tools = ToolOutcome()
+        completed_tools = resume_outcome if resume_outcome is not None else ToolOutcome()
+        turn_messages: list[Message] = list(resume_messages or [])
+        context = None
+        last_phase = "normal"
         try:
-            for attempt in range(4):
+            for attempt in range(MAX_TOOL_ROUNDS):
                 shared_workspace = self.memory.shared_project() is not None
-                tool_definitions = [] if shared_workspace else self.tools.list_for_model()
-                context = self.context.build(
+                phase = _turn_phase(completed_tools, attempt)
+                tool_definitions = _tools_for_phase(self.tools.list_for_model(), phase) if not shared_workspace else []
+                if phase != last_phase and phase != "normal":
+                    turn_messages.append(Message(role="user", name="agent_runtime", content=_turn_hint(phase)))
+                last_phase = phase
+                context = context or self.context.build(
                     self.settings.system_prompt if shared_workspace else self.tool_factory.system_prompt(self.settings.system_prompt),
                     model=self.settings.model_name,
                     tools=tool_definitions,
@@ -293,7 +356,7 @@ class Agent:
                 response = None
                 for chunk in self.provider.stream(
                     system_prompt=context.system_prompt,
-                    messages=context.messages,
+                    messages=self._provider_messages(context, turn_messages),
                     tools=tool_definitions,
                 ):
                     if chunk.delta:
@@ -327,26 +390,45 @@ class Agent:
                         )
                         message_id = None
                         partial = ""
-                    outcome = self._execute_tool_calls(response.tool_calls, user_text)
-                    completed_tools.results.extend(outcome.results)
-                    completed_tools.artifacts.extend(outcome.artifacts)
-                    completed_tools.tool_names.extend(outcome.tool_names)
-                    yield {"type": "status", "text": "Выполняю инструменты…"}
+                    if phase == "final":
+                        break
+                    turn_messages.append(Message(role="assistant", content=response.text, tool_calls=response.tool_calls, provider_items=response.provider_items))
+                    outcome = ToolOutcome()
+                    try:
+                        yield from self._execute_tool_calls_stream(response.tool_calls, user_text, previous=completed_tools, round_number=attempt + 1, outcome=outcome)
+                    finally:
+                        # Closing the stream at a tool-completed status must not lose
+                        # the file that was already durably created by that tool.
+                        completed_tools.merge(outcome)
+                    turn_messages.extend(outcome.messages)
+                    if outcome.approvals:
+                        self.last_turn_outcome = "waiting_approval"
+                        assistant_text = "Ожидаю подтверждения действия в этом чате."
+                        self.last_turn_message_id = self.memory.append_message(Message(role="assistant", content=assistant_text, artifacts=completed_tools.artifacts))
+                        completed = True
+                        yield {"type": "delta", "text": assistant_text}
+                        yield {"type": "done", "outcome": self.last_turn_outcome, "provider": self.settings.model_provider, "model": self.settings.model_name}
+                        return
+                    if _stop_tool_loop(completed_tools):
+                        break
                     continue
 
+                self._ensure_requested_research_docx(user_text, completed_tools)
                 if (
                     not response.text.strip()
                     and not partial.strip()
                     and completed_tools.results
                     and not completed_tools.artifacts
-                    and attempt < 3
+                    and attempt < MAX_TOOL_ROUNDS - 1
                 ):
                     self.memory.append_message(
                         Message(role="tool", name="agent_runtime", content=_CONTINUE_AFTER_TOOL)
                     )
+                    turn_messages.append(Message(role="user", content=_CONTINUE_AFTER_TOOL))
                     continue
-                self._ensure_requested_research_docx(user_text, completed_tools)
                 assistant_text = response.text.strip() or partial.strip() or _tool_completion_text(completed_tools)
+                if completed_tools.preliminary_research and _PRELIMINARY_RESEARCH not in assistant_text:
+                    assistant_text = _PRELIMINARY_RESEARCH + "\n\n" + assistant_text
                 if message_id is None:
                     message_id = self.memory.append_assistant_state(
                         assistant_text,
@@ -365,10 +447,13 @@ class Agent:
                         status="complete",
                         artifacts=completed_tools.artifacts,
                     )
+                self.last_turn_message_id = message_id
+                self.last_turn_outcome = _completed_turn_outcome(completed_tools)
                 completed = True
                 self._extract_autonomous_memory(user_message_id, user_text)
                 yield {
                     "type": "done",
+                    "outcome": self.last_turn_outcome,
                     "provider": self.settings.model_provider,
                     "model": self.settings.model_name,
                 }
@@ -376,27 +461,31 @@ class Agent:
 
             self._ensure_requested_research_docx(user_text, completed_tools)
             fallback = (
-                _tool_completion_text(completed_tools)
+                _unfinished_completion_text(completed_tools, user_text)
                 if completed_tools.results
                 else "Достигнут предел шагов агента. Уточни запрос."
             )
-            self.memory.append_message(
+            self.last_turn_message_id = self.memory.append_message(
                 Message(role="assistant", content=fallback, artifacts=completed_tools.artifacts)
             )
+            self.last_turn_outcome = "partial" if completed_tools.results else "failed"
             completed = True
             self._extract_autonomous_memory(user_message_id, user_text)
             yield {"type": "delta", "text": fallback}
             yield {
                 "type": "done",
+                "outcome": self.last_turn_outcome,
                 "provider": self.settings.model_provider,
                 "model": self.settings.model_name,
             }
         except GeneratorExit:
+            if not completed:
+                self.last_turn_outcome = "cancelled"
             if completed_tools.artifacts and message_id is None and not completed:
                 self.memory.append_assistant_state(
-                    _tool_completion_text(completed_tools),
-                    status="complete",
-                    error=None,
+                    "Генерация остановлена. Созданные файлы сохранены и доступны ниже.",
+                    status="cancelled",
+                    error="Генерация остановлена пользователем.",
                     provider=self.settings.model_provider,
                     model=self.settings.model_name,
                     artifacts=completed_tools.artifacts,
@@ -412,10 +501,12 @@ class Agent:
             raise
 
         except ProviderError as exc:
+            self.last_turn_outcome = "failed"
             if completed_tools.artifacts:
-                assistant_text = _tool_completion_text(completed_tools)
+                self.last_turn_outcome = "partial"
+                assistant_text = _provider_failure_artifact_text(completed_tools, exc)
                 if message_id is None:
-                    self.memory.append_assistant_state(
+                    message_id = self.memory.append_assistant_state(
                         assistant_text,
                         status="complete",
                         error=None,
@@ -430,11 +521,13 @@ class Agent:
                         status="complete",
                         artifacts=completed_tools.artifacts,
                     )
+                self.last_turn_message_id = message_id
                 if not partial:
                     yield {"type": "delta", "text": assistant_text}
                 self._extract_autonomous_memory(user_message_id, user_text)
                 yield {
                     "type": "done",
+                    "outcome": self.last_turn_outcome,
                     "provider": self.settings.model_provider,
                     "model": self.settings.model_name,
                 }
@@ -456,6 +549,7 @@ class Agent:
                 )
             yield {
                 "type": "error",
+                "outcome": self.last_turn_outcome,
                 "text": exc.user_message,
                 "code": exc.code,
                 "provider": self.settings.model_provider,
@@ -466,6 +560,11 @@ class Agent:
         if self.memory.shared_project() is not None:
             return
         try:
+            source = next((row for row in self.memory.database.list_messages(self.memory.thread_id)
+                if row["id"] == source_message_id and row["role"] == "user"), None)
+            if source is not None:
+                user_text = user_authored_text(Message(role="user", content=str(source["content"]),
+                    artifacts=source.get("artifacts") or []))
             self.autonomous_memory.process_completed_turn(source_message_id, user_text)
         except Exception:
             logger.exception("Autonomous memory extraction failed without affecting the chat response.")
@@ -476,8 +575,40 @@ class Agent:
         user = self.memory.database.get_user(self.memory.user_id)
         return str(user.get("display_name") or user.get("username") or "Участник")
 
-    def _execute_tool_calls(self, tool_calls, user_text: str) -> ToolOutcome:
-        outcome = ToolOutcome()
+    def _provider_messages(self, context, turn_messages: list[Message]) -> list[Message]:
+        messages = [*context.messages, *turn_messages]
+        estimator = ModelTokenEstimator(self.settings.model_name)
+        def token_count() -> int:
+            return estimator.count_text(context.system_prompt) + sum(
+                estimator.count_message(message)
+                + estimator.count_text(json.dumps([
+                    {"name": call.name, "arguments": call.arguments, "call_id": call.call_id}
+                    for call in message.tool_calls
+                ], ensure_ascii=False))
+                for message in messages
+            )
+        budget = context.trace.input_budget_tokens - context.trace.tool_schema_tokens
+        if token_count() > budget:
+            # Preserve every native call/result pair, but shorten older large tool results.
+            messages = [
+                Message(role=message.role, name=message.name, content=message.content[:1200] + "\n[tool result excerpt truncated]", tool_call_id=message.tool_call_id)
+                if message.role == "tool" and len(message.content) > 1200 else message
+                for message in messages
+            ]
+        if token_count() > budget:
+            raise ProviderError("Результаты инструментов превысили доступный контекст. Сократи запрос или продолжи отдельным сообщением.", "context_overflow")
+        return messages
+
+    def _execute_tool_calls(self, tool_calls, user_text: str, *, previous: ToolOutcome | None = None) -> ToolOutcome:
+        stream = self._execute_tool_calls_stream(tool_calls, user_text, previous=previous)
+        while True:
+            try:
+                next(stream)
+            except StopIteration as stopped:
+                return stopped.value
+
+    def _execute_tool_calls_stream(self, tool_calls, user_text: str, *, previous: ToolOutcome | None = None, round_number: int = 1, outcome: ToolOutcome | None = None):
+        outcome = outcome if outcome is not None else ToolOutcome()
         if self.memory.shared_project() is not None:
             outcome.results.append(
                 "Tool calls are disabled in Shared Workspace MVP; share board items explicitly through the workspace UI."
@@ -485,8 +616,31 @@ class Agent:
             outcome.statuses.append("blocked")
             return outcome
         for tool_call in tool_calls:
+            yield {"type": "status", "text": _tool_activity_text(tool_call.name), "tool": tool_call.name, "phase": "started", "round": round_number}
             invocation_output = None
-            if not self.tools.has(tool_call.name):
+            signature = json.dumps([tool_call.name, tool_call.arguments], sort_keys=True, ensure_ascii=False, default=str)
+            prior_calls = {**(previous.calls if previous else {}), **outcome.calls}
+            previous_count = len(previous.tool_names) if previous else 0
+            if previous_count + len(outcome.tool_names) >= MAX_TOOL_CALLS:
+                tool_result = "Достигнут предел вызовов инструментов за один запрос. Продолжи отдельным сообщением."
+                status = "blocked"
+                arguments = tool_call.arguments
+            elif tool_call.name == "web_search" and (_searches_since_read(previous, outcome) >= MAX_SEARCHES_BEFORE_READ or _repeated_discovery(previous, outcome)):
+                # Different query spellings must not evade a research boundary.
+                # Match the native call with a tool result, but do not hit the
+                # search provider again when it has produced no new evidence.
+                tool_result = _READ_SOURCE_AFTER_SEARCH
+                status = "failed"
+                arguments = tool_call.arguments
+            elif signature in prior_calls and (
+                prior_calls[signature] != "completed"
+                or (self.tools.has(tool_call.name) and requires_approval(self.tools.get(tool_call.name),tool_call.arguments))
+                or tool_call.name in {"write_file", "append_docx", "create_docx", "create_presentation", "web_search", "plan_task", "create_task"}
+            ):
+                tool_result = "Повторный одинаковый вызов остановлен. Используй уже полученный результат, исправь аргументы или выбери другой источник."
+                status = "blocked"
+                arguments = tool_call.arguments
+            elif not self.tools.has(tool_call.name):
                 tool_result = f"Инструмент '{tool_call.name}' не найден."
                 status = "not_found"
                 arguments = tool_call.arguments
@@ -500,10 +654,15 @@ class Agent:
                     status = "validation_error"
                 else:
                     arguments = self._normalize_new_file_overwrite(tool_call.name, arguments)
-                    policy = self.policy.authorize(self.tools.get(tool_call.name), arguments)
+                    policy = self.policy.authorize(self.tools.get(tool_call.name), arguments, step_id=f"chat:{self.memory.thread_id}")
                     if policy.outcome != "allow":
                         tool_result = _policy_message(policy.reason, policy.approval_id)
                         status = "blocked"
+                        if policy.outcome == "approval_required" and policy.approval_id:
+                            self.pending_chat_actions.save(self.memory.user_id, self.memory.thread_id, policy.approval_id, tool_call.name, arguments, user_text)
+                            approval = self.pending_chat_actions.public(self.memory.user_id, self.memory.thread_id, policy.approval_id)
+                            outcome.approvals.append(approval)
+                            yield {"type": "approval", "approval": approval}
                     else:
                         invocation = self.tools.invoke(tool_call.name, arguments)
                         tool_result = invocation.text()
@@ -515,90 +674,81 @@ class Agent:
                 arguments=arguments,
                 result=tool_result,
             )
-            self.memory.append_message(
-                Message(
-                    role="tool",
-                    content=mark_untrusted_tool_output(tool_call.name, tool_result),
-                    name=tool_call.name,
-                )
-            )
+            tool_message = Message(role="tool", content=mark_untrusted_tool_output(tool_call.name, tool_result), name=tool_call.name, tool_call_id=tool_call.call_id)
+            self.memory.append_message(tool_message)
+            outcome.messages.append(tool_message)
             outcome.results.append(tool_result)
             outcome.tool_names.append(tool_call.name)
             outcome.statuses.append(status)
+            outcome.calls[signature] = status
             artifact = self._artifact_from_tool(
                 tool_call.name, arguments, status, invocation_output
             )
             if artifact is not None:
                 outcome.artifacts.append(artifact)
+            yield {"type": "status", "text": _tool_activity_text(tool_call.name, status), "tool": tool_call.name, "phase": status, "round": round_number}
+            if outcome.approvals:
+                break
+            if previous_count + len(outcome.tool_names) >= MAX_TOOL_CALLS:
+                break
         return outcome
 
-    def _try_direct_tool_action(self, user_text: str) -> ToolOutcome | None:
+    def resume_chat_action_stream(self, approval_id: str):
+        """Execute the exact approved action once, then continue the original request."""
+        pending = self.pending_chat_actions.get(self.memory.user_id, self.memory.thread_id, approval_id)
+        if pending is None:
+            raise ValueError("Ожидающее действие не найдено.")
+        if not self.pending_chat_actions.claim(self.memory.user_id, self.memory.thread_id, approval_id):
+            raise ValueError("Это действие уже обработано.")
+        self.last_turn_outcome = "running"
+        self.last_turn_message_id = None
+        outcome = ToolOutcome()
+        call=ToolCall(pending["tool_name"],pending["arguments"],f"approved_{approval_id}")
+        try:
+            yield from self._execute_tool_calls_stream([call], pending["user_prompt"], outcome=outcome)
+            if outcome.approvals:
+                raise ValueError("Подтверждение истекло или не соответствует действию.")
+            self.pending_chat_actions.finish(self.memory.user_id, self.memory.thread_id, approval_id, "completed", {"statuses":outcome.statuses,"artifacts":outcome.artifacts})
+            yield {"type":"status","text":"Готовлю ответ по результату подтверждённого действия…","phase":"synthesizing"}
+            messages=[Message("assistant","",tool_calls=[call]),*outcome.messages,Message("user","Подтверждённое действие уже выполнено. Продолжи исходную просьбу с его результата. Не выполняй завершённое действие повторно.")]
+            yield from self.respond_stream(pending["user_prompt"],resume_outcome=outcome,resume_messages=messages)
+        except BaseException:
+            # A claimed side effect is never retried blindly after disconnect/crash.
+            terminal_completed = getattr(self, "last_turn_outcome", None) == "completed"
+            if not terminal_completed:
+                self.pending_chat_actions.finish(self.memory.user_id, self.memory.thread_id, approval_id, "interrupted", {"statuses":outcome.statuses,"artifacts":outcome.artifacts})
+            if outcome.artifacts and not terminal_completed:
+                self.memory.append_message(Message("assistant","Подтверждённое действие завершилось; созданные файлы сохранены.",artifacts=outcome.artifacts))
+            raise
+
+    def _direct_tool_decision(self, user_text: str):
+        # A compound request needs model synthesis after reading its evidence. The
+        # deterministic task-step parser must not silently complete only its first verb.
+        if re.search(r"\b(?:затем|после|сравни\w*|проанализируй|объясни|составь|then|compare|analyze|and)\b|\sи\s", user_text, re.IGNORECASE):
+            return None
         decision = decide_step_action(
             TaskStep(id="direct-chat", task_id="direct-chat", description=user_text)
         )
         if decision.tool_name is None:
             return None
-        if decision.tool_name in {"run_shell", "http_request", "execute_next_step"}:
+        if decision.tool_name in {"run_shell", "http_request", "execute_next_step", "browser_read", "research_read", "create_presentation"}:
             return None
         if not self.tools.has(decision.tool_name):
             return None
+        if decision.tool_name == "read_file":
+            try:
+                self.files.resolve_download_path(str(decision.arguments.get("path", "")))
+            except ValueError:
+                # Phrases such as "покажи список файлов" are not filenames.
+                # Let the model choose a tool rather than returning a parser error.
+                return None
+        return decision
 
-        arguments, validation_error = self.tools.validate_arguments(
-            decision.tool_name,
-            decision.arguments,
-        )
-        if validation_error:
-            self.action_log.record(
-                tool_name=decision.tool_name,
-                status="validation_error",
-                arguments=decision.arguments,
-                result=validation_error,
-            )
-            self.memory.append_message(
-                Message(role="tool", content=validation_error, name=decision.tool_name)
-            )
-            return ToolOutcome(results=[validation_error], statuses=["validation_error"])
-
-        arguments = self._normalize_new_file_overwrite(decision.tool_name, arguments)
-        policy = self.policy.authorize(self.tools.get(decision.tool_name), arguments)
-        if policy.outcome != "allow":
-            policy_message = _policy_message(policy.reason, policy.approval_id)
-            self.action_log.record(
-                tool_name=decision.tool_name,
-                status="blocked",
-                arguments=arguments,
-                result=policy_message,
-            )
-            self.memory.append_message(
-                Message(role="tool", content=policy_message, name=decision.tool_name)
-            )
-            return ToolOutcome(results=[policy_message], statuses=["blocked"])
-
-        invocation = self.tools.invoke(decision.tool_name, arguments)
-        tool_result = invocation.text()
-        status = invocation.status
-        self.action_log.record(
-            tool_name=decision.tool_name,
-            status=status,
-            arguments=arguments,
-            result=tool_result,
-        )
-        self.memory.append_message(
-            Message(
-                role="tool",
-                content=mark_untrusted_tool_output(decision.tool_name, tool_result),
-                name=decision.tool_name,
-            )
-        )
-        artifact = self._artifact_from_tool(
-            decision.tool_name, arguments, status, invocation.output
-        )
-        return ToolOutcome(
-            results=[tool_result],
-            artifacts=[artifact] if artifact is not None else [],
-            tool_names=[decision.tool_name],
-            statuses=[status],
-        )
+    def _try_direct_tool_action(self, user_text: str) -> ToolOutcome | None:
+        decision = self._direct_tool_decision(user_text)
+        if decision is None:
+            return None
+        return self._execute_tool_calls([ToolCall(decision.tool_name, decision.arguments)], user_text)
 
     def _normalize_new_file_overwrite(self, tool_name: str, arguments: dict) -> dict:
         if tool_name not in {"write_file", "create_docx", "create_presentation"}:
@@ -646,10 +796,10 @@ class Agent:
             outcome.statuses.append("failed")
             return
         path_match = re.search(r"([\w\-./\\\u0400-\u04ff]+\.docx)\b", user_text, flags=re.IGNORECASE)
-        requested_path = path_match.group(1).replace("\\", "/") if path_match else "web_research.docx"
+        requested_path = path_match.group(1).replace("\\", "/") if path_match else "outputs/web_research.docx"
         relative_path = self._unique_docx_path(requested_path)
         query = search_result.splitlines()[0].partition(":")[2].strip()
-        paragraphs = [
+        paragraphs = [_PRELIMINARY_RESEARCH] + [
             f"**{title.strip()}**\n{snippet.strip()}\nИсточник: {url.strip()}"
             for title, url, snippet in matches
         ]
@@ -660,22 +810,9 @@ class Agent:
             "bullets": [],
             "overwrite": False,
         }
-        invocation = self.tools.invoke("create_docx", arguments)
-        tool_result = invocation.text()
-        status = invocation.status
-        self.action_log.record(
-            tool_name="create_docx",
-            status=status,
-            arguments=arguments,
-            result=tool_result,
-        )
-        self.memory.append_message(Message(role="tool", content=tool_result, name="create_docx"))
-        outcome.results.append(tool_result)
-        outcome.tool_names.append("create_docx")
-        outcome.statuses.append(status)
-        artifact = self._artifact_from_tool("create_docx", arguments, status)
-        if artifact is not None:
-            outcome.artifacts.append(artifact)
+        fallback = self._execute_tool_calls([ToolCall("create_docx", arguments)], user_text, previous=outcome)
+        fallback.preliminary_research = bool(fallback.artifacts)
+        outcome.merge(fallback)
 
     def _unique_docx_path(self, relative_path: str) -> str:
         candidate = Path(relative_path.strip().replace("\\", "/"))
@@ -700,6 +837,20 @@ class Agent:
         status: str,
         output: object | None = None,
     ) -> dict | None:
+        if status == "completed" or (tool_name == "propose_extension" and status == "failed"):
+            if tool_name == "propose_extension" and isinstance(output, dict):
+                candidate = output.get("review_artifact", {}).get("path")
+            elif tool_name in {"transform_image", "edit_office_document"} and isinstance(output, dict):
+                candidate = output.get("path")
+            else:
+                generated = self.tool_factory.artifact_for_invocation(tool_name, arguments)
+                candidate = generated.get("path") if generated else None
+            if candidate:
+                try:
+                    file = self.files.describe_file(str(candidate))
+                    return {"path": file.path, "name": file.name, "extension": file.extension, "size_bytes": file.size_bytes}
+                except ValueError:
+                    return None
         if status == "completed" and tool_name in {
             "browser_read", "browser_interact", "desktop_snapshot", "desktop_interact",
         }:
@@ -735,6 +886,10 @@ class Agent:
 
 def _tool_completion_text(outcome: ToolOutcome) -> str:
     if outcome.artifacts:
+        if outcome.preliminary_research:
+            return _PRELIMINARY_RESEARCH + " Файл с предварительными результатами можно скачать ниже."
+        if outcome.statuses and outcome.statuses[-1] != "completed":
+            return "Созданные файлы сохранены и доступны ниже. Последующее действие не завершилось; вся задача пока не выполнена."
         if len(outcome.artifacts) == 1:
             return (
                 f"Готово — файл **{outcome.artifacts[0]['name']}** создан. "
@@ -772,6 +927,140 @@ def _tool_completion_text(outcome: ToolOutcome) -> str:
     return "Не смог сформировать ответ."
 
 
+def _provider_failure_artifact_text(outcome: ToolOutcome, error: ProviderError) -> str:
+    return f"Созданные файлы сохранены и доступны ниже. Продолжить выполнение не удалось: {error.user_message} Вся задача может быть не завершена."
+
+
+def _completed_turn_outcome(outcome: ToolOutcome) -> str:
+    if outcome.approvals:
+        return "waiting_approval"
+    if outcome.preliminary_research:
+        return "partial"
+    extension_statuses = [status for name, status in zip(outcome.tool_names, outcome.statuses)
+                          if name in {"propose_extension", "install_extension"}]
+    if extension_statuses and extension_statuses[-1] != "completed":
+        if extension_statuses[-1] == "cancelled":
+            return "cancelled"
+        return "partial" if outcome.artifacts else "failed"
+    if outcome.statuses and outcome.statuses[-1] != "completed":
+        if outcome.statuses[-1] == "cancelled":
+            return "cancelled"
+        return "partial" if outcome.artifacts else "failed"
+    return "completed"
+
+
+def _stop_tool_loop(outcome: ToolOutcome) -> bool:
+    return "blocked" in outcome.statuses or len(outcome.tool_names) >= MAX_TOOL_CALLS
+
+
+def _searches_since_read(*outcomes: ToolOutcome | None) -> int:
+    count = 0
+    actions = [(name, status) for outcome in outcomes if outcome is not None for name, status in zip(outcome.tool_names, outcome.statuses)]
+    for name, status in reversed(actions):
+        if status == "completed" and name in {"research_read", "browser_read", "http_request", "analyze_image"}:
+            break
+        if name == "web_search":
+            count += 1
+    return count
+
+
+def _turn_phase(outcome: ToolOutcome, attempt: int) -> str:
+    searches = _searches_since_read(outcome)
+    if attempt >= MAX_TOOL_ROUNDS - 1 or searches > MAX_SEARCHES_BEFORE_READ:
+        return "final"
+    return "read_sources" if searches >= MAX_SEARCHES_BEFORE_READ or _repeated_discovery(outcome) else "normal"
+
+
+def _repeated_discovery(*outcomes: ToolOutcome | None) -> bool:
+    recent = []
+    actions = [(name, status, result) for outcome in outcomes if outcome is not None
+               for name, status, result in zip(outcome.tool_names, outcome.statuses, outcome.results)]
+    for name, status, result in reversed(actions):
+        if status == "completed" and name in {"research_read", "browser_read", "http_request", "analyze_image"}:
+            break
+        if name == "web_search" and status == "completed":
+            urls = frozenset(re.findall(r"(?m)^\s*URL:\s*(https?://\S+)", result))
+            if urls:
+                recent.append(urls)
+                if len(recent) == 2:
+                    return recent[0] == recent[1]
+    return False
+
+
+def _tools_for_phase(tools: list[dict], phase: str) -> list[dict]:
+    if phase == "final":
+        return []
+    if phase == "read_sources":
+        return [tool for tool in tools if tool["name"] != "web_search"]
+    return tools
+
+
+def _turn_hint(phase: str) -> str:
+    return _FINALIZE_FROM_EVIDENCE if phase == "final" else _READ_SOURCE_AFTER_SEARCH
+
+
+def _unfinished_completion_text(outcome: ToolOutcome, user_text: str = "") -> str:
+    if not outcome.artifacts:
+        for name, status, value in zip(outcome.tool_names, outcome.statuses, outcome.results):
+            if name == "analyze_image" and status == "completed":
+                try:
+                    observation = json.loads(value).get("text", "")
+                except (ValueError, AttributeError):
+                    observation = ""
+                if observation:
+                    gap = ("Точную модель и актуальную цену по проверенной карточке подтвердить не удалось. "
+                           if re.search(r"цен|стоим|price|cost", user_text, re.I) else
+                           "Точную идентификацию по проверенному источнику подтвердить не удалось. ")
+                    return (
+                        "По изображению получено предварительное описание:\n\n" + str(observation)[:1800]
+                        + "\n\n" + gap + "Описание изображения может содержать ошибку; визуальное сходство не подтверждает точный ID или артикул. "
+                        "Поможет крупный снимок отличительных деталей или маркировки."
+                    )
+    if outcome.statuses and outcome.statuses[-1] == "blocked":
+        explanation = outcome.results[-1] if outcome.results else "Действие ожидает подтверждения."
+        if outcome.artifacts:
+            return explanation + "\n\nСозданные файлы доступны ниже; вся задача ещё не завершена."
+        return explanation
+    result = "Достигнут предел шагов агента. Задача пока не завершена; полученные результаты сохранены."
+    if outcome.artifacts:
+        result += " Созданные файлы доступны ниже."
+    elif outcome.statuses and all(status != "completed" for status in outcome.statuses):
+        result = _tool_completion_text(outcome)
+    return result
+
+
+def _tool_activity_text(name: str, status: str = "started") -> str:
+    labels = {
+        "web_search": "Ищу информацию в интернете",
+        "http_request": "Читаю веб-источник",
+        "research_read": "Проверяю источник",
+        "browser_read": "Открываю страницу в браузере",
+        "browser_interact": "Работаю со страницей в браузере",
+        "read_file": "Читаю файл",
+        "list_workspace_files": "Проверяю файлы рабочей папки",
+        "write_file": "Создаю файл",
+        "create_docx": "Создаю документ Word",
+        "append_docx": "Дополняю документ Word",
+        "create_presentation": "Создаю презентацию",
+        "analyze_image": "Анализирую изображение",
+        "inspect_image": "Проверяю параметры изображения",
+        "transform_image": "Подготавливаю изображение",
+        "inspect_office_document": "Читаю структуру документа",
+        "edit_office_document": "Создаю исправленную копию документа",
+        "tool_search": "Проверяю готовые инструменты и навыки",
+        "propose_extension": "Подготавливаю инструмент для проверки",
+        "install_extension": "Проверяю и устанавливаю подтверждённое расширение",
+        "run_shell": "Выполняю команду",
+        "remember_note": "Сохраняю запись памяти",
+        "recall_notes": "Проверяю память",
+    }
+    label = labels.get(name, f"Выполняю {name}")
+    if status == "started":
+        return label + "…"
+    suffix = {"completed": "готово", "blocked": "ожидает подтверждения или уточнения", "cancelled": "отменено"}.get(status, "не удалось выполнить")
+    return f"{label} — {suffix}."
+
+
 def _policy_message(reason: str, approval_id: str | None) -> str:
     suffix = f" Approval ID: {approval_id}." if approval_id else ""
     return f"{reason}{suffix}"
@@ -794,6 +1083,23 @@ _CONTINUE_AFTER_TOOL = (
     "создай его соответствующим инструментом с кратким содержанием и ссылками на источники. "
     "Если инструмент завершился ошибкой, объясни её кратко без сырого технического вывода."
 )
+
+_READ_SOURCE_AFTER_SEARCH = (
+    "В этом запросе уже выполнено несколько поисков без чтения источников. Не меняй формулировку поиска снова. "
+    "Открой наиболее подходящую уже найденную официальную страницу через research_read или browser_read "
+    "и проверь сведения на ней. Если подходящего источника нет, закончи ответ по имеющимся данным: "
+    "отдели видимые признаки и гипотезы, честно укажи, что точная модель/цена не подтверждены. "
+    "Результаты других брендов и серия, предположенная по фотографии, не являются подтверждением модели."
+)
+
+_FINALIZE_FROM_EVIDENCE = (
+    "Заверши исходный запрос сейчас на основе уже полученных результатов. Новые инструменты недоступны: "
+    "не вызывай их и не обещай будущую проверку. Дай полезный итог, сохрани оговорки об уверенности, "
+    "приведи только прочитанные источники и созданные файлы. Неподтвержденные цену, артикул и точную модель "
+    "не придумывай. Если данных недостаточно, объясни конкретный пробел и какое уточнение поможет."
+)
+
+_PRELIMINARY_RESEARCH = "Предварительная подборка по результатам поиска; содержимое страниц не проверено."
 
 
 class AgentApp:

@@ -301,6 +301,12 @@ class PersonalMemoryApiTests(unittest.TestCase):
                 summary = client.post("/api/memory/summary/rebuild", headers=alice)
                 self.assertEqual(summary.status_code, 200)
                 self.assertEqual(summary.json()["record_count"], 1)
+                self.assertEqual(summary.json()["status"], "ready")
+                self.assertEqual(summary.json()["method"], "structured_records")
+                self.assertEqual(summary.json()["manual_record_count"], 1)
+                self.assertEqual(summary.json()["autonomous_record_count"], 0)
+                repeated_summary = client.get("/api/memory/summary", headers=alice)
+                self.assertEqual(repeated_summary.json()["generated_at"], summary.json()["generated_at"])
                 self.assertEqual(
                     summary.json()["sections"]["preference"][0]["content"],
                     "Любит острый соус",
@@ -310,6 +316,8 @@ class PersonalMemoryApiTests(unittest.TestCase):
                 bob_summary = client.get("/api/memory/summary", headers=bob)
                 self.assertEqual(bob_summary.status_code, 200)
                 self.assertEqual(bob_summary.json()["record_count"], 0)
+                self.assertEqual(bob_summary.json()["status"], "disabled")
+                self.assertEqual(bob_summary.json()["generated_at"], "")
                 self.assertFalse(
                     client.get("/api/memory/settings", headers=bob).json()["autonomous_enabled"]
                 )

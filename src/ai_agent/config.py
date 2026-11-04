@@ -101,8 +101,9 @@ class Settings:
         )
 
         configured_provider = os.getenv("MODEL_PROVIDER", "").strip()
-        model_provider = configured_provider or ("ollama_cloud" if api_key else "mock")
-        default_model = "beam:cloud" if model_provider == "ollama_cloud" else "mock-local"
+        model_provider = configured_provider or ('openai' if openai_api_key else 'ollama_cloud' if api_key else 'mock')
+        default_model = (os.getenv('OPENAI_MODEL','gpt-6.1-sol') if model_provider=='openai'
+                         else 'beam:cloud' if model_provider=='ollama_cloud' else 'mock-local')
 
         memory_raw = os.getenv("MEMORY_FILE", "data/memory.json")
         memory_path = (root_dir / memory_raw).resolve()
@@ -124,7 +125,7 @@ class Settings:
             ollama_cloud_model=os.getenv("OLLAMA_CLOUD_MODEL", "beam:cloud"),
             openai_api_key=openai_api_key,
             openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            openai_model=os.getenv("OPENAI_MODEL", "gpt-6-luna"),
+            openai_model=os.getenv("OPENAI_MODEL", "gpt-6.1-sol"),
             reasoning_fallback_enabled=_read_bool_env(
                 "REASONING_FALLBACK_ENABLED", default=True
             ),

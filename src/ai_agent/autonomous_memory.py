@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 import logging
 import re
@@ -67,7 +68,15 @@ class AutonomousMemoryEngine:
         for reason in rejected:
             reasons[reason] = reasons.get(reason, 0) + 1
 
+        revoked_keys = {record["memory_key"] for record in
+            self.database.list_memory_records(self.user_id, include_inactive=True)
+            if record["status"] == "revoked" and record.get("memory_key")}
+
         for candidate in candidates:
+            if candidate.memory_key in revoked_keys:
+                metrics["rejected_count"] += 1
+                reasons["revoked_by_user"] = reasons.get("revoked_by_user", 0) + 1
+                continue
             observation = self.database.observe_memory_candidate(
                 self.user_id,
                 memory_key=candidate.memory_key,
@@ -82,7 +91,7 @@ class AutonomousMemoryEngine:
                 metrics["pending_count"] += 1
                 reasons["needs_repetition"] = reasons.get("needs_repetition", 0) + 1
                 continue
-            action = self._save_or_merge(candidate, source_message_id)
+            action = self._save_or_merge(candidate, observation["source_message_ids"])
             metrics[f"{action}_count"] += 1
             self.database.set_memory_candidate_decision(
                 observation["id"], "saved", action
@@ -91,19 +100,18 @@ class AutonomousMemoryEngine:
         metrics["reasons"] = reasons
         return self._finish(metrics, started)
 
-    def _save_or_merge(self, candidate: MemoryCandidate, source_message_id: str) -> str:
+    def _save_or_merge(self, candidate: MemoryCandidate, source_message_ids: list[str]) -> str:
         existing = self.database.find_active_memory_by_key(self.user_id, candidate.memory_key)
         if existing is not None:
             existing_polarity = "negative" if _is_negative(existing["content"]) else "positive"
             if existing_polarity == candidate.polarity and _same_meaning(
                 existing["content"], candidate.content
             ):
-                self.database.add_memory_provenance(
-                    self.user_id,
-                    existing["id"],
-                    source_type="autonomous_extraction",
-                    source_id=source_message_id,
-                )
+                for source_message_id in source_message_ids:
+                    self.database.add_memory_provenance(
+                        self.user_id, existing["id"], source_type="autonomous_extraction",
+                        source_id=source_message_id,
+                    )
                 self.database.update_memory_record(
                     self.user_id,
                     existing["id"],
@@ -117,7 +125,7 @@ class AutonomousMemoryEngine:
         else:
             action = "saved"
 
-        self.database.create_memory_record(
+        record = self.database.create_memory_record(
             self.user_id,
             kind=candidate.kind,
             content=candidate.content,
@@ -128,8 +136,11 @@ class AutonomousMemoryEngine:
             expires_at=candidate.expires_at,
             consent_granted=True,
             source_type="autonomous_extraction",
-            source_id=source_message_id,
+            source_id=source_message_ids[0],
         )
+        for source_message_id in source_message_ids[1:]:
+            self.database.add_memory_provenance(self.user_id, record["id"],
+                source_type="autonomous_extraction", source_id=source_message_id)
         return action
 
     def summary(self) -> dict:
@@ -137,21 +148,46 @@ class AutonomousMemoryEngine:
         sections = {kind: [] for kind in ("profile", "preference", "fact", "episode")}
         for record in records:
             sections.setdefault(record["kind"], []).append(record)
-        generated_at = datetime.now(timezone.utc).isoformat()
+        settings = self.database.get_memory_settings(self.user_id)
+        generated_at = max((_record_time(record) for record in records), default="")
+        raw = self.database.get_metadata(f"memory_summary:{self.user_id}")
+        try:
+            stored = json.loads(raw) if raw else {}
+        except (ValueError, TypeError):
+            stored = {}
+        if isinstance(stored, dict) and stored.get("records_hash") == _records_hash(records):
+            generated_at = str(stored.get("generated_at") or generated_at)
+        autonomous_count = sum(bool(record["auto_generated"]) for record in records)
+        explanation = (
+            "Сводка группирует уже сохранённые записи памяти. Обновление списка не перечитывает всю историю чатов. "
+            "Автосбор действует на новые завершённые сообщения после включения и распознаёт ограниченный набор "
+            "явных фактов о себе; предпочтения требуют повторения."
+        )
+        if not settings["autonomous_enabled"]:
+            explanation += " Автосбор выключен; вручную сохранённые записи остаются доступными."
         return {
             "generated_at": generated_at,
-            "settings": self.database.get_memory_settings(self.user_id),
+            "settings": settings,
             "sections": sections,
             "record_count": len(records),
+            "status": "ready" if records else ("empty" if settings["autonomous_enabled"] else "disabled"),
+            "method": "structured_records",
+            "explanation": explanation,
+            "autonomous_record_count": autonomous_count,
+            "manual_record_count": len(records) - autonomous_count,
         }
 
     def rebuild_summary(self) -> dict:
         summary = self.summary()
+        if summary["record_count"]:
+            summary["generated_at"] = datetime.now(timezone.utc).isoformat()
+        records = [item for items in summary["sections"].values() for item in items]
         self.database.set_metadata(
             f"memory_summary:{self.user_id}",
             json.dumps(
                 {
                     "generated_at": summary["generated_at"],
+                    "records_hash": _records_hash(records),
                     "record_ids": [
                         item["id"]
                         for items in summary["sections"].values()
@@ -219,6 +255,22 @@ def extract_candidates(text: str) -> tuple[list[MemoryCandidate], list[str]]:
             continue
         candidates.append(candidate)
     return candidates, rejected
+
+
+def _records_hash(records: list[dict]) -> str:
+    payload = sorted(records, key=lambda item: str(item["id"]))
+    return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _record_time(record: dict) -> str:
+    value = str(record.get("updated_at") or record.get("created_at") or "")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def _candidate_from_sentence(sentence: str) -> MemoryCandidate | None:

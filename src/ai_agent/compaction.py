@@ -163,17 +163,18 @@ class CompactionManager:
     def verified_source_ids(self) -> set[str]:
         return {
             message_id
-            for snapshot in self.list(include_rolled_back=False)
-            if snapshot["status"] == "verified"
+            for snapshot in self._valid_verified_snapshots()
             for message_id in snapshot["source_message_ids"]
         }
 
+    def _valid_verified_snapshots(self) -> list[dict]:
+        # A prior approval applies to the reviewed bytes, not to future edits.
+        # Stale snapshots must neither enter the prompt nor hide their sources.
+        return [snapshot for snapshot in self.list(include_rolled_back=False)
+            if snapshot["status"] == "verified" and self.source_hash_matches(snapshot["id"])]
+
     def verified_context(self) -> str:
-        snapshots = [
-            snapshot
-            for snapshot in self.list(include_rolled_back=False)
-            if snapshot["status"] == "verified"
-        ]
+        snapshots = self._valid_verified_snapshots()
         if not snapshots:
             return ""
         lines = [

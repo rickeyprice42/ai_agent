@@ -98,13 +98,8 @@ class PresentationSandbox:
                 slide_count=requested_slide_count,
                 style=normalized_style,
             )
-        else:
-            normalized_slides = _polish_slide_sequence(
-                normalized_slides,
-                fallback_title=normalized_title,
-                audience=normalized_audience,
-                purpose=normalized_purpose,
-            )
+        elif requested_slide_count and len(normalized_slides)!=requested_slide_count:
+            raise ValueError('Число переданных слайдов не совпадает с slide_count. Исправь список слайдов.')
 
         if len(normalized_slides) > self.max_slides:
             raise ValueError(f"Слишком много слайдов: {len(normalized_slides)}. Лимит: {self.max_slides}.")
@@ -226,10 +221,18 @@ class PresentationSandbox:
         style: str,
     ) -> list[SlideContent]:
         target_count = slide_count or 6
-        target_count = max(4, min(target_count, self.max_slides))
+        target_count = max(1, min(target_count, self.max_slides))
         agenda = _generated_agenda(topic, target_count)
         subtitle_parts = [part for part in [audience and f"Для аудитории: {audience}", purpose] if part]
         subtitle = " | ".join(subtitle_parts) or "Красивая презентация Avelin"
+
+        if target_count<=3:
+            compact=[{'layout':'title','title':title,'subtitle':subtitle}]
+            if target_count>=2:
+                compact.append({'layout':'content','title':topic,'bullets':_generated_bullets(topic,agenda[0],audience,purpose,1)})
+            if target_count==3:
+                compact.append({'layout':'closing','title':'Итоги','bullets':_generated_closing_bullets(topic,purpose)})
+            return self._normalize_slides(compact,fallback_title=title)
 
         raw_slides: list[dict[str, Any]] = [
             {"layout": "title", "title": title, "subtitle": subtitle},

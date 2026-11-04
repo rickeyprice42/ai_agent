@@ -26,7 +26,14 @@ SEARCH_STOP_WORDS = {
     "a", "affordable", "an", "and", "app", "best", "budget", "buy", "catalog", "catalogue", "cheap", "for", "good", "in", "of", "on", "or", "recommendation", "recommendations", "store", "the", "to",
     "актуальные", "в", "для", "и", "которые", "купить", "лучшие", "мог", "на", "недорогие",
     "несколько", "по", "подписка", "подписке", "рекомендации", "с", "хорошие", "я",
+    "price", "prices", "pricing", "cost", "costs", "find", "search", "look", "please", "tell", "me",
+    "how", "much", "does", "what", "which", "where", "is", "are", "can", "would", "need", "want", "give", "show",
+    "watch", "watches", "product", "products", "model", "models", "ref", "reference", "official", "website",
+    "цена", "цены", "цену", "стоимость", "стоит", "найди", "найти", "покажи", "часы", "модель", "артикул",
+    "сколько", "стоят", "где", "какая", "какой", "нужно", "хочу", "подскажи", "узнай", "пожалуйста",
+    "site", "list", "all", "id", "ids", "or", "или", "список", "все",
 }
+_QUOTED_ALTERNATIVES = re.compile(r'(?:"[^"\n]{2,100}"|«[^»\n]{2,100}»)(?:\s+(?:OR|или)\s+(?:"[^"\n]{2,100}"|«[^»\n]{2,100}»))+', re.I)
 JUNK_PATH_PARTS = {"account", "auth", "help", "login", "mail", "signin", "support"}
 ADULT_BOOK_MARKERS = {
     "adult", "adults only", "erotic", "erotica", "explicit", "porn", "pornography",
@@ -44,6 +51,9 @@ class SearchPlan:
     subject_terms: frozenset[str]
     price_required: bool = False
     subscription_required: bool = False
+    required_domains: tuple[str, ...] = ()
+    identity_terms: tuple[str, ...] = ()
+    identity_alternatives: tuple[tuple[str, ...], ...] = ()
 
 
 class HttpSandbox:
@@ -198,6 +208,7 @@ class HttpSandbox:
             *( [f"Storefront: {plan.storefront}"] if plan.intent.startswith("apple_") else [] ),
             f"Quality: accepted={len(results)}; rejected={rejected_count}",
             f"Rejected reasons: {reason_summary}",
+            "Evidence level: discovery snippets only; verify final facts, price and subscription availability with research_read on each source URL.",
             "Results:",
         ]
         for index, item in enumerate(results, start=1):
@@ -475,6 +486,10 @@ def _plan_search(query: str, country: str | None = None) -> SearchPlan:
         storefront=storefront,
         subject_terms=frozenset(_meaningful_terms(query)),
         price_required=price_required,
+        required_domains=tuple(re.findall(r'(?i)\bsite:([a-z0-9.-]+)',query)),
+        identity_terms=_discovery_identity_terms(query, price_required),
+        identity_alternatives=tuple(tuple(left or right for left, right in re.findall(r'"([^"\n]+)"|«([^»\n]+)»', group.group()))
+                                    for group in _QUOTED_ALTERNATIVES.finditer(query)),
     )
 
 
@@ -485,6 +500,9 @@ def _normalize_storefront(country: str | None, query: str) -> str:
             raise ValueError("Apple Books country/storefront must be a two-letter code.")
         return explicit
     lowered = query.lower()
+    from_url = re.search(r"(?:books|tv)\.apple\.com/([a-z]{2})(?:/|\b)", lowered)
+    if from_url:
+        return from_url.group(1)
     if any(marker in lowered for marker in ("росси", "russia", "russian storefront")):
         return "ru"
     return "us"
@@ -511,10 +529,23 @@ def _rank_search_results(
         seen_urls.add(canonical_url)
         parsed_url = parse.urlparse(normalized_url)
         hostname = (parsed_url.hostname or "").lower().removeprefix("www.")
+        if plan.required_domains and not any(hostname==domain or hostname.endswith('.'+domain) for domain in plan.required_domains):
+            rejected['domain_mismatch']+=1
+            continue
         path_parts = {part.lower() for part in parsed_url.path.split("/") if part}
         searchable = " ".join((item["title"], item["snippet"], hostname, parsed_url.path)).lower()
         result_terms = _meaningful_terms(searchable)
-        overlap = query_terms & result_terms
+        # A marketplace name alone does not match the product being researched.
+        topical_terms = query_terms - _meaningful_terms(hostname)
+        topical_terms = topical_terms or query_terms
+        overlap = topical_terms & result_terms
+        compact_result = _compact_identity(searchable)
+        if any(_compact_identity(term) not in compact_result for term in plan.identity_terms):
+            rejected["identity_mismatch"] += 1
+            continue
+        if any(not any(_compact_identity(term) in compact_result for term in group) for group in plan.identity_alternatives):
+            rejected["identity_mismatch"] += 1
+            continue
         preferred_apple_source = hostname == "books.apple.com" or hostname.endswith(".books.apple.com")
         preferred_tv_source = hostname == "tv.apple.com" or hostname.endswith(".tv.apple.com")
         apple_evidence = "apple books" in searchable or preferred_apple_source
@@ -549,11 +580,12 @@ def _rank_search_results(
         if apple_tv_intent and query_terms and not overlap:
             rejected["topic_mismatch"] += 1
             continue
-        if apple_tv_intent and plan.subscription_required and not _has_apple_tv_plus_evidence(item):
-            rejected["subscription_not_verified"] += 1
-            continue
-        if plan.price_required and not _has_price_evidence(item):
-            rejected["price_not_verified"] += 1
+        # Discovery must retain relevant title pages without a subscription
+        # snippet: entitlement is verified from the actual item page, never an index.
+        # Price belongs to the fetched product page/offer. Search snippets often
+        # omit it; rejecting those URLs prevents the verification step entirely.
+        if (plan.price_required or plan.intent == "generic") and len(topical_terms) >= 2 and len(overlap) < 2:
+            rejected["topic_mismatch"] += 1
             continue
         if not overlap and not preferred_apple_source and not preferred_tv_source:
             rejected["irrelevant"] += 1
@@ -599,11 +631,34 @@ def _meaningful_terms(value: str) -> set[str]:
     return {term for term in terms if term not in SEARCH_STOP_WORDS and not term.isdigit()}
 
 
+def _compact_identity(value: str) -> str:
+    return re.sub(r"[^a-z0-9а-яё]", "", value.casefold())
+
+
+def _discovery_identity_terms(query: str, price_required: bool) -> tuple[str, ...]:
+    """Preserve explicit names/references without a hardcoded product catalog."""
+    cleaned = re.sub(r"(?i)\bsite:\S+|https?://\S+", " ", query)
+    cleaned = _QUOTED_ALTERNATIVES.sub(" ", cleaned)
+    anchors = re.findall(r'"([^"\n]{2,100})"|«([^»\n]{2,100})»', cleaned)
+    result = [left or right for left, right in anchors]
+    for token in re.findall(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9]*(?:[-.][A-Za-zА-Яа-яЁё0-9]+)*", cleaned):
+        if token.casefold() in SEARCH_STOP_WORDS or token.casefold() in {"usd", "eur", "rub", "gbp", "us", "uk"}:
+            continue
+        # Reference codes are explicit constraints even in a lowercase query.
+        reference = any(char.isdigit() for char in token) and any(char.isalpha() for char in token)
+        proper_name = price_required and token[0].isupper() and len(token) > 1
+        if reference or proper_name:
+            result.append(token)
+    return tuple(dict.fromkeys(result))[:8]
+
+
 def _apple_books_term(query: str) -> str:
     return " ".join(sorted(_apple_books_terms(query)))
 
 
 def _apple_books_terms(query: str) -> set[str]:
+    query = re.sub(r"(?i)(?:https?://)?(?:www\.)?books\.apple\.com\S*", " ", query)
+    query = re.sub(r"(?i)\bsite:\S+", " ", query)
     without_catalog = re.sub(r"apple\s+books|эппл\s+букс", " ", query, flags=re.IGNORECASE)
     return {
         term
@@ -613,6 +668,8 @@ def _apple_books_terms(query: str) -> set[str]:
 
 
 def _apple_tv_terms(query: str) -> set[str]:
+    query = re.sub(r"(?i)\bsite:\S+", " ", query)
+    query=re.sub(r'(?i)(?:https?://)?(?:www\.)?tv\.apple\.com\S*',' ',query)
     without_catalog = re.sub(
         r"apple\s*tv(?:\s*\+|\s+plus)?|эппл\s+тв",
         " ",
@@ -631,11 +688,11 @@ def _apple_tv_terms(query: str) -> set[str]:
 
 
 def _is_apple_books_query(lowered: str) -> bool:
-    return bool(re.search(r"apple\s+books|эппл\s+букс", lowered, flags=re.IGNORECASE))
+    return bool(re.search(r"apple\s+books|books\.apple\.com|эппл\s+букс", lowered, flags=re.IGNORECASE))
 
 
 def _is_apple_tv_query(lowered: str) -> bool:
-    return bool(re.search(r"apple\s*tv(?:\s*\+|\s+plus)?|эппл\s+тв", lowered, flags=re.IGNORECASE))
+    return bool(re.search(r"apple\s*tv(?:\s*\+|\s+plus)?|tv\.apple\.com|эппл\s+тв", lowered, flags=re.IGNORECASE))
 
 
 def _apple_book_candidates(

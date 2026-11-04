@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from typing import Literal
 from pydantic import BaseModel, Field
 
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     thread_id: str | None = Field(default=None, min_length=1, max_length=120)
+    attachments: list[str] = Field(default_factory=list, max_length=5)
 
 
 class ChatResponse(BaseModel):
@@ -212,6 +214,7 @@ class ChatThreadItem(BaseModel):
 class ChatThreadCreateRequest(BaseModel):
     title: str | None = Field(default=None, max_length=120)
     project_id: str | None = Field(default=None, max_length=120)
+    reuse_empty: bool = False
 
 
 class ChatThreadUpdateRequest(BaseModel):
@@ -340,6 +343,11 @@ class MemorySummaryResponse(BaseModel):
     settings: AutonomousMemorySettings
     sections: dict[str, list[PersonalMemoryItem]]
     record_count: int
+    status: Literal["ready", "empty", "disabled"] = "empty"
+    method: Literal["structured_records"] = "structured_records"
+    explanation: str = ""
+    autonomous_record_count: int = 0
+    manual_record_count: int = 0
 
 
 class MemoryExtractionTraceResponse(BaseModel):
@@ -387,6 +395,7 @@ class ProjectItem(BaseModel):
 class ProjectCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=120)
     description: str = Field(default="", max_length=1000)
+    shared: bool = False
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -413,7 +422,7 @@ class ProjectMemberItem(BaseModel):
 
 
 class ProjectInvitationCreateRequest(BaseModel):
-    email: str = Field(..., min_length=5, max_length=160)
+    email: str = Field(default="", max_length=160)
     role: str = Field(..., pattern="^(editor|viewer)$")
     expires_in_hours: int = Field(default=72, ge=1, le=720)
 
@@ -600,6 +609,8 @@ class AutomationRunItem(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     created_at: str
+    result: str = ""
+    artifacts: list[dict] = Field(default_factory=list)
 
 
 class AutomationOccurrenceItem(BaseModel):
@@ -774,6 +785,7 @@ class BootstrapResponse(BaseModel):
     notifications: list[InAppNotificationItem] = Field(default_factory=list)
     action_logs: list[ActionLogItem]
     approval_requests: list[ApprovalRequestItem] = Field(default_factory=list)
+    chat_approvals: list[dict] = Field(default_factory=list)
     permission_grants: list[PermissionGrantItem] = Field(default_factory=list)
     extension_proposals: list[ExtensionProposalItem] = Field(default_factory=list)
     connectors: list[ConnectorItem] = Field(default_factory=list)

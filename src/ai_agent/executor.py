@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import Event
 from typing import Protocol
 from uuid import uuid4
@@ -64,9 +64,9 @@ class ExecutionEngine:
         cancellation.set()
         return True
 
-    def execute_next_step(self, approved_step_id: str | None = None) -> str:
+    def execute_next_step(self, approved_step_id: str | None = None, run_id: str | None = None) -> str:
         del approved_step_id
-        run = self.tasks.acquire_durable_run(self.worker_id, self.lease_seconds)
+        run = self.tasks.acquire_durable_run(self.worker_id, self.lease_seconds, run_id=run_id)
         if run is None:
             return "В очереди нет задач для выполнения."
         task = self.tasks.ensure_task_running(run["task_id"])
@@ -88,13 +88,13 @@ class ExecutionEngine:
         decision = self.action_planner.decide(task, step, checkpoints)
         if decision.tool_name is None:
             result = (
-                "Шаг остановлен: executor не смог выбрать безопасное действие.\n"
+                "Не удалось подобрать действие для этого шага. Уточни действие или разбей задачу на шаги.\n"
                 f"Причина: {decision.reason or step.description}"
             )
-            updated = self.tasks.update_step(step.id, "blocked", result)
-            updated = self.tasks.update_task(updated.id, "blocked", result)
+            updated = self.tasks.update_step(step.id, "failed", result)
+            updated = self.tasks.update_task(updated.id, "failed", result)
             self.tasks.set_run_state(
-                run["id"], "waiting_approval", worker_id=self.worker_id, failure_reason=result
+                run["id"], "failed", worker_id=self.worker_id, failure_reason=result
             )
             return _format_task_state(result, updated)
 
@@ -106,6 +106,7 @@ class ExecutionEngine:
             self.tasks.set_run_state(run["id"], "failed", worker_id=self.worker_id, failure_reason=result)
             return _format_task_state(result, updated)
 
+        decision.arguments = self._automation_output_arguments(run, decision.tool_name, decision.arguments)
         arguments, validation_error = self.tools.validate_arguments(decision.tool_name, decision.arguments)
         if validation_error:
             self.action_log.record(decision.tool_name, "validation_error", decision.arguments, validation_error)
@@ -277,6 +278,27 @@ class ExecutionEngine:
                 return self.tasks.update_step(next_step.id, "running")
         return self.tasks.update_task(task.id, "completed", "Все шаги выполнены с evidence.")
 
+    def _automation_output_arguments(self, run: dict, tool_name: str, arguments: dict) -> dict:
+        if tool_name not in {"create_docx", "create_presentation", "write_file"} or arguments.get("overwrite"):
+            return arguments
+        path = str(arguments.get("path") or "")
+        normalized = path.replace("\\", "/")
+        if (not normalized or PurePosixPath(normalized).is_absolute()
+                or PureWindowsPath(path).drive or ".." in PurePosixPath(normalized).parts):
+            return arguments  # Preserve the original sandbox rejection.
+        with self.tasks.database.connect() as connection:
+            occurrence = connection.execute(
+                "SELECT automation_id FROM automation_runs WHERE user_id = ? AND task_run_id = ?",
+                (self.tasks.user_id, run["id"]),
+            ).fetchone()
+        if occurrence is None:
+            return arguments
+        # Each occurrence owns its outputs. Manual runs on the same day must
+        # never collide with a scheduled result or overwrite the user's file.
+        result = dict(arguments)
+        result["path"] = f"automations/{occurrence['automation_id']}/{run['id']}/{normalized}"
+        return result
+
     def _finish_or_requeue_run(self, run_id: str, task: Task) -> None:
         state = "completed" if task.status == "completed" else "queued"
         self.tasks.set_run_state(run_id, state, worker_id=self.worker_id)
@@ -299,7 +321,7 @@ class ExecutionEngine:
             arguments={"step_id": step_id, "approval_id": approval_id},
             result=f"Пользователь подтвердил выполнение шага в задаче {task.id}.",
         )
-        return self.execute_next_step(approved_step_id=step_id)
+        return self.execute_next_step(approved_step_id=step_id, run_id=run["id"] if run else None)
 
 def decide_step_action(step: TaskStep) -> ExecutionDecision:
     text = step.description.strip()

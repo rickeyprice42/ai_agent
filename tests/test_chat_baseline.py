@@ -299,7 +299,7 @@ class ChatRegressionTest(unittest.TestCase):
             agent = Agent(settings)
             agent.provider = NewDocxWithOverwriteProvider()
             events = list(agent.respond_stream("Создай новый Word-файл с подборкой книг"))
-            self.assertEqual([event["type"] for event in events], ["status", "delta", "done"])
+            self.assertEqual([event["type"] for event in events], ["status", "status", "delta", "done"])
             self.assertTrue((root / "workspace" / "research" / "books.docx").is_file())
             assistant = [
                 item for item in agent.memory.snapshot().history if item["role"] == "assistant"
@@ -379,8 +379,9 @@ class ChatRegressionTest(unittest.TestCase):
             agent.provider = FileThenEmptyProvider()
 
             events = list(agent.respond_stream("Подготовь подборку игр в отдельном файле"))
-            self.assertEqual([event["type"] for event in events], ["status", "delta", "done"])
-            self.assertIn("games.txt", events[1]["text"])
+            self.assertEqual([event["type"] for event in events], ["status", "status", "delta", "done"])
+            self.assertEqual([event["phase"] for event in events if event["type"] == "status"], ["started", "completed"])
+            self.assertIn("games.txt", events[2]["text"])
 
             raw_history = agent.memory.snapshot().history
             assistant = [item for item in raw_history if item["role"] == "assistant"][-1]

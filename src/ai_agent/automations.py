@@ -102,7 +102,30 @@ class AutomationService:
         return updated
 
     def delete(self, automation_id: str) -> dict:
-        return self._set_status(automation_id, "deleted")
+        result = self._set_status(automation_id, "deleted")
+        from ai_agent.tasks import TaskManager
+        tasks = TaskManager(self.database, self._require_user())
+        for run in self.database.list_automation_runs(self._require_user(), automation_id, 100):
+            if run["state"] in {"queued", "running", "waiting_approval", "paused"}:
+                tasks.cancel_task(run["task_id"])
+        return result
+
+    def run_now(self, automation_id: str, now: datetime | None = None) -> dict:
+        user_id = self._require_user()
+        automation = self.database.get_automation(user_id, automation_id)
+        if automation is None or automation["status"] == "deleted":
+            raise ValueError("Автоматизация не найдена.")
+        stamp = _as_utc(now or datetime.now(timezone.utc)).isoformat()
+        prompt = _render_prompt(automation["prompt"], stamp, automation["timezone"])
+        occurrence = self.database.enqueue_automation_occurrence(
+            user_id, automation_id, expected_next_run_at=automation["next_run_at"],
+            next_run_at=automation["next_run_at"], terminal=False, scheduled_for=stamp,
+            task_description=f"Автоматизация «{automation['name']}»: {prompt}",
+            task_step=prompt, budget=automation["budget"], manual=True,
+        )
+        if occurrence is None:
+            raise ValueError("У автоматизации уже есть активный запуск. Дождись его завершения.")
+        return occurrence
 
     def run_due(self, now: datetime | None = None, limit: int = 50) -> list[dict]:
         reference = _as_utc(now or datetime.now(timezone.utc))

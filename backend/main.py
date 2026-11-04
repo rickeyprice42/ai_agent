@@ -22,7 +22,13 @@ if str(SRC) not in sys.path:
 
 from backend.logging_config import configure_logging
 from backend.routes import router
+from backend.push_routes import router as push_router
+from backend.profile_routes import router as profile_router
 from backend.service import agent_service
+from ai_agent.web_push import push_service_for
+from ai_agent.chat_titles import ChatTitleService
+from ai_agent.llm.registry import build_provider
+from dataclasses import replace
 
 
 configure_logging(ROOT)
@@ -35,10 +41,40 @@ async def _automation_scheduler(stop: asyncio.Event) -> None:
             queued = await asyncio.to_thread(agent_service.tick_automations)
             if queued:
                 logger.info("automation scheduler queued=%s", len(queued))
+            await asyncio.to_thread(agent_service.process_automation_queue)
         except Exception:
             logger.exception("automation scheduler tick failed")
         try:
-            await asyncio.wait_for(stop.wait(), timeout=30)
+            await asyncio.wait_for(stop.wait(), timeout=5)
+        except TimeoutError:
+            pass
+
+
+async def _push_worker(stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(push_service_for(agent_service).deliver_pending)
+        except Exception:
+            # No endpoint URLs, subscription keys, payloads or upstream bodies.
+            logger.error("Web Push delivery worker failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=5)
+        except TimeoutError:
+            pass
+
+
+async def _title_worker(stop: asyncio.Event) -> None:
+    def provider_for(user_id):
+        settings = replace(agent_service.settings_for_user(user_id), llm_timeout_seconds=12,
+            llm_max_retries=0, reasoning_fallback_enabled=False)
+        return build_provider(settings)
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(ChatTitleService(agent_service.database).process_queue, provider_for, limit=1)
+        except Exception:
+            logger.error("Chat title worker failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=3)
         except TimeoutError:
             pass
 
@@ -47,13 +83,18 @@ async def _automation_scheduler(stop: asyncio.Event) -> None:
 async def lifespan(_: FastAPI):
     stop = asyncio.Event()
     scheduler = asyncio.create_task(_automation_scheduler(stop))
+    push_worker = asyncio.create_task(_push_worker(stop))
+    title_worker = asyncio.create_task(_title_worker(stop))
     try:
         yield
     finally:
         stop.set()
         scheduler.cancel()
-        with suppress(asyncio.CancelledError):
-            await scheduler
+        push_worker.cancel()
+        title_worker.cancel()
+        for worker in (scheduler, push_worker, title_worker):
+            with suppress(asyncio.CancelledError):
+                await worker
 
 
 app = FastAPI(title="Avelin API", version="0.1.0", lifespan=lifespan)
@@ -71,6 +112,8 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(push_router)
+app.include_router(profile_router)
 
 
 @app.middleware("http")

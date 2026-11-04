@@ -39,8 +39,8 @@ class TaskManager:
         limit = max(1, min(int(limit), 100))
         return [_task_from_row(item) for item in self.database.list_tasks(self.user_id, limit=limit)]
 
-    def acquire_durable_run(self, worker_id: str, lease_seconds: int = 120) -> dict | None:
-        return self.database.acquire_task_run(self.user_id, worker_id, lease_seconds)
+    def acquire_durable_run(self, worker_id: str, lease_seconds: int = 120, run_id: str | None = None) -> dict | None:
+        return self.database.acquire_task_run(self.user_id, worker_id, lease_seconds, run_id=run_id)
 
     def heartbeat_run(self, run_id: str, worker_id: str, lease_seconds: int = 120) -> dict:
         run = self.database.heartbeat_task_run(

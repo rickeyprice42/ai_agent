@@ -10,7 +10,7 @@ import ipaddress
 import json
 import socket
 
-from ai_agent.tools.base import ToolResult, failure_result
+from ai_agent.tools.base import ToolError, ToolResult, failure_result
 
 
 EDGE_PATHS = (
@@ -19,6 +19,9 @@ EDGE_PATHS = (
 )
 SAFE_SCHEMES = {"http", "https"}
 INTERNAL_SCHEMES = {"about", "blob", "data"}
+# Only public read-only resources needed to render these first-party catalogs.
+# Navigation remains limited to the operation host; these are not click targets.
+APPLE_RESOURCE_HOSTS = ("cdn-apple.com", "mzstatic.com")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +124,7 @@ class PlaywrightBrowserRunner:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
 
+        stage = "startup"
         try:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch(
@@ -147,7 +151,11 @@ class PlaywrightBrowserRunner:
                         try:
                             checked = self._validate_url(request_url, validated_hosts)
                             request_host = (checked.hostname or "").casefold()
-                            if not _host_allowed(request_host, operation_hosts):
+                            first_party_resource = _catalog_resource_allowed(
+                                initial_host, request_host, route.request.method,
+                                route.request.is_navigation_request(),
+                            )
+                            if not _host_allowed(request_host, operation_hosts) and not first_party_resource:
                                 raise BrowserFailure(
                                     "host_not_allowed",
                                     f"Browser request к {request_host} не входит в allowlist запуска.",
@@ -162,6 +170,7 @@ class PlaywrightBrowserRunner:
                     page = context.new_page()
                     page.on("dialog", lambda dialog: dialog.dismiss())
                     page.on("download", lambda download: download.cancel())
+                    stage = "navigation"
                     response = page.goto(initial.geturl(), wait_until="domcontentloaded")
                     if blocked_urls and page.url in blocked_urls:
                         raise BrowserFailure(
@@ -169,6 +178,7 @@ class PlaywrightBrowserRunner:
                             "Навигация или redirect заблокированы browser allowlist/SSRF policy.",
                             details={"blocked_urls": blocked_urls[:10]},
                         )
+                    stage = "snapshot"
                     initial_snapshot = self._snapshot(page)
                     if expected_dom_hash and initial_snapshot["dom_hash"] != expected_dom_hash:
                         raise BrowserFailure(
@@ -180,12 +190,25 @@ class PlaywrightBrowserRunner:
                             },
                         )
                     for index, action in enumerate(actions):
+                        stage = "interaction"
                         performed.append(self._perform(page, action, index))
                         for extra_page in context.pages[1:]:
                             extra_page.close()
                     final_snapshot = self._snapshot(page)
+                    if (response is not None and response.status < 400
+                            and len(final_snapshot["main_text"].strip()) < 160):
+                        # Give a client-rendered page a bounded chance to hydrate.
+                        try:
+                            page.wait_for_function(
+                                "((document.querySelector('main,article,[role=main]') || document.body)?.innerText?.trim()?.length || 0) >= 160",
+                                timeout=min(self.timeout_ms, 3000),
+                            )
+                        except PlaywrightTimeoutError:
+                            pass
+                        final_snapshot = self._snapshot(page)
                     artifact = None
                     if artifact_target is not None:
+                        stage = "screenshot"
                         page.screenshot(path=str(artifact_target), full_page=True)
                         artifact = self._artifact(artifact_target)
                     return {
@@ -195,6 +218,12 @@ class PlaywrightBrowserRunner:
                         "dom_hash": final_snapshot["dom_hash"],
                         "main_text": final_snapshot["main_text"],
                         "elements": final_snapshot["elements"],
+                        "lists": final_snapshot["lists"],
+                        "tables": final_snapshot["tables"],
+                        "json_ld": final_snapshot["json_ld"],
+                        "links": final_snapshot["links"],
+                        "script_count": final_snapshot["script_count"],
+                        **({"catalog_item": final_snapshot["catalog_item"]} if final_snapshot.get("catalog_item") else {}),
                         "actions": performed,
                         "screenshot": artifact,
                         "blocked_requests": blocked_urls[:10],
@@ -205,7 +234,8 @@ class PlaywrightBrowserRunner:
         except BrowserFailure:
             raise
         except PlaywrightTimeoutError as exc:
-            raise BrowserFailure("timeout", "Browser action превысил таймаут.", True) from exc
+            raise BrowserFailure("timeout", "Browser action превысил таймаут.", True,
+                                 {"stage": stage, "timeout_ms": self.timeout_ms}) from exc
         except Exception as exc:
             raise BrowserFailure(
                 "browser_error",
@@ -269,7 +299,7 @@ class PlaywrightBrowserRunner:
             {"maxElements": self.max_elements, "maxText": self.max_text_chars},
         )
         canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return {
+        result = {
             "main_text": str(raw.get("mainText", "")),
             "elements": raw.get("elements", []),
             "lists": raw.get("lists", []),
@@ -279,6 +309,19 @@ class PlaywrightBrowserRunner:
             "script_count": int(raw.get("scriptCount", 0)),
             "dom_hash": sha256(canonical.encode("utf-8")).hexdigest(),
         }
+        if parse.urlparse(page.url).hostname in {"tv.apple.com", "books.apple.com"}:
+            # Keep hydration tokens/metrics inside the runner. Only public,
+            # title-specific catalog facts cross the tool boundary.
+            from ai_agent.tools.research import _catalog_item, extract_public_page
+            html = page.content()
+            if len(html) <= 2_000_000:
+                fields = extract_public_page(html, {"Content-Type": "text/html"})
+                result["catalog_item"] = _catalog_item(
+                    "apple_tv" if parse.urlparse(page.url).hostname == "tv.apple.com" else "apple_books",
+                    page.url,
+                    fields,
+                )
+        return result
 
     def _validate_url(self, value: str, validated_hosts: set[str] | None = None):
         parsed = parse.urlparse(value.strip())
@@ -322,6 +365,15 @@ class PlaywrightBrowserRunner:
         }
 
 
+def _catalog_resource_allowed(initial_host: str, request_host: str, method: str, navigation: bool) -> bool:
+    return (
+        initial_host in {"tv.apple.com", "books.apple.com"}
+        and not navigation
+        and method in {"GET", "HEAD"}
+        and (request_host == "www.apple.com" or _host_allowed(request_host, APPLE_RESOURCE_HOSTS))
+    )
+
+
 def browser_read_result(runner: PlaywrightBrowserRunner, arguments: dict) -> ToolResult:
     return _browser_result(
         lambda: runner.read(
@@ -355,6 +407,15 @@ def _browser_result(operation: Callable[[], dict]) -> ToolResult:
             retryable=exc.retryable,
             details=exc.details or {},
         )
+    status = output.get("status")
+    if isinstance(status, int) and status >= 400:
+        message = f"Страница вернула HTTP {status}. Содержимое не подтверждено."
+        return ToolResult(status="failed", output=output, display_text=message,
+                          error=ToolError("http_error", message, retryable=status >= 500, details={"status": status}))
+    if not str(output.get("main_text") or "").strip() and not output.get("elements"):
+        message = "Страница не предоставила читаемого содержимого или доступных элементов. Данные не подтверждены."
+        return ToolResult(status="failed", output=output, display_text=message,
+                          error=ToolError("empty_content", message, retryable=True))
     return ToolResult(status="completed", output=output)
 
 

@@ -13,7 +13,7 @@ frontend/vite.config.d.ts
 frontend/vite.config.js
 src-tauri/target/
 .pytest_cache/
-docs\api_ollama.txt
+/docs/api_ollama.txt
 desktop.ini
 github_logo_icon_229278.ico
 /Белый угловатый логотип «A» на прозрачном фоне.png

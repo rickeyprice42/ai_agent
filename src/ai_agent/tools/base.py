@@ -184,6 +184,17 @@ class ToolRegistry:
     def has(self, name: str) -> bool:
         return name in self._tools and self._availability(name)[0]
 
+    def replace_version(self, tool: Tool, *, expected_version: str) -> None:
+        """Replace a reviewed version and discard idempotency entries for its name."""
+        current = self._tools.get(tool.name)
+        if current is None or current.version != expected_version:
+            raise ValueError("Registered tool version changed before replacement.")
+        validation = ToolRegistry()
+        validation.register(tool)
+        with self._cache_lock:
+            self._idempotency_cache = {key: value for key, value in self._idempotency_cache.items() if key[0] != tool.name}
+            self._tools[tool.name] = tool
+
     def get(self, name: str) -> Tool:
         return self._tools[name]
 
