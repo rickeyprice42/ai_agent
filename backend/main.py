@@ -33,6 +33,7 @@ from dataclasses import replace
 
 configure_logging(ROOT)
 logger = logging.getLogger("avelin.api")
+AUTOMATION_POLL_SECONDS = 5
 
 
 async def _automation_scheduler(stop: asyncio.Event) -> None:
@@ -41,11 +42,22 @@ async def _automation_scheduler(stop: asyncio.Event) -> None:
             queued = await asyncio.to_thread(agent_service.tick_automations)
             if queued:
                 logger.info("automation scheduler queued=%s", len(queued))
-            await asyncio.to_thread(agent_service.process_automation_queue)
         except Exception:
             logger.exception("automation scheduler tick failed")
         try:
-            await asyncio.wait_for(stop.wait(), timeout=5)
+            await asyncio.wait_for(stop.wait(), timeout=AUTOMATION_POLL_SECONDS)
+        except TimeoutError:
+            pass
+
+
+async def _automation_queue_worker(stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(agent_service.process_automation_queue, limit=1)
+        except Exception:
+            logger.exception("automation queue worker failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=AUTOMATION_POLL_SECONDS)
         except TimeoutError:
             pass
 
@@ -83,6 +95,7 @@ async def _title_worker(stop: asyncio.Event) -> None:
 async def lifespan(_: FastAPI):
     stop = asyncio.Event()
     scheduler = asyncio.create_task(_automation_scheduler(stop))
+    automation_worker = asyncio.create_task(_automation_queue_worker(stop))
     push_worker = asyncio.create_task(_push_worker(stop))
     title_worker = asyncio.create_task(_title_worker(stop))
     try:
@@ -90,9 +103,10 @@ async def lifespan(_: FastAPI):
     finally:
         stop.set()
         scheduler.cancel()
+        automation_worker.cancel()
         push_worker.cancel()
         title_worker.cancel()
-        for worker in (scheduler, push_worker, title_worker):
+        for worker in (scheduler, automation_worker, push_worker, title_worker):
             with suppress(asyncio.CancelledError):
                 await worker
 

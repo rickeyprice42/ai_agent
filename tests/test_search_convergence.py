@@ -30,6 +30,36 @@ def stub_search(agent, calls):
 
 
 class SearchConvergenceTests(unittest.TestCase):
+    def test_runtime_reading_hint_is_transient_system_state_not_user_history(self):
+        request = "Найди несколько независимых исследований и сравни их"
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming), isolated_agent([]) as agent:
+                provider = RecordingProvider([search(i) for i in range(3)] + [
+                    ModelResponse(tool_calls=[ToolCall("research_read", {"url": "https://example.com/paper"}, "read-source")]),
+                    search(5), ModelResponse(text="Прочитал источник и продолжил поиск других исследований.")])
+                agent.provider = provider
+                calls = []
+                stub_search(agent, calls)
+                reader = agent.tools.get("research_read")
+                reader.handler = lambda _: ToolResult("completed", output="Verified research paper")
+                reader.output_schema = {"type": "string"}
+                if streaming:
+                    list(agent.respond_stream(request))
+                else:
+                    agent.respond(request)
+                reading, after_read = provider.requests[3:5]
+                self.assertIn("Внутреннее управление", reading["system_prompt"])
+                self.assertIn("После успешного чтения поиск снова доступен", reading["system_prompt"])
+                self.assertNotIn("Внутреннее управление", after_read["system_prompt"])
+                self.assertNotIn("web_search", [tool["name"] for tool in reading["tools"]])
+                self.assertIn("web_search", [tool["name"] for tool in after_read["tools"]])
+                self.assertEqual(len(calls), 4)
+                for call in provider.requests:
+                    users = [m.content for m in call["messages"] if m.role == "user"]
+                    self.assertEqual(users, [request])
+                history = agent.memory.database.list_messages(agent.memory.thread_id)
+                self.assertFalse(any(m.get("name") == "agent_runtime" for m in history))
+
     def test_repeated_result_sets_move_to_reading_before_more_query_variations(self):
         with isolated_agent([]) as agent:
             provider = RecordingProvider([search(1), search(2),

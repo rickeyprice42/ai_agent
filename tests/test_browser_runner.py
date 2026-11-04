@@ -24,6 +24,18 @@ class BrowserFixtureHandler(BaseHTTPRequestHandler):
     version = 1
 
     def do_GET(self):
+        if self.path == '/pixel.png':
+            from io import BytesIO
+            from PIL import Image
+            buffer = BytesIO()
+            Image.new('RGB', (64, 96), '#e57e20').save(buffer, 'PNG')
+            body = buffer.getvalue()
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/png')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path in {"/notfound", "/empty", "/delayed"}:
             body = b"<!doctype html><html><body><main></main>"
             if self.path == "/delayed":
@@ -36,7 +48,7 @@ class BrowserFixtureHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.path == "/structured":
-            body = b'<title>Structured</title><main>Public catalog data with useful text.<a href="/source">Source</a><ul><li>One</li></ul><table><tr><td>42</td></tr></table></main><script type="application/ld+json">{"@type":"Book","name":"Structured Book"}</script>'
+            body = b'<title>Structured</title><main>Public catalog data with useful text.<a href="/source">Source</a><ul><li>One</li></ul><table><tr><td>42<img src="/pixel.png" alt="Model preview"></td></tr></table></main><script type="application/ld+json">{"@type":"Book","name":"Structured Book"}</script>'
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -254,6 +266,22 @@ class BrowserRunnerTests(unittest.TestCase):
             self.assertEqual(snapshot["lists"], [["One"]])
             self.assertEqual(snapshot["links"][0]["url"], self.base_url + "/source")
             self.assertEqual(snapshot["script_count"], 1)
+            self.assertEqual(snapshot['images'], [{'url': self.base_url + '/pixel.png', 'alt': 'Model preview', 'context': '42'}])
+
+    def test_viewport_screenshot_preserves_detail_and_public_image_is_visual_content(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as directory:
+            runner = PlaywrightBrowserRunner(Path(directory), timeout_seconds=5, allowed_hosts=('127.0.0.1',), allow_private_networks=True)
+            viewport = runner.read(url=self.base_url, screenshot_path='outputs/viewport.png', screenshot_full_page=False)
+            full = runner.read(url=self.base_url, screenshot_path='outputs/full.png')
+            with Image.open(Path(directory) / viewport['screenshot']['path']) as image:
+                self.assertEqual(image.size, (1365, 768))
+            with Image.open(Path(directory) / full['screenshot']['path']) as image:
+                self.assertGreater(image.height, 1800)
+            visual = browser_read_result(runner, {'url': self.base_url + '/pixel.png', 'screenshot_full_page': False})
+            self.assertEqual(visual.status, 'completed')
+            self.assertEqual(visual.output['images'][0]['url'], self.base_url + '/pixel.png')
+            self.assertTrue(visual.output['screenshot']['path'])
 
 
 if __name__ == "__main__":

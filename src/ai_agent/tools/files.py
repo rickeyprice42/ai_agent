@@ -32,7 +32,7 @@ class FileSandbox:
         if not target.is_file():
             raise ValueError(f"Путь не является файлом: {relative_path}")
 
-        content = target.read_text(encoding="utf-8", errors="replace")
+        content = self._readable_content(target, bounded=True)
         truncated = len(content) > self.max_read_chars
         if truncated:
             content = content[: self.max_read_chars]
@@ -54,7 +54,7 @@ class FileSandbox:
         start = max(1, int(start_line))
         requested_end = int(end_line) if end_line is not None else start + 199
         end = max(start, min(requested_end, start + 499))
-        raw = target.read_text(encoding="utf-8", errors="replace")
+        raw = self._readable_content(target, bounded=False)
         lines = raw.splitlines()
         selected = lines[start - 1 : end]
         content = "\n".join(f"{number}: {line}" for number, line in enumerate(selected, start=start))
@@ -82,6 +82,25 @@ class FileSandbox:
             "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
             "sha256": _file_sha256(target),
         }
+
+    def _readable_content(self, target: Path, *, bounded: bool) -> str:
+        if target.suffix.lower() in {'.docx', '.docm', '.dotm', '.xlsx', '.xlsm', '.xltm', '.pptx', '.pptm', '.potm'}:
+            # Local import avoids office_files -> FileSandbox import cycles.
+            from ai_agent.tools.office_files import OfficeSandbox
+            inspection = OfficeSandbox(self).inspect(self._relative_display_path(target))
+            parts = [f"[{part['part']}]\n{part['text']}" for part in inspection['text_parts']]
+            for sheet in inspection['sheets']:
+                parts.append(f"[Лист: {sheet['sheet']}]\n" + '\n'.join(
+                    f"{cell['cell']}: {cell['value']}" + (f" (формула: {cell['formula']})" if cell['formula'] else '')
+                    for cell in sheet['cells']))
+            parts.append(inspection['note'])
+            return '\n\n'.join(parts)
+        with target.open('rb') as handle:
+            prefix = handle.read(512)
+        if (b'\x00' in prefix or prefix.startswith((b'PK\x03\x04', b'%PDF-', b'\x89PNG', b'\xff\xd8', b'\xd0\xcf\x11\xe0'))):
+            raise ValueError('Это бинарный файл. Для Office используй inspect_office_document, для изображений inspect_image/analyze_image; его нельзя читать как UTF-8 текст.')
+        with target.open('r', encoding='utf-8', errors='replace') as handle:
+            return handle.read(self.max_read_chars + 1) if bounded else handle.read()
 
     def search(
         self,

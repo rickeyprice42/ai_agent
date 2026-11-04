@@ -6,6 +6,7 @@ import sqlite3
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, Request
 from urllib.parse import unquote
 from backend.attachments import MAX_ATTACHMENT_BYTES
+from backend.runtime_version import runtime_health
 from fastapi.responses import FileResponse, StreamingResponse
 
 from backend.auth import hash_password, hash_token, issue_session_token, verify_password
@@ -89,8 +90,8 @@ router = APIRouter(prefix="/api")
 
 
 @router.get("/health")
-def healthcheck() -> dict[str, str]:
-    return {"status": "ok"}
+def healthcheck() -> dict:
+    return runtime_health()
 
 
 def current_user(authorization: str | None = Header(default=None)) -> dict[str, str]:

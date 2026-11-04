@@ -102,6 +102,18 @@ PUBLIC_FIXTURES = [
 
 
 class BrowserResearchTests(unittest.TestCase):
+    def test_image_references_keep_table_row_identity_and_are_bounded(self):
+        html = '<main><p>Public visual catalog for comparing models.</p><table>' + ''.join(
+            f'<tr><td>{i}</td><td><img src="/assets/{i}.png" alt="Preview {i}"></td><td>model_{i}</td></tr>'
+            for i in range(110)) + '</table><img src="javascript:evil()"></main>'
+        reader = BrowserResearchReader(FakeHttp(response(html)), FakeBrowser(available=False))
+        result = reader.read(url='https://example.com/page')
+        images = result['fields']['images']
+        self.assertEqual(len(images), 100)
+        self.assertEqual(images[27], {'url': 'https://example.com/assets/27.png', 'alt': 'Preview 27', 'context': '27 |  | model_27'})
+        self.assertTrue(all(image['url'].startswith('https://example.com/') for image in images))
+        self.assertEqual(reader.http.calls, 1, 'Image references must not trigger image downloads')
+
     def test_public_fixture_matrix_extracts_repeatable_evidence(self):
         for name, html in PUBLIC_FIXTURES:
             with self.subTest(site=name):

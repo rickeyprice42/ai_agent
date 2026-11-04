@@ -176,6 +176,7 @@ class ContextBuilder:
         *,
         model: str = "generic",
         tools: list[dict] | None = None,
+        include_task_queue: bool = True,
     ) -> AgentContext:
         estimator = ModelTokenEstimator(model)
         input_budget = self.context_window_tokens - self.output_reserve_tokens
@@ -210,7 +211,7 @@ class ContextBuilder:
         project = self._project_context()
         if project:
             pinned_sections.append(_ContextSection("project", project, 90, True))
-        task = self._task_context()
+        task = self._task_context() if include_task_queue or self.memory.shared_project() is not None else ""
         if task:
             pinned_sections.append(_ContextSection("task", task, 90, True))
 
@@ -291,9 +292,9 @@ class ContextBuilder:
                 False,
                 compaction_counts["verified"],
             ),
-            _ContextSection("relevant_memory", self._memory_context(recent_messages), 70, False),
+            _ContextSection("relevant_memory", self._memory_context(recent_messages, include_task_queue=include_task_queue), 70, False),
             _ContextSection("continuity_digest", self._conversation_digest(older_messages), 60, False, len(older_messages)),
-            _ContextSection("recent_actions", self._action_context(), 50, False),
+            _ContextSection("recent_actions", self._action_context(include_task_queue=include_task_queue), 50, False),
         ]
         optional_texts: list[str] = []
         for section in optional_sections:
@@ -456,9 +457,9 @@ class ContextBuilder:
                 f"source=message:{row['id']}\n{excerpt}")
         return ""
 
-    def _memory_context(self, recent_messages: list[Message]) -> str:
+    def _memory_context(self, recent_messages: list[Message], *, include_task_queue: bool = True) -> str:
         query_parts = [message.content for message in recent_messages[-3:]]
-        task = self.tasks.active_task()
+        task = self.tasks.active_task() if include_task_queue else None
         if task is not None:
             query_parts.append(task.description)
             if task.result:
@@ -547,9 +548,15 @@ class ContextBuilder:
         )
         return _section("Older conversation continuity", "\n".join([header, *excerpts]))
 
-    def _action_context(self) -> str:
+    def _action_context(self, *, include_task_queue: bool = True) -> str:
         if self.memory.shared_project() is not None:
             return ""
+        if not include_task_queue:
+            rows = [row for row in self.memory.database.list_messages(self.memory.thread_id) if row['role'] == 'tool'][-self.action_limit:]
+            if not rows:
+                return ""
+            lines = [f"- {row['created_at']}: {row.get('name') or 'tool'}; observation: {' '.join(row['content'].split())[:240]}" for row in rows]
+            return _section("Recent actions in this conversation", "\n".join(lines))
         logs = self.action_log.recent(limit=self.action_limit)
         if not logs:
             return ""

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
+import { parseError } from "./api";
 
 type PushConfig = { enabled: boolean; public_key?: string | null; reason?: string };
 async function api(path: string, token: string, method = "GET", body?: unknown) {
   const response = await fetch(`/api/notifications/push/${path}`, { method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.detail || "Не удалось настроить уведомления."); }
+  if (!response.ok) throw await parseError(response, "Не удалось настроить уведомления.");
   return response.status === 204 ? {} : response.json();
 }
 

@@ -6,6 +6,7 @@ import { WorkspaceDialog } from "./WorkspaceDialog";
 import { AvatarEditor } from "./AvatarEditor";
 import { SentImage, CopyableCode } from "./ChatMedia";
 import { PushSettings, detachPush } from "./PushSettings";
+import { TimezonePicker, deviceTimezone } from "./TimezonePicker";
 import {
   archiveProject,
   archiveChatThread,
@@ -73,6 +74,7 @@ import {
   updateModelSettings,
   uploadChatAttachment,
   fetchAvatar,
+  fetchRuntimeNotice,
   updatePersonalMemory,
   verifyContextCompaction
 } from "./api";
@@ -329,7 +331,7 @@ export default function App() {
   const [automationName, setAutomationName] = useState("Еженедельный черновик");
   const [automationPrompt, setAutomationPrompt] = useState("Создай документ drafts/weekly-{date}.docx с заголовком: Еженедельный черновик с текстом: Подготовь проверяемый локальный черновик. Ничего не публикуй и не отправляй.");
   const [automationScheduleType, setAutomationScheduleType] = useState<"once" | "weekly">("weekly");
-  const [automationTimezone, setAutomationTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+  const [automationTimezone, setAutomationTimezone] = useState(deviceTimezone);
   const [automationRunAt, setAutomationRunAt] = useState(defaultAutomationRunAt);
   const [automationWeekday, setAutomationWeekday] = useState(0);
   const [automationTime, setAutomationTime] = useState("09:00");
@@ -385,6 +387,7 @@ export default function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState("");
   const [avatarVersion, setAvatarVersion] = useState(0);
+  const [runtimeNotice, setRuntimeNotice] = useState<string | null>(null);
   const [openedImage, setOpenedImage] = useState<{ url: string; artifact: FileArtifact } | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const [compactions, setCompactions] = useState<ContextCompactionItem[]>([]);
@@ -478,6 +481,13 @@ export default function App() {
 
   useEffect(() => { setGenerationActivity([]); }, [activeThreadId]);
   useEffect(() => { setOpenedImage(null); }, [activeThreadId, authToken]);
+  useEffect(() => {
+    setRuntimeNotice(null);
+    if (!authToken) return;
+    let cancelled = false;
+    void fetchRuntimeNotice().then((notice) => { if (!cancelled) setRuntimeNotice(notice); });
+    return () => { cancelled = true; };
+  }, [authToken]);
   useEffect(() => {
     if (!authToken) { setAvatarUrl(""); return; }
     let cancelled = false;
@@ -1468,9 +1478,9 @@ export default function App() {
           : { weekday: automationWeekday, time_of_day: automationTime }),
         budget: {
           max_steps: 20,
-          max_failures: 3,
+          max_failures: 5,
           max_seconds: 1800,
-          max_tokens: 50000,
+          max_tokens: 180000,
           max_cost_micros: 0
         },
         max_parallel_runs: 1
@@ -1819,7 +1829,7 @@ export default function App() {
     const run = automationRuns[automationId]?.[0] || fallback;
     if (!run) return <p className="muted">Ещё не запускалась.</p>;
     const state = ({queued:"В очереди",running:"Выполняется",completed:"Завершено",failed:"Не удалось выполнить",cancelled:"Отменено",waiting_approval:"Нужно подтверждение",paused:"На паузе"} as Record<string,string>)[run.state] || run.state;
-    return <div className="automation-result"><p className="muted">{state}{run.finished_at ? ` · ${formatFileTime(run.finished_at)}` : ""}</p>{run.result || run.failure_reason ? <details><summary>Результат</summary><p>{run.result || run.failure_reason}</p></details> : null}{run.artifacts?.length ? <div className="automation-artifacts">{run.artifacts.map((file) => <button className="text-button" key={file.path} type="button" onClick={() => void handleDownloadArtifact({path:file.path,name:file.name || file.path.split("/").pop() || "Файл",extension:file.extension || `.${file.path.split(".").pop()}`,size_bytes:file.size_bytes || 0})}><WorkspaceIcon name="files" />{file.name || file.path}</button>)}</div> : null}</div>;
+    return <div className="automation-result"><p className="muted">{state}{run.finished_at ? ` · ${formatFileTime(run.finished_at)}` : ""}</p>{run.thread_id ? <button className="text-button" type="button" disabled={isSending} onClick={() => void handleSelectChat(run.thread_id!)}><WorkspaceIcon name="chat" />{run.state === "waiting_approval" ? "Открыть диалог и подтвердить" : "Открыть диалог запуска"}</button> : null}{run.result || run.failure_reason ? <details><summary>Результат</summary><p>{run.result || run.failure_reason}</p></details> : null}{run.artifacts?.length ? <div className="automation-artifacts">{run.artifacts.map((file) => <button className="text-button" key={file.path} type="button" onClick={() => void handleDownloadArtifact({path:file.path,name:file.name || file.path.split("/").pop() || "Файл",extension:file.extension || `.${file.path.split(".").pop()}`,size_bytes:file.size_bytes || 0})}><WorkspaceIcon name="files" />{file.name || file.path}</button>)}</div> : null}</div>;
   }
 
   if (authToken && !currentUser && isLoading) {
@@ -2414,10 +2424,7 @@ export default function App() {
                 <option value="weekly">Раз в неделю</option>
               </select>
             </label>
-            <label>
-              Часовой пояс
-              <input value={automationTimezone} onChange={(event) => setAutomationTimezone(event.target.value)} required />
-            </label>
+            <TimezonePicker value={automationTimezone} onChange={setAutomationTimezone} />
             {automationScheduleType === "once" ? (
               <label>
                 Дата и время
@@ -2893,6 +2900,7 @@ export default function App() {
 
       <main className={`workspace workspace-view-${isChatView ? "chat" : view}`} ref={workspaceRef}>
         <div className="workspace-toolbar"><button ref={menuButtonRef} className="icon-button mobile-menu-button" aria-label="Открыть навигацию" aria-expanded={isSidebarOpen} aria-controls="workspace-navigation" onClick={() => setIsSidebarOpen(true)} type="button"><WorkspaceIcon name="menu" /></button><span>{view === "home" ? "Личное пространство" : view === "settings" ? "Настройки" : WORKSPACE_NAV.find((item) => item.id === view)?.label}</span><button className="icon-button" aria-label="Уведомления и задачи" onClick={() => navigate("tasks")} type="button"><WorkspaceIcon name="bell" />{bootstrap.notifications.some((item) => !item.read_at) ? <i className="notification-dot" /> : null}</button></div>
+        {runtimeNotice ? <aside className="runtime-notice" role="status" aria-label="Обновление сервера">{runtimeNotice}</aside> : null}
         {error ? <div className="workspace-error" role="alert">{error}<button className="icon-button" aria-label="Закрыть сообщение об ошибке" onClick={() => setError(null)} type="button"><WorkspaceIcon name="close" /></button></div> : null}
         {isLoading ? <p className="workspace-loading" role="status">Загружаем твоё пространство…</p> : null}
         {view === "home" ? (
@@ -3002,7 +3010,7 @@ export default function App() {
                     {message.error ? <p className="message-error">{message.error}</p> : null}
                     {message.artifacts?.length ? (
                       <div className="message-artifacts" aria-label={message.role === "user" ? "Вложения" : "Созданные файлы"}>
-                        {message.artifacts.map((artifact) => /\.(png|jpe?g|webp|heic|heif|avif|gif|tiff?|bmp)$/i.test(artifact.path) ? <SentImage key={artifact.path} artifact={artifact} token={authToken} onOpen={(url, file) => setOpenedImage({ url, artifact: file })} /> : (
+                        {message.artifacts.map((artifact) => /\.(png|jpe?g|webp|heic|heif|avif|gif|tiff?|bmp)$/i.test(artifact.path) ? <SentImage key={artifact.path} artifact={artifact} token={authToken} onOpen={(url, file) => setOpenedImage({ url, artifact: file })} onDownload={() => void handleDownloadArtifact(artifact)} /> : (
                           <button
                             className="artifact-card"
                             disabled={downloadingArtifactPath === artifact.path}

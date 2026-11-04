@@ -9,7 +9,7 @@ import asyncio
 import unittest
 
 from fastapi.testclient import TestClient
-from backend.main import app, _automation_scheduler
+from backend.main import app, _automation_scheduler, _automation_queue_worker
 from backend.service import AgentService
 from ai_agent.config import Settings
 from ai_agent.database import AvelinDatabase
@@ -94,13 +94,23 @@ class ProductWorkflows(unittest.TestCase):
 
         async def run_one_tick():
             stop = asyncio.Event()
+            queued = asyncio.Event()
+            loop = asyncio.get_running_loop()
             original = self.service.process_automation_queue
-            def consume():
-                result = original()
-                stop.set()
+            original_tick = self.service.tick_automations
+            def tick():
+                result = original_tick()
+                loop.call_soon_threadsafe(queued.set)
                 return result
-            with patch("backend.main.agent_service", self.service), patch.object(self.service, "process_automation_queue", consume):
-                await _automation_scheduler(stop)
+            def consume(**kwargs):
+                result = original(**kwargs)
+                loop.call_soon_threadsafe(stop.set)
+                return result
+            async def consumer():
+                await queued.wait()
+                await _automation_queue_worker(stop)
+            with patch("backend.main.agent_service", self.service), patch.object(self.service, "process_automation_queue", consume), patch.object(self.service,"tick_automations",tick):
+                await asyncio.gather(_automation_scheduler(stop),consumer())
         asyncio.run(run_one_tick())
         run = self.service.automation_runs(self.owner_id, item["id"])[0]
         self.assertEqual(run["state"], "completed")
@@ -147,14 +157,23 @@ class ProductWorkflows(unittest.TestCase):
         self.assertEqual(self.service.process_automation_queue(), [])
         self.assertEqual(self.service.automation_runs(self.owner_id, item["id"])[0]["state"], "cancelled")
 
-    def test_unsupported_scheduled_action_reports_failure_instead_of_unactionable_approval(self):
+    def test_free_form_scheduled_action_uses_agent_and_persists_final_response(self):
+        from ai_agent.agent import Agent
+        from ai_agent.types import ModelResponse
+        from tests.test_runtime_audit import ScriptedProvider
+        def factory(settings,user_id,thread_id):
+            agent=Agent(settings,user_id=user_id,thread_id=thread_id,task_queue_context=False)
+            agent.provider=ScriptedProvider([ModelResponse(text='Сравнение трёх стратегий и проверяемый план на год.')])
+            return agent
+        self.service._automation_agent_factory=factory
         item = self.automation()
         self.service.update_automation(self.owner_id, item["id"], {"prompt": "Сравни три стратегии и предложи план на год."})
         self.service.run_automation_now(self.owner_id, item["id"])
         self.service.process_automation_queue()
         run = self.service.automation_runs(self.owner_id, item["id"])[0]
-        self.assertEqual(run["state"], "failed")
-        self.assertIn("Не удалось подобрать действие", run["result"])
+        self.assertEqual(run["state"], "completed")
+        self.assertIn("проверяемый план", run["result"])
+        self.assertTrue(run["thread_id"])
         self.assertEqual(run["artifacts"], [])
         self.assertEqual(self.service.approval_requests(self.owner_id, status="pending"), [])
 

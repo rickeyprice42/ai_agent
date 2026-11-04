@@ -216,6 +216,7 @@ class BrowserResearchReader:
             "tables": snapshot.get("tables", []),
             "json_ld": snapshot.get("json_ld", []),
             "links": snapshot.get("links", []),
+            "images": snapshot.get("images", []),
             "script_count": snapshot.get("script_count", 0),
             **({"catalog_item": snapshot["catalog_item"]} if snapshot.get("catalog_item") else {}),
         }
@@ -263,6 +264,8 @@ class _PublicPageParser(HTMLParser):
         self.metadata: dict[str, str] = {}
         self.embedded_data: list[Any] = []
         self.links: list[dict[str, str]] = []
+        self.images: list[dict[str, str]] = []
+        self._row_images: list[dict[str, str]] = []
         self.script_count = 0
         self._title_depth = 0
         self._main_depth = 0
@@ -304,12 +307,20 @@ class _PublicPageParser(HTMLParser):
             self._table = []
         elif tag == "tr" and self._table is not None:
             self._row = []
+            self._row_images = []
         elif tag in {"td", "th"} and self._row is not None:
             self._cell = []
         if tag == "a" and self._skip_depth == 0:
             href = attributes.get("href", "").strip()
             if href and len(self.links) < 100:
                 self.links.append({"url": href, "text": ""})
+        if tag == "img" and self._skip_depth == 0 and len(self.images) < 100:
+            src = attributes.get("src") or attributes.get("data-src", "")
+            if src and not parse.urlparse(src).scheme.casefold() in {"data", "blob", "javascript", "file"}:
+                item = {"url": src[:2000], "alt": attributes.get("alt", "")[:300], "context": ""}
+                self.images.append(item)
+                if self._row is not None:
+                    self._row_images.append(item)
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.casefold()
@@ -351,6 +362,9 @@ class _PublicPageParser(HTMLParser):
             self._row.append(_clean_text(" ".join(self._cell)))
             self._cell = None
         elif tag == "tr" and self._row is not None and self._table is not None:
+            for item in self._row_images:
+                item["context"] = " | ".join(self._row)[:500]
+            self._row_images = []
             if any(self._row):
                 self._table.append(self._row)
             self._row = None
@@ -408,6 +422,7 @@ def extract_public_page(body: str, headers: dict[str, str] | None = None) -> dic
         "metadata": parser.metadata,
         "embedded_data": parser.embedded_data,
         "links": parser.links[:100],
+        "images": parser.images,
         "script_count": parser.script_count,
     }
 
@@ -427,6 +442,14 @@ def research_read_result(reader: BrowserResearchReader, arguments: dict) -> Tool
 
 
 def _research_result(*, url: str, locale: str, region: str, adapter: str, method: str, status: int | None, fields: dict, catalog: str, max_fragments: int) -> dict:
+    # Expose bounded public image references, never fetch or execute their data.
+    # A table preview keeps its row label so a model can inspect the exact image
+    # rather than a downscaled screenshot of a many-screen catalog.
+    fields["images"] = [
+        {**item, "url": parse.urljoin(url, item.get("url", ""))}
+        for item in fields.get("images", [])[:100]
+        if parse.urlparse(parse.urljoin(url, item.get("url", ""))).scheme in {"http", "https"}
+    ]
     fields = dict(fields)
     if adapter in {"apple_tv", "apple_books"}:
         browser_item = fields.get("catalog_item", {})

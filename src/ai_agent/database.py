@@ -2781,6 +2781,88 @@ class AvelinDatabase:
                 return None
         return self.get_task_run(user_id, run_id)
 
+    def finalize_automation_agent_run(
+        self, user_id: str, run_id: str, worker_id: str, *, plan_version: int,
+        state: str, outcome: str, result: str, artifacts: list[dict], approval_ids: list[str],
+        active_seconds: float, last_result_message_id: str | None, failure_reason: str = "",
+        file_checkpoint: dict | None = None,
+    ) -> dict | None:
+        """Commit one Agent turn without racing cancellation or a newer lease.
+
+        File checks/model work happen before this call. The state, owner and
+        plan are checked again under the same write lock as every state write.
+        """
+        if state not in {"completed", "failed", "waiting_approval", "cancelled", "paused"}:
+            raise ValueError("Unsupported automation final state.")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            run = connection.execute("SELECT * FROM task_runs WHERE id=? AND user_id=?", (run_id,user_id)).fetchone()
+            link = connection.execute("SELECT 1 FROM automation_llm_runs WHERE run_id=? AND user_id=?", (run_id,user_id)).fetchone()
+            if run is None or link is None or run["plan_version"] != plan_version:
+                return None
+            controlled = run["state"] in {"cancelled", "paused"}
+            denied = run["state"] == "waiting_approval" and state == "cancelled" and outcome == "cancelled"
+            if controlled:
+                # Preserve the user's authoritative transition; only retain the
+                # useful result/files and mirror that state in the LLM link.
+                state = outcome = run["state"]
+            elif not denied and (run["state"] != "running" or run["worker_id"] != worker_id):
+                return None
+
+            pending = False
+            if not controlled:
+                running_step = connection.execute(
+                    "SELECT id FROM task_steps WHERE task_id=? AND status='running' ORDER BY position LIMIT 1", (run["task_id"],)
+                ).fetchone()
+                if running_step is None and denied:
+                    running_step = connection.execute(
+                        "SELECT id FROM task_steps WHERE task_id=? AND status='blocked' ORDER BY position LIMIT 1", (run["task_id"],)
+                    ).fetchone()
+                step_state = "completed" if state == "completed" else "blocked" if state == "waiting_approval" else "failed"
+                if running_step:
+                    connection.execute("UPDATE task_steps SET status=?,result=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (step_state,result or failure_reason,running_step["id"]))
+                pending = state == "completed" and connection.execute(
+                    "SELECT 1 FROM task_steps WHERE task_id=? AND status='pending' LIMIT 1", (run["task_id"],)
+                ).fetchone() is not None
+                next_state = "queued" if pending else state
+                task_state = "planned" if pending else "blocked" if state == "waiting_approval" else state
+                # The CAS is strict: a NULL owner after cancel/pause never
+                # authorizes a worker to complete the run.
+                expected_state = "waiting_approval" if denied else "running"
+                owner_clause = "worker_id IS NULL" if denied else "worker_id=?"
+                params = [next_state, failure_reason or None, next_state in {"completed","failed","cancelled"},
+                    run_id,user_id,expected_state,plan_version] + ([] if denied else [worker_id])
+                changed = connection.execute(
+                    f"""UPDATE task_runs SET state=?,failure_reason=?,worker_id=NULL,lease_expires_at=NULL,
+                        finished_at=CASE WHEN ? THEN COALESCE(finished_at,CURRENT_TIMESTAMP) ELSE finished_at END,
+                        updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND state=? AND plan_version=? AND {owner_clause}""", params
+                ).rowcount
+                if changed != 1:
+                    raise RuntimeError("Automation finalization lease changed under transaction.")
+                connection.execute("UPDATE tasks SET status=?,result=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?",
+                    (task_state,result or failure_reason,run["task_id"],user_id))
+            else:
+                next_state = state
+
+            if file_checkpoint and artifacts:
+                duplicate = connection.execute("SELECT 1 FROM task_checkpoints WHERE run_id=? AND deduplication_key=?",
+                    (run_id,file_checkpoint["deduplication_key"])).fetchone()
+                if duplicate is None:
+                    sequence = connection.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM task_checkpoints WHERE run_id=?", (run_id,)).fetchone()[0]
+                    connection.execute("""INSERT INTO task_checkpoints(id,run_id,task_id,step_id,sequence,plan_version,status,risk,
+                        tool_name,arguments_digest,deduplication_key,tool_call_json,observation,artifacts_json,evidence_json,next_action)
+                        VALUES(?,?,?,NULL,?,?,'completed','read','file_metadata',?,?,?,?,?,?,'none')""",
+                        (str(uuid4()),run_id,run["task_id"],sequence,plan_version,file_checkpoint["arguments_digest"],
+                         file_checkpoint["deduplication_key"],json.dumps({"name":"file_metadata"}),file_checkpoint["observation"],
+                         json.dumps(artifacts,ensure_ascii=False),json.dumps({"verified":True,"check":"file_exists_in_occurrence_workspace"})))
+            effective_outcome = "step_completed" if pending else outcome
+            connection.execute("""UPDATE automation_llm_runs SET outcome=?,result=?,artifacts_json=?,approvals_json=?,
+                active_seconds=active_seconds+?,last_result_message_id=?,updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND user_id=?""",
+                (effective_outcome,result or failure_reason,json.dumps(artifacts,ensure_ascii=False),json.dumps(approval_ids),
+                 max(0,active_seconds),last_result_message_id,run_id,user_id))
+        return {"state":next_state,"outcome":effective_outcome}
+
     def update_task_run_usage(
         self,
         user_id: str,

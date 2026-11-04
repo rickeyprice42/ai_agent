@@ -6,12 +6,14 @@ export function AvatarEditor({ token, avatarUrl, onChanged }: { token: string; a
   const fileInput = useRef<HTMLInputElement | null>(null);
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const drag = useRef<{ x: number; y: number; initialX: number; initialY: number } | null>(null);
+  const errorRef = useRef<HTMLParagraphElement | null>(null);
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [sourceUrl, setSourceUrl] = useState("");
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  useEffect(() => { if (error) { errorRef.current?.focus({ preventScroll: true }); errorRef.current?.scrollIntoView({ block: "nearest" }); } }, [error]);
   useEffect(() => () => { if (sourceUrl) URL.revokeObjectURL(sourceUrl); }, [sourceUrl]);
   useEffect(() => {
     if (!image || !canvas.current) return;
@@ -27,7 +29,7 @@ export function AvatarEditor({ token, avatarUrl, onChanged }: { token: string; a
 
   async function choose(file?: File) {
     if (!file) return;
-    if (file.size > 10 * 1024 * 1024) { setError("Выбери изображение до 10 МБ."); return; }
+    if (file.size > 10 * 1024 * 1024) { setError("Выбери изображение до 10 МБ."); if (fileInput.current) fileInput.current.value = ""; return; }
     setBusy(true); setError("");
     try {
       const blob = await previewAvatar(file, token);
@@ -58,7 +60,8 @@ export function AvatarEditor({ token, avatarUrl, onChanged }: { token: string; a
     finally { setBusy(false); }
   }
 
-  return <><div className="avatar-controls"><input ref={fileInput} type="file" className="sr-only" tabIndex={-1} aria-label="Выбрать фото профиля" accept="image/*,.heic,.heif" onChange={(event) => void choose(event.target.files?.[0])} />{avatarUrl ? <img className="profile-avatar" src={avatarUrl} alt="Фото профиля" /> : null}<button className="ghost-button" type="button" disabled={busy} onClick={() => fileInput.current?.click()}>{busy ? "Подготавливаем…" : avatarUrl ? "Изменить фото" : "Добавить фото"}</button>{avatarUrl ? <button className="text-button" type="button" disabled={busy} onClick={() => void remove()}>Удалить фото</button> : null}</div>{error ? <p role="alert" className="message-error">{error}</p> : null}<WorkspaceDialog open={Boolean(image)} title="Фото профиля" onClose={() => { if (!busy) setImage(null); }}><p className="muted">Перемести фото и выбери масштаб.</p><canvas className="avatar-crop" aria-label="Область кадрирования фото" tabIndex={0} ref={canvas} width={256} height={256}
+  const errorMessage = error ? <p ref={errorRef} tabIndex={-1} role="alert" className="message-error">{error}</p> : null;
+  return <><div className="avatar-controls"><input ref={fileInput} type="file" className="sr-only" tabIndex={-1} aria-label="Выбрать фото профиля" accept="image/*,.heic,.heif" onChange={(event) => void choose(event.target.files?.[0])} />{avatarUrl ? <img className="profile-avatar" src={avatarUrl} alt="Фото профиля" /> : null}<button className="ghost-button" type="button" disabled={busy} onClick={() => fileInput.current?.click()}>{busy ? "Подготавливаем…" : avatarUrl ? "Изменить фото" : "Добавить фото"}</button>{avatarUrl ? <button className="text-button" type="button" disabled={busy} onClick={() => void remove()}>Удалить фото</button> : null}</div>{!image ? errorMessage : null}<WorkspaceDialog open={Boolean(image)} title="Фото профиля" onClose={() => { if (!busy) setImage(null); }}><p className="muted">Перемести фото и выбери масштаб.</p>{image ? errorMessage : null}<canvas className="avatar-crop" aria-label="Область кадрирования фото" tabIndex={0} ref={canvas} width={256} height={256}
       onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); drag.current = { x: event.clientX, y: event.clientY, initialX: offset.x, initialY: offset.y }; }}
       onPointerMove={(event) => { if (drag.current) setOffset({ x: drag.current.initialX + event.clientX - drag.current.x, y: drag.current.initialY + event.clientY - drag.current.y }); }}
       onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}

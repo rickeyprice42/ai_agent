@@ -103,6 +103,7 @@ def run():
     preview_authorizations = []
     push_requests = []
     push_enabled = False
+    legacy_runtime = False
     png_bytes = (FRONTEND / "public" / "brand" / "icon-192.png").read_bytes()
     unexpected = []
     errors = []
@@ -114,7 +115,9 @@ def run():
     settings = dict(autonomous_enabled=False, health_autonomous_enabled=False, updated_at=NOW)
     def route_api(route):
         path = urlparse(route.request.url).path
-        if path == "/api/auth/me":
+        if path == "/api/health":
+            body = {"status":"ok"} if legacy_runtime else {"status":"ok","runtime":{"contract":2},"restart_required":False}
+        elif path == "/api/auth/me":
             body = data["user"]
         elif path == "/api/profile/avatar":
             if route.request.method == "GET":
@@ -187,7 +190,7 @@ def run():
         elif path.startswith("/api/automations/") and path.endswith("/run"):
             automation_starts.append(path)
             automation = next(item for item in data["automations"] if item["id"] in path)
-            run = {"id":"manual-run", "automation_id":automation["id"], "scheduled_for":NOW,"task_id":"manual-task", "task_run_id":"manual-task-run", "state":"completed","budget":{},"usage":{},"created_at":NOW,"finished_at":NOW,"result":"Автоматизация подготовила документ.","artifacts":[]}
+            run = {"id":"manual-run", "automation_id":automation["id"], "scheduled_for":NOW,"task_id":"manual-task", "task_run_id":"manual-task-run", "state":"completed","budget":{},"usage":{},"created_at":NOW,"finished_at":NOW,"result":"Автоматизация подготовила документ.","artifacts":[],"thread_id":data["chat_threads"][0]["id"],"outcome":"completed","approval_ids":[]}
             automation["last_run"] = run
             body = {**run,"state":"queued"}
         elif "/approvals/" in path and path.endswith("/decision"):
@@ -455,6 +458,9 @@ def run():
                 expect(page.locator(".automation-result")).to_contain_text("Автоматизация подготовила документ.")
                 assert len(automation_starts) == 1
                 results.append("manual automation start shows server run result without changing schedule")
+                page.get_by_role("button", name="Открыть диалог запуска", exact=True).click()
+                expect(page.locator(".chat-card")).to_be_visible()
+                results.append("automation result opens its persisted conversation for evidence and approvals")
 
                 long_name = "Очень_длинное_название_итогового_документа_без_пробелов_" * 4
                 data["history"] = [
@@ -677,6 +683,14 @@ def run():
                 expect(page.get_by_role("textbox",name="Сообщение Avelin")).to_be_visible()
                 assert page.evaluate("localStorage.getItem('avelin-active-thread')") != "unavailable-notification-chat"
                 results.append("notification deep-link selects authenticated target chat once; unavailable chat safely falls back without exposing another account")
+                legacy_runtime = True
+                page.goto(URL)
+                expect(page.get_by_role("status",name="Обновление сервера")).to_contain_text("Перезапусти Avelin через лаунчер")
+                legacy_runtime = False
+                page.reload()
+                expect(page.get_by_role("heading",name="На чём продолжим?")).to_be_visible()
+                expect(page.get_by_role("status",name="Обновление сервера")).to_have_count(0)
+                results.append("legacy health contract shows update guidance once; current runtime has no stale-version banner")
 
                 auth_context = browser.new_context(viewport={"width": 1440, "height": 900}, reduced_motion="reduce")
                 auth_page = auth_context.new_page()

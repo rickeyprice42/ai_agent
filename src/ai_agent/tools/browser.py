@@ -71,8 +71,9 @@ class PlaywrightBrowserRunner:
         url: str,
         screenshot: bool = True,
         screenshot_path: str | None = None,
+        screenshot_full_page: bool = True,
     ) -> dict:
-        return self._run(url=url, actions=[], screenshot=screenshot, screenshot_path=screenshot_path)
+        return self._run(url=url, actions=[], screenshot=screenshot, screenshot_path=screenshot_path, screenshot_full_page=screenshot_full_page)
 
     def interact(
         self,
@@ -82,6 +83,7 @@ class PlaywrightBrowserRunner:
         expected_dom_hash: str | None = None,
         screenshot: bool = True,
         screenshot_path: str | None = None,
+        screenshot_full_page: bool = True,
     ) -> dict:
         if not actions:
             raise BrowserFailure("invalid_actions", "Нужно передать хотя бы одно browser-действие.")
@@ -93,6 +95,7 @@ class PlaywrightBrowserRunner:
             expected_dom_hash=expected_dom_hash,
             screenshot=screenshot,
             screenshot_path=screenshot_path,
+            screenshot_full_page=screenshot_full_page,
         )
 
     def _run(
@@ -103,6 +106,7 @@ class PlaywrightBrowserRunner:
         expected_dom_hash: str | None = None,
         screenshot: bool,
         screenshot_path: str | None,
+        screenshot_full_page: bool = True,
     ) -> dict:
         available, reason = self.availability()
         if not available:
@@ -209,7 +213,7 @@ class PlaywrightBrowserRunner:
                     artifact = None
                     if artifact_target is not None:
                         stage = "screenshot"
-                        page.screenshot(path=str(artifact_target), full_page=True)
+                        page.screenshot(path=str(artifact_target), full_page=screenshot_full_page)
                         artifact = self._artifact(artifact_target)
                     return {
                         "url": page.url,
@@ -222,6 +226,7 @@ class PlaywrightBrowserRunner:
                         "tables": final_snapshot["tables"],
                         "json_ld": final_snapshot["json_ld"],
                         "links": final_snapshot["links"],
+                        "images": final_snapshot["images"],
                         "script_count": final_snapshot["script_count"],
                         **({"catalog_item": final_snapshot["catalog_item"]} if final_snapshot.get("catalog_item") else {}),
                         "actions": performed,
@@ -294,7 +299,12 @@ class PlaywrightBrowserRunner:
                 .map((node) => { try { return JSON.parse(node.textContent || ''); } catch (_) { return null; } }).filter(Boolean);
               const links = Array.from((main || document).querySelectorAll('a[href]')).slice(0, 100)
                 .map((node) => ({url: node.href, text: (node.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 300)}));
-              return {mainText, elements, lists, tables, jsonLd, links, scriptCount: document.scripts.length};
+              const images = Array.from((main || document).querySelectorAll('img[src],img[data-src]')).slice(0, 100)
+                .map((node) => ({url: node.currentSrc || node.src || node.getAttribute('data-src') || '',
+                  alt: (node.alt || '').slice(0, 300),
+                  context: ((node.closest('tr,figure,li') || {}).innerText || '').trim().replace(/\s+/g, ' ').slice(0, 500)}))
+                .filter((image) => /^https?:\/\//i.test(image.url));
+              return {mainText, elements, lists, tables, jsonLd, links, images, scriptCount: document.scripts.length};
             }""",
             {"maxElements": self.max_elements, "maxText": self.max_text_chars},
         )
@@ -306,6 +316,7 @@ class PlaywrightBrowserRunner:
             "tables": raw.get("tables", []),
             "json_ld": raw.get("jsonLd", []),
             "links": raw.get("links", []),
+            "images": raw.get("images", []),
             "script_count": int(raw.get("scriptCount", 0)),
             "dom_hash": sha256(canonical.encode("utf-8")).hexdigest(),
         }
@@ -380,6 +391,7 @@ def browser_read_result(runner: PlaywrightBrowserRunner, arguments: dict) -> Too
             url=str(arguments.get("url", "")),
             screenshot=bool(arguments.get("screenshot", True)),
             screenshot_path=str(arguments.get("screenshot_path", "")).strip() or None,
+            screenshot_full_page=bool(arguments.get("screenshot_full_page", True)),
         )
     )
 
@@ -393,6 +405,7 @@ def browser_interact_result(runner: PlaywrightBrowserRunner, arguments: dict) ->
             expected_dom_hash=str(arguments.get("expected_dom_hash", "")).strip() or None,
             screenshot=bool(arguments.get("screenshot", True)),
             screenshot_path=str(arguments.get("screenshot_path", "")).strip() or None,
+            screenshot_full_page=bool(arguments.get("screenshot_full_page", True)),
         )
     )
 
@@ -412,7 +425,7 @@ def _browser_result(operation: Callable[[], dict]) -> ToolResult:
         message = f"Страница вернула HTTP {status}. Содержимое не подтверждено."
         return ToolResult(status="failed", output=output, display_text=message,
                           error=ToolError("http_error", message, retryable=status >= 500, details={"status": status}))
-    if not str(output.get("main_text") or "").strip() and not output.get("elements"):
+    if not str(output.get("main_text") or "").strip() and not output.get("elements") and not output.get("images"):
         message = "Страница не предоставила читаемого содержимого или доступных элементов. Данные не подтверждены."
         return ToolResult(status="failed", output=output, display_text=message,
                           error=ToolError("empty_content", message, retryable=True))

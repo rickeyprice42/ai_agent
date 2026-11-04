@@ -611,6 +611,9 @@ class AutomationRunItem(BaseModel):
     created_at: str
     result: str = ""
     artifacts: list[dict] = Field(default_factory=list)
+    thread_id: str | None = None
+    outcome: str | None = None
+    approval_ids: list[str] = Field(default_factory=list)
 
 
 class AutomationOccurrenceItem(BaseModel):

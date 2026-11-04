@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 import json
+from hashlib import sha256
 import re
 import secrets
 from typing import TYPE_CHECKING
@@ -61,7 +62,7 @@ class ChatTitleService:
         if thread is None or thread["user_id"] != user_id or thread.get("deleted_at"):
             return thread
         messages = self.database.list_messages(thread_id)
-        first = next((row for row in messages if row["role"] == "user" and row.get("status") == "complete"), None)
+        first = _topic_source(messages)
         if first is None:
             return thread
         prompt = _authored_prompt(first)
@@ -89,6 +90,41 @@ class ChatTitleService:
             row = connection.execute("SELECT * FROM chat_title_jobs WHERE user_id=? AND thread_id=?",
                 (user_id, thread_id)).fetchone()
         return dict(row) if row else None
+
+    def apply_legacy_plan(self, plan: list[dict]) -> dict:
+        """Explicit migration only; a prior read-only plan is compare-and-swapped.
+
+        The caller must arrange a backup and user authorization. Normal startup
+        and enqueue never rename historical non-placeholder conversations.
+        """
+        applied, skipped = [], []
+        for item in plan:
+            user_id, thread_id = item["user_id"], item["thread_id"]
+            with self.database.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute("SELECT title,deleted_at FROM chat_threads WHERE id=? AND user_id=?",
+                    (thread_id,user_id)).fetchone()
+                manual = connection.execute("SELECT 1 FROM app_metadata WHERE key=?",(f"manual_chat_title:{thread_id}",)).fetchone()
+                sources = _raw_user_rows(connection,thread_id)
+                if (row is None or row["deleted_at"] or manual or row["title"] != item["expected_title"]
+                        or _title_sources_hash(sources) != item["source_hash"]):
+                    skipped.append(thread_id)
+                    continue
+                source = _topic_source(sources)
+                fallback = topic_fallback(_authored_prompt(source)) if source else "Новый диалог"
+                connection.execute("UPDATE chat_threads SET title=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?",
+                    (fallback,thread_id,user_id))
+                connection.execute("INSERT OR REPLACE INTO app_metadata(key,value) VALUES(?,?)",
+                    (f"chat_title_migration:{thread_id}",json.dumps({"previous_title":row["title"],
+                        "source_hash":item["source_hash"],"reason":item["reason"]},ensure_ascii=False)))
+                if source:
+                    connection.execute("""INSERT INTO chat_title_jobs(thread_id,user_id,source_message_id,expected_title)
+                        VALUES(?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET source_message_id=excluded.source_message_id,
+                        expected_title=excluded.expected_title,status='queued',attempts=0,claim_token=NULL,
+                        lease_expires_at=NULL,failure_code='',updated_at=CURRENT_TIMESTAMP""",
+                        (thread_id,user_id,source["id"],fallback))
+                applied.append(thread_id)
+        return {"applied":applied,"skipped":skipped}
 
     def process_queue(self, provider_factory: Callable[[str], BaseProvider], limit: int = 1) -> list[dict]:
         """Call from an independent worker, using a provider with a short timeout.
@@ -177,6 +213,66 @@ def _authored_prompt(row: dict) -> str:
     return _redact_sensitive(text).strip()[:MAX_PROMPT_CHARS]
 
 
+def _greeting_only(text: str) -> bool:
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]+", text.casefold())
+    greetings = {"привет","здравствуй","здравствуйте","доброе","добрый","утро","день","вечер",
+        "дружище","друг","друзья","avelin","авелин","как","дела","ты","у","тебя","пожалуйста",
+        "hello","hi","hey","good","morning","afternoon","evening","how","are","you"}
+    return not words or all(word in greetings for word in words)
+
+
+def _topic_source(messages: list[dict]) -> dict | None:
+    return next((row for row in messages if row.get("role") == "user" and row.get("status") == "complete"
+        and not _greeting_only(_authored_prompt(row))),None)
+
+
+def _raw_user_rows(connection, thread_id: str) -> list[dict]:
+    rows = connection.execute("SELECT * FROM messages WHERE thread_id=? AND role='user' ORDER BY created_at,rowid",(thread_id,)).fetchall()
+    return [{**dict(row),"artifacts":json.loads(row["artifacts_json"] or "[]")} for row in rows]
+
+
+def _title_sources_hash(rows: list[dict]) -> str:
+    data=[{"id":row["id"],"content":row["content"],"status":row.get("status"),"artifacts":row.get("artifacts",[])} for row in rows]
+    return sha256(json.dumps(data,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+
+
+def plan_legacy_titles(connection, user_ids: list[str] | None = None) -> list[dict]:
+    """Read-only plan: exact historical auto-title formula plus no manual marker.
+
+    Pre-marker manual renames identical to the historical formula cannot be
+    proven. The plan records this inference and needs an explicit apply step.
+    """
+    clauses=["deleted_at IS NULL"]
+    params=[]
+    if user_ids:
+        clauses.append("user_id IN ("+",".join("?" for _ in user_ids)+")")
+        params.extend(user_ids)
+    has_jobs=connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat_title_jobs'").fetchone() is not None
+    plan=[]
+    for thread in connection.execute("SELECT * FROM chat_threads WHERE "+" AND ".join(clauses),params).fetchall():
+        if connection.execute("SELECT 1 FROM app_metadata WHERE key=?",(f"manual_chat_title:{thread['id']}",)).fetchone():
+            continue
+        if has_jobs and connection.execute("SELECT 1 FROM chat_title_jobs WHERE thread_id=?",(thread['id'],)).fetchone():
+            continue
+        rows=_raw_user_rows(connection,thread['id'])
+        if not rows:
+            continue
+        first=next((row for row in rows if str(row.get('content') or '').strip()),None)
+        if first is None:
+            continue
+        normalized=" ".join(first['content'].split())
+        prefix=normalized[:48].rstrip('.,!?;:')
+        legacy=prefix+'...' if len(normalized)>len(prefix) else prefix
+        if thread['title'] not in PLACEHOLDER_TITLES and thread['title']!=legacy:
+            continue
+        source=_topic_source(rows)
+        plan.append({"user_id":thread['user_id'],"thread_id":thread['id'],"expected_title":thread['title'],
+            "fallback_title":topic_fallback(_authored_prompt(source)) if source else 'Новый диалог',
+            "source_message_id":source['id'] if source else None,"source_hash":_title_sources_hash(rows),
+            "reason":"placeholder" if thread['title'] in PLACEHOLDER_TITLES else "exact_legacy_auto_formula"})
+    return plan
+
+
 def _redact_sensitive(text: str) -> str:
     text = re.sub(r"(?i)\b(?:sk-[a-z0-9_-]{12,}|bearer\s+[a-z0-9._-]{12,})", "[credential]", text)
     text = re.sub(r"(?i)\b(?:api[ _-]?key|password|passcode|парол\w*|токен\w*|secret)\s*[:=]?\s*\S+", "[credential]", text)
@@ -199,7 +295,7 @@ def normalize_generated_title(text: str) -> str | None:
     if not isinstance(text, str) or any(ord(char) < 32 or char in "\u202a\u202b\u202d\u202e\u2066\u2067\u2068\u2069" for char in text):
         return None
     text = text.strip(" \t\"'«»“”`*").strip().rstrip(".!?;:")
-    if (not text or len(text) > MAX_TITLE_CHARS or len(text.split()) > 10
+    if (not text or _greeting_only(text) or len(text) > MAX_TITLE_CHARS or len(text.split()) > 10
             or re.search(r"[<>{}\[\]\\/]|https?:|(?i:ignore.*instructions)", text)
             or _redact_sensitive(text) != text or not re.search(r"[A-Za-zА-Яа-яЁё]", text)):
         return None

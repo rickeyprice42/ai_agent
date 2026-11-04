@@ -9,6 +9,8 @@ import re
 from ai_agent.action_log import ActionLogStore
 from ai_agent.autonomous_memory import AutonomousMemoryEngine
 from ai_agent.chat_approvals import PendingChatActions
+from ai_agent.chat_contracts import (local_file_targets, needs_precise_image, normalize_artifact_links, requested_file_names,
+                                     wants_docx_creation, wants_resend)
 from ai_agent.config import Settings
 from ai_agent.connectors import ConnectorRegistry
 from ai_agent.context import ContextBuilder, ModelTokenEstimator
@@ -67,6 +69,7 @@ MIN_RESEARCH_RESULTS = 2
 MAX_TOOL_ROUNDS = 12
 MAX_TOOL_CALLS = 24
 MAX_SEARCHES_BEFORE_READ = 3
+TASK_MUTATION_TOOLS = {"create_task", "plan_task", "start_next_task", "execute_next_step", "add_task_step", "update_task", "update_task_step"}
 logger = logging.getLogger("avelin.agent")
 
 
@@ -76,8 +79,11 @@ class Agent:
         settings: Settings,
         user_id: str = "local-user",
         thread_id: str | None = None,
+        *,
+        task_queue_context: bool | None = None,
     ) -> None:
         self.settings = settings
+        self.task_queue_context = task_queue_context
         self.memory = MemoryStore(
             database_path=settings.database_file,
             legacy_json_path=settings.memory_file,
@@ -214,22 +220,23 @@ class Agent:
         completed_tools = ToolOutcome()
         turn_messages: list[Message] = []
         context = None
-        last_phase = "normal"
+        file_repair_requested = False
         for attempt in range(MAX_TOOL_ROUNDS):
             try:
                 shared_workspace = self.memory.shared_project() is not None
                 phase = _turn_phase(completed_tools, attempt)
+                task_queue = self._uses_task_queue(user_text)
                 tool_definitions = _tools_for_phase(self.tools.list_for_model(), phase) if not shared_workspace else []
-                if phase != last_phase and phase != "normal":
-                    turn_messages.append(Message(role="user", name="agent_runtime", content=_turn_hint(phase)))
-                last_phase = phase
+                if not task_queue:
+                    tool_definitions = [tool for tool in tool_definitions if tool['name'] not in TASK_MUTATION_TOOLS]
                 context = context or self.context.build(
                     self.settings.system_prompt if shared_workspace else self.tool_factory.system_prompt(self.settings.system_prompt),
                     model=self.settings.model_name,
                     tools=tool_definitions,
+                    include_task_queue=task_queue,
                 )
                 response = self.provider.generate(
-                    system_prompt=context.system_prompt,
+                    system_prompt=_runtime_system_prompt(context.system_prompt, phase),
                     messages=self._provider_messages(context, turn_messages),
                     tools=tool_definitions,
                 )
@@ -260,7 +267,8 @@ class Agent:
                 if phase == "final":
                     break
                 turn_messages.append(Message(role="assistant", content=response.text, tool_calls=response.tool_calls, provider_items=response.provider_items))
-                outcome = self._execute_tool_calls(response.tool_calls, user_text, previous=completed_tools)
+                outcome = self._execute_tool_calls(response.tool_calls, user_text, previous=completed_tools,
+                                                   allowed_tools={tool['name'] for tool in tool_definitions})
                 completed_tools.merge(outcome)
                 turn_messages.extend(outcome.messages)
                 if outcome.approvals:
@@ -273,6 +281,10 @@ class Agent:
                 continue
 
             self._ensure_requested_research_docx(user_text, completed_tools)
+            if self._missing_requested_docx(user_text, completed_tools) and "research_quality_gate" not in completed_tools.tool_names and not file_repair_requested and attempt < MAX_TOOL_ROUNDS - 1:
+                file_repair_requested = True
+                turn_messages.extend([Message(role="assistant", content=response.text), Message(role="user", name="agent_runtime", content=_MISSING_DOCX)])
+                continue
             if (
                 not response.text.strip()
                 and completed_tools.results
@@ -283,6 +295,7 @@ class Agent:
                 turn_messages.append(Message(role="user", content=_CONTINUE_AFTER_TOOL))
                 continue
             assistant_text = response.text.strip() or _tool_completion_text(completed_tools)
+            assistant_text = self._verified_file_reply(user_text, assistant_text, completed_tools)
             if completed_tools.preliminary_research and _PRELIMINARY_RESEARCH not in assistant_text:
                 assistant_text = _PRELIMINARY_RESEARCH + "\n\n" + assistant_text
             self.last_turn_message_id = self.memory.append_message(
@@ -339,28 +352,32 @@ class Agent:
         completed_tools = resume_outcome if resume_outcome is not None else ToolOutcome()
         turn_messages: list[Message] = list(resume_messages or [])
         context = None
-        last_phase = "normal"
+        file_repair_requested = False
+        buffer_file_reply = wants_docx_creation(self._authored_request(user_text)) or wants_resend(self._authored_request(user_text))
         try:
             for attempt in range(MAX_TOOL_ROUNDS):
                 shared_workspace = self.memory.shared_project() is not None
                 phase = _turn_phase(completed_tools, attempt)
+                task_queue = self._uses_task_queue(user_text)
                 tool_definitions = _tools_for_phase(self.tools.list_for_model(), phase) if not shared_workspace else []
-                if phase != last_phase and phase != "normal":
-                    turn_messages.append(Message(role="user", name="agent_runtime", content=_turn_hint(phase)))
-                last_phase = phase
+                if not task_queue:
+                    tool_definitions = [tool for tool in tool_definitions if tool['name'] not in TASK_MUTATION_TOOLS]
                 context = context or self.context.build(
                     self.settings.system_prompt if shared_workspace else self.tool_factory.system_prompt(self.settings.system_prompt),
                     model=self.settings.model_name,
                     tools=tool_definitions,
+                    include_task_queue=task_queue,
                 )
                 response = None
                 for chunk in self.provider.stream(
-                    system_prompt=context.system_prompt,
+                    system_prompt=_runtime_system_prompt(context.system_prompt, phase),
                     messages=self._provider_messages(context, turn_messages),
                     tools=tool_definitions,
                 ):
                     if chunk.delta:
-                        if message_id is None:
+                        if buffer_file_reply:
+                            partial += chunk.delta
+                        elif message_id is None:
                             message_id = self.memory.append_assistant_state(
                                 "",
                                 status="pending",
@@ -368,13 +385,14 @@ class Agent:
                                 provider=self.settings.model_provider,
                                 model=self.settings.model_name,
                             )
-                        partial += chunk.delta
-                        self.memory.update_message(
-                            message_id,
-                            content=partial,
-                            status="pending",
-                        )
-                        yield {"type": "delta", "text": chunk.delta}
+                        if not buffer_file_reply:
+                            partial += chunk.delta
+                            self.memory.update_message(
+                                message_id,
+                                content=partial,
+                                status="pending",
+                            )
+                            yield {"type": "delta", "text": chunk.delta}
                     if chunk.response is not None:
                         response = chunk.response
 
@@ -382,6 +400,8 @@ class Agent:
                     raise ProviderError("Провайдер не завершил ответ.", "incomplete_stream")
 
                 if response.tool_calls:
+                    if buffer_file_reply:
+                        partial = ""
                     if message_id is not None:
                         self.memory.update_message(
                             message_id,
@@ -395,7 +415,8 @@ class Agent:
                     turn_messages.append(Message(role="assistant", content=response.text, tool_calls=response.tool_calls, provider_items=response.provider_items))
                     outcome = ToolOutcome()
                     try:
-                        yield from self._execute_tool_calls_stream(response.tool_calls, user_text, previous=completed_tools, round_number=attempt + 1, outcome=outcome)
+                        yield from self._execute_tool_calls_stream(response.tool_calls, user_text, previous=completed_tools, round_number=attempt + 1, outcome=outcome,
+                                                                  allowed_tools={tool['name'] for tool in tool_definitions})
                     finally:
                         # Closing the stream at a tool-completed status must not lose
                         # the file that was already durably created by that tool.
@@ -414,6 +435,11 @@ class Agent:
                     continue
 
                 self._ensure_requested_research_docx(user_text, completed_tools)
+                if self._missing_requested_docx(user_text, completed_tools) and "research_quality_gate" not in completed_tools.tool_names and not file_repair_requested and attempt < MAX_TOOL_ROUNDS - 1:
+                    file_repair_requested = True
+                    turn_messages.extend([Message(role="assistant", content=response.text or partial), Message(role="user", name="agent_runtime", content=_MISSING_DOCX)])
+                    partial = ""
+                    continue
                 if (
                     not response.text.strip()
                     and not partial.strip()
@@ -427,6 +453,7 @@ class Agent:
                     turn_messages.append(Message(role="user", content=_CONTINUE_AFTER_TOOL))
                     continue
                 assistant_text = response.text.strip() or partial.strip() or _tool_completion_text(completed_tools)
+                assistant_text = self._verified_file_reply(user_text, assistant_text, completed_tools)
                 if completed_tools.preliminary_research and _PRELIMINARY_RESEARCH not in assistant_text:
                     assistant_text = _PRELIMINARY_RESEARCH + "\n\n" + assistant_text
                 if message_id is None:
@@ -438,7 +465,7 @@ class Agent:
                         model=self.settings.model_name,
                         artifacts=completed_tools.artifacts,
                     )
-                    if not partial:
+                    if not partial or buffer_file_reply:
                         yield {"type": "delta", "text": assistant_text}
                 else:
                     self.memory.update_message(
@@ -557,6 +584,8 @@ class Agent:
             }
 
     def _extract_autonomous_memory(self, source_message_id: str, user_text: str) -> None:
+        if getattr(self, "suppress_autonomous_memory", False):
+            return
         if self.memory.shared_project() is not None:
             return
         try:
@@ -599,15 +628,15 @@ class Agent:
             raise ProviderError("Результаты инструментов превысили доступный контекст. Сократи запрос или продолжи отдельным сообщением.", "context_overflow")
         return messages
 
-    def _execute_tool_calls(self, tool_calls, user_text: str, *, previous: ToolOutcome | None = None) -> ToolOutcome:
-        stream = self._execute_tool_calls_stream(tool_calls, user_text, previous=previous)
+    def _execute_tool_calls(self, tool_calls, user_text: str, *, previous: ToolOutcome | None = None, allowed_tools: set[str] | None = None) -> ToolOutcome:
+        stream = self._execute_tool_calls_stream(tool_calls, user_text, previous=previous, allowed_tools=allowed_tools)
         while True:
             try:
                 next(stream)
             except StopIteration as stopped:
                 return stopped.value
 
-    def _execute_tool_calls_stream(self, tool_calls, user_text: str, *, previous: ToolOutcome | None = None, round_number: int = 1, outcome: ToolOutcome | None = None):
+    def _execute_tool_calls_stream(self, tool_calls, user_text: str, *, previous: ToolOutcome | None = None, round_number: int = 1, outcome: ToolOutcome | None = None, allowed_tools: set[str] | None = None):
         outcome = outcome if outcome is not None else ToolOutcome()
         if self.memory.shared_project() is not None:
             outcome.results.append(
@@ -616,12 +645,18 @@ class Agent:
             outcome.statuses.append("blocked")
             return outcome
         for tool_call in tool_calls:
+            if tool_call.name == "analyze_image" and not tool_call.arguments.get("detail") and needs_precise_image(user_text):
+                tool_call.arguments = {**tool_call.arguments, "detail": "precise"}
             yield {"type": "status", "text": _tool_activity_text(tool_call.name), "tool": tool_call.name, "phase": "started", "round": round_number}
             invocation_output = None
             signature = json.dumps([tool_call.name, tool_call.arguments], sort_keys=True, ensure_ascii=False, default=str)
             prior_calls = {**(previous.calls if previous else {}), **outcome.calls}
             previous_count = len(previous.tool_names) if previous else 0
-            if previous_count + len(outcome.tool_names) >= MAX_TOOL_CALLS:
+            if allowed_tools is not None and tool_call.name not in allowed_tools and self.tools.has(tool_call.name):
+                tool_result = "Этот инструмент не доступен для текущего запроса или этапа. Выполни исходную просьбу доступными средствами; обычный ответ не требует изменения очереди задач."
+                status = "validation_error"
+                arguments = tool_call.arguments
+            elif previous_count + len(outcome.tool_names) >= MAX_TOOL_CALLS:
                 tool_result = "Достигнут предел вызовов инструментов за один запрос. Продолжи отдельным сообщением."
                 status = "blocked"
                 arguments = tool_call.arguments
@@ -682,7 +717,7 @@ class Agent:
             outcome.statuses.append(status)
             outcome.calls[signature] = status
             artifact = self._artifact_from_tool(
-                tool_call.name, arguments, status, invocation_output
+                tool_call.name, arguments, status, invocation_output, user_text=user_text
             )
             if artifact is not None:
                 outcome.artifacts.append(artifact)
@@ -735,6 +770,8 @@ class Agent:
             return None
         if not self.tools.has(decision.tool_name):
             return None
+        if decision.tool_name in TASK_MUTATION_TOOLS and not self._uses_task_queue(user_text):
+            return None
         if decision.tool_name == "read_file":
             try:
                 self.files.resolve_download_path(str(decision.arguments.get("path", "")))
@@ -744,6 +781,18 @@ class Agent:
                 return None
         return decision
 
+    def _uses_task_queue(self, user_text: str) -> bool:
+        if self.task_queue_context is not None:
+            return self.task_queue_context
+        text = user_authored_text(Message('user', user_text, artifacts=list(getattr(self, 'incoming_attachments', []))))
+        if _explicit_task_queue_intent(text):
+            return True
+        if re.fullmatch(r"\s*(?:да[,! ]*)?(?:продолжай|продолжим|дальше|приступай|continue|go ahead|resume)[.! ]*", text, re.I):
+            return any(_explicit_task_queue_intent(user_authored_text(Message('user', row['content'], artifacts=row.get('artifacts', []))))
+                       for row in self.memory.database.list_messages(self.memory.thread_id)
+                       if row['role'] == 'user')
+        return False
+
     def _try_direct_tool_action(self, user_text: str) -> ToolOutcome | None:
         decision = self._direct_tool_decision(user_text)
         if decision is None:
@@ -751,8 +800,15 @@ class Agent:
         return self._execute_tool_calls([ToolCall(decision.tool_name, decision.arguments)], user_text)
 
     def _normalize_new_file_overwrite(self, tool_name: str, arguments: dict) -> dict:
-        if tool_name not in {"write_file", "create_docx", "create_presentation"}:
+        if tool_name not in {"write_file", "create_docx", "create_presentation", "append_docx"}:
             return arguments
+        prefix = getattr(self, "automation_output_prefix", "")
+        if prefix:
+            from pathlib import PurePosixPath, PureWindowsPath
+            path = str(arguments.get("path") or "").replace("\\", "/")
+            if (path and not PurePosixPath(path).is_absolute() and not PureWindowsPath(path).drive
+                    and ".." not in PurePosixPath(path).parts and not path.startswith(prefix + "/")):
+                arguments = {**arguments, "path": prefix + "/" + path}
         if not arguments.get("overwrite"):
             return arguments
         relative_path = str(arguments.get("path", "")).strip()
@@ -767,6 +823,8 @@ class Agent:
         return arguments
 
     def _ensure_requested_research_docx(self, user_text: str, outcome: ToolOutcome) -> None:
+        if getattr(self, "automation_disable_fallback_files", False):
+            return
         if outcome.artifacts or "web_search" not in outcome.tool_names:
             return
         lowered = user_text.lower()
@@ -836,6 +894,7 @@ class Agent:
         arguments: dict,
         status: str,
         output: object | None = None,
+        *, user_text: str = "",
     ) -> dict | None:
         if status == "completed" or (tool_name == "propose_extension" and status == "failed"):
             if tool_name == "propose_extension" and isinstance(output, dict):
@@ -862,12 +921,17 @@ class Agent:
                     "extension": ".png",
                     "size_bytes": int(screenshot.get("size_bytes", 0)),
                 }
-        if status != "completed" or tool_name not in {
+        delivery_tools = {
             "write_file",
             "create_docx",
             "append_docx",
             "create_presentation",
-        }:
+        }
+        if tool_name == "file_metadata" and wants_resend(user_text):
+            same_thread = {item['path'] for item in self._previous_thread_artifacts(user_text)}
+            if str(arguments.get('path', '')) in same_thread:
+                delivery_tools.add("file_metadata")
+        if status != "completed" or tool_name not in delivery_tools:
             return None
         relative_path = str(arguments.get("path", "")).strip()
         if not relative_path:
@@ -882,6 +946,65 @@ class Agent:
             "extension": file.extension,
             "size_bytes": file.size_bytes,
         }
+
+    def _missing_requested_docx(self, user_text: str, outcome: ToolOutcome) -> bool:
+        return (wants_docx_creation(self._authored_request(user_text)) and not outcome.approvals
+                and not any(item.get('extension', '').lower() == '.docx' for item in outcome.artifacts))
+
+    def _authored_request(self, user_text: str) -> str:
+        """Attachment names and document text must not become file-delivery intent."""
+        artifacts = list(getattr(self, 'incoming_attachments', []))
+        if artifacts:
+            return user_authored_text(Message('user', user_text, artifacts=artifacts))
+        for row in reversed(self.memory.database.list_messages(self.memory.thread_id)):
+            if row['role'] == 'user' and row['content'] == user_text:
+                return user_authored_text(Message('user', user_text, artifacts=row.get('artifacts', [])))
+        return user_text
+
+    def _previous_thread_artifacts(self, user_text: str = '') -> list[dict]:
+        """Only a prior message in this thread can supply an implicit resend path."""
+        requested = requested_file_names(self._authored_request(user_text))
+        for row in reversed(self.memory.database.list_messages(self.memory.thread_id)):
+            if row['role'] != 'assistant':
+                continue
+            candidates = [item.get('path', '') for item in row.get('artifacts', [])]
+            candidates.extend(local_file_targets(row['content']))
+            if requested:
+                candidates = [path for path in candidates if Path(path).name.casefold() in requested]
+            verified = []
+            for path in dict.fromkeys(candidates):
+                if not path:
+                    continue
+                try:
+                    file = self.files.describe_file(path)
+                    verified.append({'path': file.path, 'name': file.name, 'extension': file.extension, 'size_bytes': file.size_bytes})
+                except ValueError:
+                    pass
+            if candidates:
+                return verified
+        return []
+
+    def _verified_file_reply(self, user_text: str, text: str, outcome: ToolOutcome) -> str:
+        user_text = self._authored_request(user_text)
+        if wants_resend(user_text) and not outcome.artifacts:
+            outcome.artifacts.extend(self._previous_thread_artifacts(user_text))
+        if self._missing_requested_docx(user_text, outcome):
+            quality_reason = next((result for name, result, status in reversed(list(zip(outcome.tool_names, outcome.results, outcome.statuses)))
+                                   if name == 'research_quality_gate' and status == 'failed'), None)
+            if quality_reason:
+                return quality_reason
+            outcome.results.append('Word-файл не создан: успешного результата файлового инструмента нет.')
+            outcome.tool_names.append('file_delivery')
+            outcome.statuses.append('failed')
+            return 'Не удалось создать Word-файл в этом запросе. Подтверждённого файла для скачивания нет.'
+        if wants_resend(user_text) and not outcome.artifacts:
+            outcome.results.append('Не удалось подтвердить файл для повторного прикрепления в этом чате.')
+            outcome.tool_names.append('file_delivery')
+            outcome.statuses.append('failed')
+            return 'Не нашёл доступного файла в этом чате для повторного прикрепления. Укажи его имя или прикрепи файл.'
+        if wants_resend(user_text):
+            return 'Файл доступен для скачивания ниже.'
+        return normalize_artifact_links(text, outcome.artifacts)
 
 
 def _tool_completion_text(outcome: ToolOutcome) -> str:
@@ -929,6 +1052,19 @@ def _tool_completion_text(outcome: ToolOutcome) -> str:
 
 def _provider_failure_artifact_text(outcome: ToolOutcome, error: ProviderError) -> str:
     return f"Созданные файлы сохранены и доступны ниже. Продолжить выполнение не удалось: {error.user_message} Вся задача может быть не завершена."
+
+
+def _explicit_task_queue_intent(text: str) -> bool:
+    return bool(re.search(
+        r"(?:созда\w*|добав\w*|постав\w*|запланир\w*|обнов\w*|измени|удал\w*|закро\w*|заверш\w*|выполн\w*|продолж\w*|начн\w*|запуст\w*)\s+"
+        r"(?:(?:нов\w*|текущ\w*|активн\w*|прошл\w*|следующ\w*)\s+)?(?:задач\w*|очеред\w*)\b|"
+        r"(?:список|покажи|текущая|активная)\s+(?:моих\s+)?задач\w*|"
+        r"(?:выполн\w*|запуст\w*|продолж\w*)\s+(?:следующ\w*|текущ\w*)\s+шаг\w*|"
+        r"(?:продолж\w*|возобнов\w*)\s+работ\w*\b|"
+        r"\b(?:create|add|schedule|update|delete|complete|finish|execute|resume|continue|start|show|list)\s+"
+        r"(?:(?:a|an|the|my|current|next|active|queued|new)\s+)*(?:tasks?|queue)\b|"
+        r"\b(?:task[_ ]id|step[_ ]id|next step)\b",
+        text, re.I))
 
 
 def _completed_turn_outcome(outcome: ToolOutcome) -> str:
@@ -995,8 +1131,15 @@ def _tools_for_phase(tools: list[dict], phase: str) -> list[dict]:
     return tools
 
 
-def _turn_hint(phase: str) -> str:
-    return _FINALIZE_FROM_EVIDENCE if phase == "final" else _READ_SOURCE_AFTER_SEARCH
+def _runtime_system_prompt(system_prompt: str, phase: str) -> str:
+    # Guidance is ephemeral control state, never an additional user request.
+    # Reading a source resets the phase and must remove the search restriction.
+    if phase == "normal":
+        return system_prompt
+    hint = _FINALIZE_FROM_EVIDENCE if phase == "final" else _READ_SOURCE_AFTER_SEARCH
+    return (system_prompt + "\n\n[Внутреннее управление текущим шагом агента]\n"
+            "Это временная инструкция среды выполнения, а не просьба или ограничение пользователя. "
+            "Не приписывай её пользователю и не описывай её как его указание.\n" + hint)
 
 
 def _unfinished_completion_text(outcome: ToolOutcome, user_text: str = "") -> str:
@@ -1077,6 +1220,13 @@ def _http_error_status(result: str) -> int | None:
     return None
 
 
+_MISSING_DOCX = (
+    'Пользователь просил создать Word-документ в текущем запросе, но успешного файлового результата нет. '
+    'Не выдавай file_metadata существующего файла за создание нового. Вызови create_docx с содержимым '
+    'именно этой просьбы и новым путём outputs/*.docx (overwrite=false), либо честно сообщи о препятствии. '
+    'Не создавай и не изменяй очередь задач ради обычного документа.'
+)
+
 _CONTINUE_AFTER_TOOL = (
     "Продолжи исходную задачу пользователя на основе уже полученных результатов. "
     "Не повторяй тот же поиск. Если пользователь запросил документ или другой файл, "
@@ -1085,9 +1235,11 @@ _CONTINUE_AFTER_TOOL = (
 )
 
 _READ_SOURCE_AFTER_SEARCH = (
-    "В этом запросе уже выполнено несколько поисков без чтения источников. Не меняй формулировку поиска снова. "
+    "Сейчас выполнено несколько поисков подряд без чтения источников. На этом шаге сначала прочитай источник. "
     "Открой наиболее подходящую уже найденную официальную страницу через research_read или browser_read "
-    "и проверь сведения на ней. Если подходящего источника нет, закончи ответ по имеющимся данным: "
+    "и проверь сведения на ней. После успешного чтения поиск снова доступен: при необходимости ищи "
+    "другие независимые источники или уточняй запрос по проверенным сведениям. "
+    "Если подходящего источника нет, закончи ответ по имеющимся данным: "
     "отдели видимые признаки и гипотезы, честно укажи, что точная модель/цена не подтверждены. "
     "Результаты других брендов и серия, предположенная по фотографии, не являются подтверждением модели."
 )

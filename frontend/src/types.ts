@@ -245,6 +245,9 @@ export type AutomationRunItem = {
   created_at: string;
   result?: string;
   artifacts?: Array<{path: string; name?: string; extension?: string; size_bytes?: number}>;
+  thread_id?: string | null;
+  outcome?: string | null;
+  approval_ids?: string[];
 };
 
 export type AutomationItem = {

@@ -433,10 +433,14 @@ class AgentService:
                 agent.pending_chat_actions.finish(user_id,thread_id,approval_id,'denied')
                 text=f"Действие {pending['tool_name']} отклонено."
                 agent.memory.append_message(Message('assistant',text))
+                from ai_agent.automation_runner import LLMAutomationRunner
+                LLMAutomationRunner(self).deny(user_id,thread_id)
                 events=iter(({'type':'delta','text':text},{'type':'done'}))
             else:
                 events=agent.resume_chat_action_stream(approval_id)
-                events=self._chat_completion_events(events,user_id,thread_id,agent)
+                from ai_agent.automation_runner import LLMAutomationRunner
+                runner=LLMAutomationRunner(self)
+                events=runner.resume(user_id,thread_id,agent,events) if runner.get(user_id,thread_id=thread_id) else self._chat_completion_events(events,user_id,thread_id,agent)
             return thread_id,_LockedEventStream(events,lock)
         except BaseException:
             lock.release()
@@ -621,10 +625,18 @@ class AgentService:
                 (datetime.now(timezone.utc).isoformat(), max(1, min(int(limit), 20))),
             ).fetchall()
         results = []
+        from ai_agent.automation_runner import LLMAutomationRunner
+        runner=LLMAutomationRunner(self)
         for row in rows:
             agent = self.agent_for_user(row["user_id"])
             try:
-                agent.executor.execute_next_step(run_id=row["task_run_id"])
+                task_run=self.database.get_task_run(row['user_id'],row['task_run_id'])
+                task=agent.tasks.get_task(task_run['task_id'])
+                step=agent.tasks.running_step(task) or next((item for item in task.steps if item.status=='pending'),None)
+                if runner.get(row['user_id'],run_id=row['task_run_id']) or (step and runner.needs_agent(step)):
+                    runner.run(row['user_id'],row['task_run_id'])
+                else:
+                    agent.executor.execute_next_step(run_id=row["task_run_id"])
             except Exception:
                 # No upstream body or tool arguments in persistent user-facing errors.
                 run = self.database.get_task_run(row["user_id"], row["task_run_id"])
@@ -643,11 +655,16 @@ class AgentService:
         if self.database.get_automation(user_id, automation_id) is None:
             raise ValueError("Автоматизация не найдена.")
         rows = self.database.list_automation_runs(user_id, automation_id)
+        from ai_agent.automation_runner import LLMAutomationRunner
+        runner=LLMAutomationRunner(self)
         for row in rows:
             report = TaskReportService(self.database, user_id).run_report(row["task_run_id"])["payload"]
             actions = report.get("completed_actions", [])
             row["result"] = "\n\n".join(item["observation"] for item in actions) or row.get("failure_reason") or report["summary"]
             row["artifacts"] = report.get("artifacts", [])
+            llm=runner.get(user_id,run_id=row['task_run_id'])
+            if llm:
+                row.update(result=llm['result'],artifacts=llm['artifacts'],thread_id=llm['thread_id'],outcome=llm['outcome'],approval_ids=llm['approval_ids'])
         return rows
 
     def task_checkpoints(self, user_id: str, run_id: str) -> list[dict]:

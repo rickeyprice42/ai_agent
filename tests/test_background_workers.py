@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import sys
 import unittest
+from threading import Event
 
 ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT/'src') not in sys.path:sys.path.insert(0,str(ROOT/'src'))
@@ -13,7 +14,7 @@ from ai_agent.config import Settings
 from ai_agent.database import AvelinDatabase
 from ai_agent.memory import MemoryStore
 from ai_agent.types import Message, ModelResponse
-from backend.main import _title_worker, _push_worker
+from backend.main import _title_worker, _push_worker, _automation_scheduler, _automation_queue_worker
 from backend.service import AgentService
 
 
@@ -59,6 +60,25 @@ class BackgroundWorkersTests(unittest.TestCase):
                 await _push_worker(stop)
         asyncio.run(one_cycle())
         self.assertEqual(calls,['delivered'])
+
+    def test_schedule_keeps_ticking_while_one_model_run_blocks_the_consumer(self):
+        gate=Event();running=Event();ticks=[];limits=[]
+        async def exercise():
+            stop=asyncio.Event();loop=asyncio.get_running_loop()
+            class Service:
+                def tick_automations(self):
+                    ticks.append('tick')
+                    if running.is_set() and len(ticks)>=3:loop.call_soon_threadsafe(stop.set)
+                    return []
+                def process_automation_queue(self,limit):
+                    limits.append(limit);running.set();gate.wait(2);return []
+            with patch('backend.main.agent_service',Service()),patch('backend.main.AUTOMATION_POLL_SECONDS',.01):
+                scheduler=asyncio.create_task(_automation_scheduler(stop));consumer=asyncio.create_task(_automation_queue_worker(stop))
+                try:await asyncio.wait_for(stop.wait(),1)
+                finally:gate.set();await asyncio.gather(scheduler,consumer)
+        asyncio.run(exercise())
+        self.assertGreaterEqual(len(ticks),3)
+        self.assertEqual(limits,[1])
 
 
 if __name__=='__main__':unittest.main()

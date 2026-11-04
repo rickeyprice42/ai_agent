@@ -425,6 +425,7 @@ def register_builtin_tools(
             "tables": {"type": "array", "items": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}},
             "json_ld": {"type": "array"},
             "links": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "images": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
             "script_count": {"type": "integer"},
             "catalog_item": {"type": "object", "additionalProperties": True},
             "actions": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
@@ -441,7 +442,9 @@ def register_builtin_tools(
             version="1.0.0",
             description=(
                 "Открывает публичную страницу в изолированном headless Edge, возвращает DOM-first snapshot "
-                "и screenshot. Профиль всегда ephemeral, cookies пользователя недоступны."
+                "и screenshot. images содержит URL/alt/контекст строки таблицы для адресного просмотра. "
+                "Для vision длинной страницы выбери screenshot_full_page=false или открой нужный image URL. "
+                "Профиль всегда ephemeral, cookies пользователя недоступны."
             ),
             schema={
                 "type": "object",
@@ -449,6 +452,7 @@ def register_builtin_tools(
                     "url": {"type": "string", "minLength": 8, "maxLength": 2000},
                     "screenshot": {"type": "boolean"},
                     "screenshot_path": {"type": "string", "maxLength": 240},
+                    "screenshot_full_page": {"type": "boolean"},
                 },
                 "required": ["url"],
             },
@@ -492,6 +496,7 @@ def register_builtin_tools(
                     },
                     "screenshot": {"type": "boolean"},
                     "screenshot_path": {"type": "string", "maxLength": 240},
+                    "screenshot_full_page": {"type": "boolean"},
                 },
                 "required": ["url", "actions"],
             },

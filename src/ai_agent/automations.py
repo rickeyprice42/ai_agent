@@ -2,19 +2,23 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from hashlib import sha256
+import json
+import re
 
 from ai_agent.database import AvelinDatabase
 
 
 DEFAULT_AUTOMATION_BUDGET = {
     "max_steps": 20,
-    "max_failures": 3,
+    "max_failures": 5,
     "max_seconds": 1800,
-    "max_tokens": 50000,
+    "max_tokens": 180000,
     "max_cost_micros": 0,
 }
 MAX_ACTIVE_AUTOMATIONS = 20
 MAX_PARALLEL_RUNS = 3
+LEGACY_UI_AUTOMATION_BUDGET = {**DEFAULT_AUTOMATION_BUDGET, "max_failures": 3, "max_tokens": 50000}
 WEEKDAYS_RU = (
     "понедельник", "вторник", "среда", "четверг",
     "пятница", "суббота", "воскресенье",
@@ -78,6 +82,24 @@ class AutomationService:
 
     def list(self, include_deleted: bool = False) -> list[dict]:
         return self.database.list_automations(self._require_user(), include_deleted=include_deleted)
+
+    def apply_stock_budget_plan(self, plan: list[dict]) -> dict:
+        user_id=self._require_user();applied=[];skipped=[]
+        for item in plan:
+            if item['user_id']!=user_id:
+                skipped.append(item['automation_id']);continue
+            with self.database.connect() as connection:
+                connection.execute('BEGIN IMMEDIATE')
+                row=connection.execute('SELECT * FROM automations WHERE id=? AND user_id=?',(item['automation_id'],user_id)).fetchone()
+                latest=_latest_automation_run(connection,user_id,item['automation_id'])
+                if (row is None or row['status']!='active' or json.loads(row['budget_json'])!=LEGACY_UI_AUTOMATION_BUDGET
+                        or sha256(row['prompt'].encode()).hexdigest()!=item['prompt_hash']
+                        or latest is None or latest['id']!=item['latest_failed_run_id'] or latest['state']!='failed'):
+                    skipped.append(item['automation_id']);continue
+                connection.execute('UPDATE automations SET budget_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',
+                    (json.dumps(DEFAULT_AUTOMATION_BUDGET,sort_keys=True),item['automation_id'],user_id))
+                applied.append(item['automation_id'])
+        return {'applied':applied,'skipped':skipped}
 
     def pause(self, automation_id: str) -> dict:
         return self._set_status(automation_id, "paused")
@@ -180,6 +202,26 @@ class AutomationService:
         if not self.user_id:
             raise ValueError("Для операции требуется пользователь.")
         return self.user_id
+
+
+def _latest_automation_run(connection,user_id,automation_id):
+    return connection.execute('''SELECT tr.id,tr.state FROM automation_runs ar JOIN task_runs tr ON tr.id=ar.task_run_id
+        WHERE ar.user_id=? AND ar.automation_id=? ORDER BY ar.created_at DESC,ar.rowid DESC LIMIT 1''',(user_id,automation_id)).fetchone()
+
+
+def plan_stock_research_budgets(connection) -> list[dict]:
+    """Read-only recommendation; explicit application preserves custom limits/history."""
+    result=[]
+    for row in connection.execute("SELECT * FROM automations WHERE status='active'").fetchall():
+        if json.loads(row['budget_json'])!=LEGACY_UI_AUTOMATION_BUDGET:continue
+        if not re.search(r'найди|находи|поищи|исследован|бенчмарк|research|benchmark',row['prompt'],re.IGNORECASE):continue
+        latest=_latest_automation_run(connection,row['user_id'],row['id'])
+        if latest is None or latest['state']!='failed':continue
+        result.append({'automation_id':row['id'],'user_id':row['user_id'],'name':row['name'],
+            'expected_budget':LEGACY_UI_AUTOMATION_BUDGET,'recommended_budget':DEFAULT_AUTOMATION_BUDGET,
+            'prompt_hash':sha256(row['prompt'].encode()).hexdigest(),'latest_failed_run_id':latest['id'],
+            'reason':'active_research_failed_with_exact_historical_ui_stock_budget'})
+    return result
 
 
 def _normalize_definition(

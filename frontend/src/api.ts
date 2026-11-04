@@ -28,13 +28,27 @@ function authHeaders(token: string): HeadersInit {
   };
 }
 
-async function parseError(response: Response, fallback: string): Promise<Error> {
+export async function parseError(response: Response, fallback: string): Promise<Error> {
+  const unavailable = `${fallback} Эта функция недоступна в запущенной версии сервера. Перезапусти Avelin через лаунчер и обнови приложение.`;
   try {
     const payload = await response.json();
+    if (response.status === 404 && (typeof payload.detail !== "string" || /^not\s*found$/i.test(payload.detail))) {
+      return new Error(unavailable);
+    }
     return new Error(typeof payload.detail === "string" ? payload.detail : fallback);
   } catch {
-    return new Error(fallback);
+    return new Error(response.status === 404 ? unavailable : fallback);
   }
+}
+
+export async function fetchRuntimeNotice(): Promise<string | null> {
+  try {
+    const response = await fetch("/api/health", { cache: "no-store" });
+    if (!response.ok && response.status !== 404) return null;
+    const health = response.ok ? await response.json().catch(() => null) : null;
+    if (Number(health?.runtime?.contract) >= 2 && !health?.restart_required) return null;
+    return "Сервер Avelin использует предыдущую версию. Перезапусти Avelin через лаунчер, затем обнови приложение. Новые фото, предпросмотры и уведомления требуют обновлённого сервера.";
+  } catch { return null; } // Connection failures are reported by the main authenticated bootstrap.
 }
 
 export async function fetchBootstrap(token: string, threadId?: string | null): Promise<BootstrapPayload> {
@@ -130,6 +144,7 @@ export async function fetchAvatar(token: string): Promise<Blob | null> {
 export async function fetchImagePreview(path: string, token: string): Promise<Blob> {
   const response = await fetch(`/api/workspace/preview?path=${encodeURIComponent(path)}&size=1024`, { headers: authHeaders(token) });
   if (!response.ok) throw await parseError(response, "Не удалось открыть изображение.");
+  if (!response.headers.get("Content-Type")?.startsWith("image/")) throw new Error("Сервер не вернул изображение. Перезапусти Avelin через лаунчер и обнови приложение.");
   return response.blob();
 }
 
@@ -141,6 +156,7 @@ export async function saveAvatar(blob: Blob, token: string): Promise<void> {
 export async function previewAvatar(file: File, token: string): Promise<Blob> {
   const response = await fetch("/api/profile/avatar/preview", { method: "POST", headers: { ...authHeaders(token), "Content-Type": file.type || "application/octet-stream", "X-Filename": encodeURIComponent(file.name) }, body: file });
   if (!response.ok) throw await parseError(response, "Не удалось открыть изображение.");
+  if (!response.headers.get("Content-Type")?.startsWith("image/")) throw new Error("Сервер пока не поддерживает подготовку фото. Перезапусти Avelin через лаунчер и обнови приложение.");
   return response.blob();
 }
 
