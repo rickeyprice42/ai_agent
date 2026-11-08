@@ -1,11 +1,14 @@
 # Ubuntu deployment
 
-This deployment keeps the public landing page and the private agent separate:
+The production layout keeps the public landing page, public authenticated agent,
+and private Tailscale maintenance endpoint separate:
 
-- `http://SERVER_IP/` serves `website/` publicly through nginx;
-- `https://HOSTNAME.TAILNET.ts.net/` serves the agent through Tailscale Serve;
+- `https://avelin.tech/` serves `website/`;
+- `https://www.avelin.tech/` redirects to the root domain;
+- `https://app.avelin.tech/` serves the frontend and proxies `/api/` to FastAPI;
+- `https://HOSTNAME.TAILNET.ts.net/` keeps the same agent available through Tailscale;
 - FastAPI listens only on `127.0.0.1:8000`;
-- the private nginx origin listens only on `127.0.0.1:8080`;
+- the Tailscale nginx origin listens only on `127.0.0.1:8080`;
 - one Uvicorn worker owns SQLite and the background queues.
 
 The source release belongs in `/opt/avelin/current`. Persistent private state belongs
@@ -33,18 +36,42 @@ workspace files in Git.
    tailscale serve status
    ```
 
-6. Set `WEB_PUSH_VAPID_SUBJECT` to that HTTPS URL. Put the same URL in
-   `/opt/avelin/current/website/agent-config.js` as `window.AVELIN_AGENT_URL`, then
-   restart `avelin`. The landing-page login button will open the private agent without
-   exposing its API on the public IPv4 address.
+## Public domain and HTTPS
+
+Before enabling HTTPS, point these Cloudflare records at the server and keep them
+`DNS only` for the initial certificate issuance:
+
+| Type | Name | Value |
+| --- | --- | --- |
+| A | `@` | `78.40.199.9` |
+| A | `www` | `78.40.199.9` |
+| A | `app` | `78.40.199.9` |
+
+After the authoritative nameservers have propagated and all three names resolve to
+the server, run:
+
+```bash
+sudo bash /opt/avelin/current/deploy/enable_public_domain.sh
+```
+
+The script installs Certbot, exposes only the ACME challenge for the agent during
+bootstrap, requests one certificate for all three names, installs the final HTTPS
+configuration, and enables automatic renewal. Login and registration requests on
+the public agent are rate-limited by nginx. Tailscale Serve is not changed.
+
+Set `WEB_PUSH_VAPID_SUBJECT=https://app.avelin.tech` in
+`/etc/avelin/avelin.env`, then restart Avelin. Existing Web Push subscriptions from
+the Tailscale origin are not reusable; users need to enable notifications again on
+the public origin.
 
 ## Verification
 
 ```bash
-systemctl --no-pager --full status avelin nginx
+systemctl --no-pager --full status avelin nginx certbot.timer
 curl --fail --silent http://127.0.0.1:8000/api/health
 curl --fail --silent http://127.0.0.1:8080/api/health
-curl --fail --silent http://127.0.0.1/
+curl --fail --silent https://avelin.tech/
+curl --fail --silent https://app.avelin.tech/api/health
 sudo -u avelin /opt/avelin/venv/bin/python - <<'PY'
 import sqlite3
 db = sqlite3.connect('file:/var/lib/avelin/avelin.sqlite3?mode=ro', uri=True)
@@ -52,5 +79,5 @@ print(db.execute('PRAGMA integrity_check').fetchone()[0])
 PY
 ```
 
-The landing page can be switched to HTTPS after a domain is pointed at the server.
-Until then, keep authentication and Web Push on the Tailscale HTTPS origin.
+Keep the Cloudflare records as `DNS only` until origin HTTPS and long-running agent
+responses are verified. Proxying can be evaluated later without changing nginx.
