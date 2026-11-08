@@ -64,6 +64,33 @@ Set `WEB_PUSH_VAPID_SUBJECT=https://app.avelin.tech` in
 the Tailscale origin are not reusable; users need to enable notifications again on
 the public origin.
 
+## Closed test registration
+
+Choose a private code of 8-64 ASCII letters or digits and set it through hidden
+input. The command stores only its SHA-256 digest in the protected environment
+file, never the code itself:
+
+```bash
+sudo /opt/avelin/venv/bin/python \
+  /opt/avelin/current/scripts/set_registration_access_code.py \
+  --env-file /etc/avelin/avelin.env
+sudo systemctl restart avelin
+```
+
+The frontend then shows a closed-test dialog, while the API independently rejects
+missing or incorrect codes. Never place the real code in Git or frontend files.
+
+Passwords are stored only as salted PBKDF2 hashes and cannot be recovered. To
+replace a forgotten password without deleting chats, run the interactive command
+below. It reads the new password with hidden input and revokes existing sessions:
+
+```bash
+sudo -u avelin /opt/avelin/venv/bin/python \
+  /opt/avelin/current/scripts/reset_user_password.py \
+  --database /var/lib/avelin/avelin.sqlite3 \
+  --login USERNAME_OR_EMAIL
+```
+
 ## Verification
 
 ```bash

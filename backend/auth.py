@@ -55,6 +55,22 @@ def verify_password(password: str, password_hash: str | None) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
+def hash_registration_access_code(access_code: str) -> str:
+    return hashlib.sha256(access_code.encode("utf-8")).hexdigest()
+
+
+def verify_registration_access_code(candidate: str, configured_hash: str) -> bool:
+    """Compare the registration gate without storing the access code itself."""
+    if not configured_hash:
+        return True
+    if not candidate:
+        return False
+    return hmac.compare_digest(
+        hash_registration_access_code(candidate.strip()),
+        configured_hash,
+    )
+
+
 def issue_session_token() -> SessionToken:
     raw = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)

@@ -9,7 +9,13 @@ from backend.attachments import MAX_ATTACHMENT_BYTES
 from backend.runtime_version import runtime_health
 from fastapi.responses import FileResponse, StreamingResponse
 
-from backend.auth import hash_password, hash_token, issue_session_token, verify_password
+from backend.auth import (
+    hash_password,
+    hash_token,
+    issue_session_token,
+    verify_password,
+    verify_registration_access_code,
+)
 from backend.models import (
     AutomationCreateRequest,
     AutomationItem,
@@ -71,6 +77,7 @@ from backend.models import (
     ProjectMemberItem,
     ProjectUpdateRequest,
     RegisterRequest,
+    RegistrationPolicyResponse,
     SecuritySettingsResponse,
     SharedProjectItem,
     SharedProjectItemCreateRequest,
@@ -110,8 +117,30 @@ def current_user(authorization: str | None = Header(default=None)) -> dict[str, 
     return user
 
 
+@router.get("/auth/registration-policy", response_model=RegistrationPolicyResponse)
+def registration_policy() -> RegistrationPolicyResponse:
+    required = bool(agent_service.settings.registration_access_code_hash)
+    return RegistrationPolicyResponse(
+        access_code_required=required,
+        message=(
+            "Avelin сейчас находится на закрытом тестировании. "
+            "Для регистрации нужен код доступа от владельца проекта."
+            if required
+            else "Регистрация открыта."
+        ),
+    )
+
+
 @router.post("/auth/register", response_model=AuthResponse)
 def register(payload: RegisterRequest) -> AuthResponse:
+    if not verify_registration_access_code(
+        payload.access_code,
+        agent_service.settings.registration_access_code_hash,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Неверный код доступа к закрытому тестированию.",
+        )
     try:
         user = agent_service.database.create_user(
             email=payload.email.strip().lower(),

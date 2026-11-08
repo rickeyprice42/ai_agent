@@ -160,6 +160,12 @@ class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=2, max_length=80)
     password: str = Field(..., min_length=8, max_length=256)
     display_name: str = Field(..., min_length=2, max_length=120)
+    access_code: str = Field(default="", max_length=64)
+
+
+class RegistrationPolicyResponse(BaseModel):
+    access_code_required: bool
+    message: str
 
 
 class AuthResponse(BaseModel):

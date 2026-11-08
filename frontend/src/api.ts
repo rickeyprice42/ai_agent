@@ -18,6 +18,7 @@ import type {
   SharedProjectItem,
   UserProfile
 } from "./types";
+import type { RegistrationPolicy } from "./types";
 import type { ChatApprovalItem } from "./types";
 import type { AutomationRunItem } from "./types";
 import type { ConnectorItem } from "./types";
@@ -916,16 +917,25 @@ export async function login(loginValue: string, password: string): Promise<AuthP
   return response.json();
 }
 
+export async function fetchRegistrationPolicy(): Promise<RegistrationPolicy> {
+  const response = await fetch("/api/auth/registration-policy", { cache: "no-store" });
+  if (!response.ok) {
+    throw await parseError(response, "Не удалось проверить режим регистрации.");
+  }
+  return response.json();
+}
+
 export async function register(
   email: string,
   username: string,
   password: string,
-  displayName: string
+  displayName: string,
+  accessCode = ""
 ): Promise<AuthPayload> {
   const response = await fetch("/api/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, username, password, display_name: displayName })
+    body: JSON.stringify({ email, username, password, display_name: displayName, access_code: accessCode })
   });
   if (!response.ok) {
     throw await parseError(response, "Не удалось зарегистрироваться.");

@@ -59,6 +59,7 @@ import {
   fetchMemorySummary,
   fetchPersonalMemory,
   fetchModelProviders,
+  fetchRegistrationPolicy,
   fetchChatModelSettings,
   updateChatModelSettings,
   resetChatModelSettings,
@@ -113,6 +114,7 @@ import type {
   SharedProjectItem,
   UserProfile
 } from "./types";
+import type { RegistrationPolicy } from "./types";
 
 const DRAFT_KEY = "avelin-draft";
 const THEME_KEY = "avelin-theme-mode";
@@ -394,6 +396,17 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
+  const [registrationPolicy, setRegistrationPolicy] = useState<RegistrationPolicy | null>(null);
+  const [registrationAccessCode, setRegistrationAccessCode] = useState("");
+  const [registrationGateOpen, setRegistrationGateOpen] = useState(false);
+  useEffect(() => {
+    if (authToken) return;
+    let active = true;
+    void fetchRegistrationPolicy()
+      .then((policy) => { if (active) setRegistrationPolicy(policy); })
+      .catch(() => { if (active) setRegistrationPolicy({ access_code_required: false, message: "" }); });
+    return () => { active = false; };
+  }, [authToken]);
   const [modelProviders, setModelProviders] = useState<ModelProviderOption[]>([]);
   const [selectedProvider, setSelectedProvider] = useState(EMPTY_BOOTSTRAP.provider);
   const [selectedModel, setSelectedModel] = useState(EMPTY_BOOTSTRAP.model);
@@ -1796,7 +1809,8 @@ export default function App() {
               authEmail.trim(),
               authUsername.trim(),
               authPassword,
-              authDisplayName.trim() || authUsername.trim()
+              authDisplayName.trim() || authUsername.trim(),
+              registrationAccessCode.trim()
             );
       window.localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
       setAuthToken(payload.token);
@@ -1805,11 +1819,35 @@ export default function App() {
         .then(setModelProviders)
         .catch(() => setModelProviders([]));
       setAuthPassword("");
+      setRegistrationAccessCode("");
+      setRegistrationGateOpen(false);
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : "Не удалось выполнить вход.");
     } finally {
       setIsAuthSubmitting(false);
     }
+  }
+
+  function handleRegistrationTab() {
+    setAuthError(null);
+    if (registrationPolicy?.access_code_required) {
+      setRegistrationGateOpen(true);
+      return;
+    }
+    setAuthMode("register");
+  }
+
+  function handleRegistrationGateSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!registrationAccessCode.trim()) return;
+    setRegistrationGateOpen(false);
+    setAuthMode("register");
+  }
+
+  function handleRegistrationGateLeave() {
+    setRegistrationAccessCode("");
+    setRegistrationGateOpen(false);
+    setAuthMode("login");
   }
 
   async function handleLogout() {
@@ -1934,6 +1972,25 @@ export default function App() {
   if (!authToken || !currentUser) {
     return (
       <main className="auth-page">
+        {registrationGateOpen ? (
+          <div className="registration-gate-backdrop">
+            <section aria-labelledby="registration-gate-title" aria-modal="true" className="registration-gate" role="dialog">
+              <p className="eyebrow">Закрытое тестирование</p>
+              <h2 id="registration-gate-title">Доступ к Avelin пока ограничен</h2>
+              <p>{registrationPolicy?.message}</p>
+              <form onSubmit={handleRegistrationGateSubmit}>
+                <label>
+                  Код доступа
+                  <input autoCapitalize="none" autoComplete="off" autoFocus maxLength={64} minLength={8} onChange={(event) => setRegistrationAccessCode(event.target.value)} pattern="[A-Za-z0-9]+" required spellCheck={false} type="password" value={registrationAccessCode} />
+                </label>
+                <div className="registration-gate-actions">
+                  <button className="secondary-button" onClick={handleRegistrationGateLeave} type="button">Вернуться</button>
+                  <button disabled={!registrationAccessCode.trim()} type="submit">Продолжить</button>
+                </div>
+              </form>
+            </section>
+          </div>
+        ) : null}
         <section className="auth-hero">
           <div className="brand-mark auth-logo">
             <img src={resolvedTheme === "dark" ? "/brand/avelin-dark.png" : "/brand/avelin-light.png"} alt="Avelin" />
@@ -1952,10 +2009,10 @@ export default function App() {
 
         <section className="auth-card">
           <div className="auth-tabs">
-            <button aria-pressed={authMode === "login"} className={authMode === "login" ? "theme-option theme-option-active" : "theme-option"} onClick={() => setAuthMode("login")} type="button">
+            <button aria-pressed={authMode === "login"} className={authMode === "login" ? "theme-option theme-option-active" : "theme-option"} onClick={() => { setRegistrationGateOpen(false); setAuthMode("login"); }} type="button">
               Вход
             </button>
-            <button aria-pressed={authMode === "register"} className={authMode === "register" ? "theme-option theme-option-active" : "theme-option"} onClick={() => setAuthMode("register")} type="button">
+            <button aria-pressed={authMode === "register"} className={authMode === "register" ? "theme-option theme-option-active" : "theme-option"} disabled={registrationPolicy === null} onClick={handleRegistrationTab} type="button">
               Регистрация
             </button>
           </div>
@@ -1975,6 +2032,12 @@ export default function App() {
                   Логин
                   <input autoComplete="username" autoCapitalize="none" value={authUsername} onChange={(event) => setAuthUsername(event.target.value)} required minLength={2} />
                 </label>
+                {registrationPolicy?.access_code_required ? (
+                  <label>
+                    Код доступа
+                    <input autoCapitalize="none" autoComplete="off" maxLength={64} minLength={8} onChange={(event) => setRegistrationAccessCode(event.target.value)} pattern="[A-Za-z0-9]+" required spellCheck={false} type="password" value={registrationAccessCode} />
+                  </label>
+                ) : null}
               </>
             ) : (
               <label>

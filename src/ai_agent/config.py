@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import re
 
 
 def load_dotenv(dotenv_path: Path) -> None:
@@ -81,6 +82,7 @@ class Settings:
     http_timeout_seconds: int
     max_http_response_chars: int
     allow_private_http: bool
+    registration_access_code_hash: str
     browser_timeout_seconds: int
     browser_allowed_hosts: tuple[str, ...]
     desktop_timeout_seconds: int
@@ -116,6 +118,9 @@ class Settings:
 
         context_window_tokens = _read_int_env("CONTEXT_WINDOW_TOKENS", default=32768, minimum=4096)
         output_reserve_tokens = _read_int_env("CONTEXT_OUTPUT_RESERVE_TOKENS", default=4096, minimum=256)
+        registration_access_code_hash = os.getenv("REGISTRATION_ACCESS_CODE_HASH", "").strip().lower()
+        if registration_access_code_hash and not re.fullmatch(r"[a-f0-9]{64}", registration_access_code_hash):
+            raise ValueError("REGISTRATION_ACCESS_CODE_HASH must be a SHA-256 hex digest.")
 
         return cls(
             agent_name=os.getenv("AGENT_NAME", "Avelin"),
@@ -160,6 +165,7 @@ class Settings:
             http_timeout_seconds=_read_int_env("HTTP_TIMEOUT_SECONDS", default=15, minimum=1),
             max_http_response_chars=_read_int_env("MAX_HTTP_RESPONSE_CHARS", default=20000, minimum=1000),
             allow_private_http=_read_bool_env("ALLOW_PRIVATE_HTTP", default=False),
+            registration_access_code_hash=registration_access_code_hash,
             browser_timeout_seconds=_read_int_env("BROWSER_TIMEOUT_SECONDS", default=20, minimum=1),
             browser_allowed_hosts=tuple(
                 host.strip().casefold()

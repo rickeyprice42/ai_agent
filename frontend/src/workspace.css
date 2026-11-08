@@ -129,6 +129,16 @@ svg { flex-shrink: 0; }
 .auth-form input { min-width: 0; font-size: 16px; border-radius: 10px; }
 .auth-form button { min-height: 44px; border-radius: 10px; font-weight: 500; }
 .auth-form [role=alert] { margin: 0; overflow-wrap: anywhere; }
+.registration-gate-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: max(20px, var(--safe-top)) max(20px, var(--safe-right)) max(20px, var(--safe-bottom)) max(20px, var(--safe-left)); background: rgba(0,0,0,.56); backdrop-filter: blur(7px); }
+.registration-gate { width: min(470px, 100%); padding: 28px; border: 1px solid var(--line); border-radius: 20px; background: var(--surface-strong); color: var(--text); box-shadow: 0 28px 100px rgba(0,0,0,.34); }
+.registration-gate h2 { margin: 8px 0 12px; font-size: 24px; letter-spacing: -.035em; }
+.registration-gate > p:not(.eyebrow) { margin: 0 0 22px; color: var(--muted); line-height: 1.6; }
+.registration-gate form, .registration-gate label { display: grid; gap: 8px; }
+.registration-gate label { color: var(--muted); font-size: 13px; font-weight: 500; }
+.registration-gate input { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); font: inherit; font-size: 16px; }
+.registration-gate-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.registration-gate-actions button { min-height: 42px; padding: 10px 15px; border-radius: 10px; background: var(--text); color: var(--inverse); }
+.registration-gate-actions .secondary-button { border: 1px solid var(--line); background: transparent; color: var(--text); }
 .workspace-shell { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100dvh; }
 .workspace-shell::before { content: ""; position: fixed; inset: 0 0 auto; height: var(--safe-top); background: var(--bg); pointer-events: none; z-index: 11; }
 .workspace-navigation {
@@ -400,6 +410,9 @@ svg { flex-shrink: 0; }
 @media (max-width: 600px) {
   .auth-page { min-height: 100dvh; padding: calc(28px + var(--safe-top)) max(18px, var(--safe-right)) calc(28px + var(--safe-bottom)) max(18px, var(--safe-left)); gap: 28px; }
   .auth-card { padding: 20px; }
+  .registration-gate { padding: 22px; border-radius: 18px; }
+  .registration-gate-actions { display: grid; grid-template-columns: 1fr; }
+  .registration-gate-actions button[type=submit] { order: -1; }
   .auth-logo { margin-bottom: 16px; }
   .auth-hero .hero-text { font-size: 14px; }
   .workspace { padding: var(--safe-top) max(18px, var(--safe-right)) max(28px, var(--safe-bottom)) max(18px, var(--safe-left)); }

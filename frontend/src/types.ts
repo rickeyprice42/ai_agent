@@ -421,6 +421,11 @@ export type AuthPayload = {
   user: UserProfile;
 };
 
+export type RegistrationPolicy = {
+  access_code_required: boolean;
+  message: string;
+};
+
 export type ModelProviderOption = {
   provider: string;
   label: string;

@@ -362,6 +362,28 @@ class AvelinDatabase:
                 "auth_provider": "password",
             }
 
+    def reset_user_password(self, login: str, password_hash: str) -> dict[str, str] | None:
+        """Replace a password hash and revoke sessions without touching user data."""
+        normalized = login.strip().lower()
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id
+                FROM users
+                WHERE lower(email) = ? OR lower(username) = ?
+                """,
+                (normalized, normalized),
+            ).fetchone()
+            if not row:
+                return None
+            user_id = str(row["id"])
+            connection.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (password_hash, user_id),
+            )
+            connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        return self.get_user(user_id)
+
     def create_session(self, user_id: str, token_hash: str, expires_at: str) -> None:
         with self.connect() as connection:
             connection.execute(
