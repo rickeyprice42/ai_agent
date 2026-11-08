@@ -1,3 +1,5 @@
+const avelinAgentUrl = String(window.AVELIN_AGENT_URL || "").trim();
+
 window.AVELIN_SITE_CONFIG = Object.freeze({
   downloads: Object.freeze({
     fallbackPath: "./download.html",
@@ -8,5 +10,5 @@ window.AVELIN_SITE_CONFIG = Object.freeze({
       android: Object.freeze({ enabled: false, url: "" }),
     }),
   }),
-  auth: Object.freeze({ enabled: false, path: "./app/" }),
+  auth: Object.freeze({ enabled: /^https:\/\//i.test(avelinAgentUrl), path: avelinAgentUrl || "./app/" }),
 });

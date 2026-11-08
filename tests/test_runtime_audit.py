@@ -153,8 +153,9 @@ class RuntimeAuditTests(unittest.TestCase):
             agent.tools.register(Tool("large_fixture", "Fixture", {"type": "object", "properties": {}}, lambda _: "доказательство " * 40000))
             self.assertEqual(agent.respond("Прочти большой тестовый результат"), "Получил выдержку")
             output = [message for message in agent.provider.inputs[1] if message.tool_call_id == "large-call"][0]
-            self.assertLess(len(output.content), 1300)
-            self.assertIn("truncated", output.content)
+            self.assertLess(len(output.content), len("доказательство " * 40000) // 10)
+            self.assertIn("excerpt", output.content)
+            self.assertIn("доказательство", output.content)
 
     def test_direct_file_command_uses_the_same_progress_contract(self):
         with isolated_agent([]) as agent:

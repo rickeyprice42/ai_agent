@@ -452,6 +452,10 @@ class AvelinDatabase:
             )
         ))"""
         params: list[str] = [user_id, user_id]
+        where += """ AND (chat_threads.project_id IS NULL OR EXISTS (
+            SELECT 1 FROM projects p WHERE p.id=chat_threads.project_id AND p.status!='deleted'
+              AND (p.user_id=? OR EXISTS(SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=? AND pm.status='active'))))"""
+        params.extend([user_id,user_id])
         if status == "active":
             where += (
                 " AND chat_threads.deleted_at IS NULL"
@@ -533,9 +537,12 @@ class AvelinDatabase:
                         )
                     )
                 )
+                AND (chat_threads.project_id IS NULL OR EXISTS (
+                    SELECT 1 FROM projects p WHERE p.id=chat_threads.project_id AND p.status!='deleted'
+                    AND (p.user_id=? OR EXISTS(SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=? AND pm.status='active'))))
                 GROUP BY chat_threads.id
                 """,
-                (thread_id, user_id, user_id),
+                (thread_id, user_id, user_id, user_id, user_id),
             ).fetchone()
         return self._thread_payload(row) if row else None
 
@@ -2681,6 +2688,9 @@ class AvelinDatabase:
         expires_at = (now + timedelta(seconds=max(5, min(int(lease_seconds), 900)))).isoformat()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            managed_filter = ''
+            if run_id is None and connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='long_task_plans'").fetchone():
+                managed_filter = "AND NOT EXISTS (SELECT 1 FROM long_task_plans p WHERE p.run_id=task_runs.id AND p.status='approved')"
             connection.execute(
                 """
                 UPDATE task_runs
@@ -2693,12 +2703,13 @@ class AvelinDatabase:
                 (user_id, now.isoformat()),
             )
             row = connection.execute(
-                """
+                f"""
                 SELECT task_runs.id
                 FROM task_runs
                 JOIN tasks ON tasks.id = task_runs.task_id
                 WHERE task_runs.user_id = ? AND task_runs.state = 'queued'
                   AND (? IS NULL OR task_runs.id = ?)
+                  {managed_filter}
                 ORDER BY tasks.priority ASC, task_runs.created_at ASC
                 LIMIT 1
                 """,
@@ -3030,10 +3041,11 @@ class AvelinDatabase:
         run_id: str | None,
         task_id: str | None,
         payload: dict,
+        scope: str | None = None,
     ) -> dict:
         if kind not in {"run", "daily"}:
             raise ValueError("Unsupported task report kind.")
-        report_key = f"{kind}:{run_id or report_date}"
+        report_key = f"{kind}:{scope}:{report_date}" if scope else f"{kind}:{run_id or report_date}"
         with self.connect() as connection:
             existing = connection.execute(
                 "SELECT id FROM task_reports WHERE user_id = ? AND report_key = ?",
@@ -3716,13 +3728,13 @@ class AvelinDatabase:
     def decide_approval_request(self, user_id: str, approval_id: str, decision: str) -> dict | None:
         if decision not in {"approved", "denied", "revoked"}:
             raise ValueError("Unsupported approval decision.")
-        current = self.get_approval_request(user_id, approval_id)
-        if current is None:
-            return None
         allowed = {"pending"} if decision in {"approved", "denied"} else {"pending", "approved"}
-        if current["status"] not in allowed:
-            raise ValueError(f"Approval request is already {current['status']}.")
         with self.connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            current=connection.execute('SELECT * FROM approval_requests WHERE id=? AND user_id=?',(approval_id,user_id)).fetchone()
+            if current is None:return None
+            if _approval_is_expired(current) or current['status'] not in allowed:
+                raise ValueError(f"Approval request is already {'expired' if _approval_is_expired(current) else current['status']}.")
             connection.execute(
                 """
                 UPDATE approval_requests
@@ -3743,6 +3755,7 @@ class AvelinDatabase:
         step_id: str | None = None,
     ) -> dict | None:
         with self.connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
             rows = connection.execute(
                 """
                 SELECT * FROM approval_requests
@@ -3760,7 +3773,7 @@ class AvelinDatabase:
                     continue
                 if str(row["arguments_digest"]) != arguments_digest:
                     continue
-                if step_id and row["step_id"] and str(row["step_id"]) != step_id:
+                if row["step_id"] != step_id:
                     continue
                 connection.execute(
                     "UPDATE approval_requests SET status = 'consumed', consumed_at = CURRENT_TIMESTAMP WHERE id = ?",

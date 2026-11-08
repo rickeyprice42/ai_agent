@@ -92,7 +92,9 @@ class Settings:
     def load(cls, root_dir: Path) -> "Settings":
         load_dotenv(root_dir / ".env")
 
-        local_secrets = load_project_secrets(root_dir / "API_KEY.txt")
+        configured_secret_file = os.getenv("AVELIN_SECRET_FILE", "").strip()
+        secret_file = Path(configured_secret_file).expanduser() if configured_secret_file else root_dir / "API_KEY.txt"
+        local_secrets = load_project_secrets(secret_file)
         api_key = os.getenv("OLLAMA_API_KEY", "").strip() or local_secrets.get(
             "OLLAMA_API_KEY", ""
         )

@@ -1,0 +1,11 @@
+# Linux/server runtime. Windows-only desktop automation stays in requirements.txt.
+fastapi>=0.115.0,<1.0.0
+uvicorn>=0.30.0,<1.0.0
+httpx2>=2.13.1,<3.0.0
+tzdata>=2026.1
+playwright>=1.55.0,<2.0.0
+Pillow>=11.0.0,<13.0.0
+pypdf>=6.0.0,<7.0.0
+pywebpush>=2.0.0,<3.0.0
+pillow-heif>=1.0.0,<2.0.0
+lxml>=5.0.0,<7.0.0

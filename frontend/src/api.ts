@@ -21,6 +21,8 @@ import type {
 import type { ChatApprovalItem } from "./types";
 import type { AutomationRunItem } from "./types";
 import type { ConnectorItem } from "./types";
+import type { ChatRunSnapshot, ChatRunState } from "./types";
+import type { ChatQuestionItem } from "./types";
 
 function authHeaders(token: string): HeadersInit {
   return {
@@ -84,7 +86,7 @@ export async function sendMessage(
 }
 
 export type ChatStreamEvent = {
-  type: "delta" | "status" | "done" | "error" | "approval";
+  type: "delta" | "status" | "done" | "error" | "approval" | "clarification";
   text?: string;
   code?: string;
   thread_id: string;
@@ -94,7 +96,58 @@ export type ChatStreamEvent = {
   phase?: "started" | "completed" | "failed" | "blocked";
   round?: number;
   approval?: ChatApprovalItem;
+  question?: ChatQuestionItem;
+  run_id?: string;
+  seq?: number;
+  state?: ChatRunState;
+  outcome?: string;
 };
+
+export class ChatRunHttpError extends Error {
+  constructor(public status: number, message: string) { super(message); }
+}
+
+async function runRequest(path: string, token: string, method = "GET", body?: unknown, signal?: AbortSignal): Promise<ChatRunSnapshot | null> {
+  const encoded = body === undefined ? undefined : JSON.stringify(body);
+  const response = await fetch(`/api/${path}`, { method, cache: "no-store", headers: { ...authHeaders(token), "Content-Type": "application/json" },
+    ...(encoded === undefined ? {} : { body: encoded, keepalive: new TextEncoder().encode(encoded).byteLength < 60 * 1024 }), signal });
+  if (!response.ok) throw new ChatRunHttpError(response.status, (await parseError(response, "Не удалось получить состояние ответа.")).message);
+  return response.json();
+}
+
+export async function startChatRun(message: string, threadId: string, attachments: string[], requestId: string, token: string): Promise<ChatRunSnapshot> {
+  return (await runRequest("chat/runs", token, "POST", { message, thread_id: threadId, attachments, request_id: requestId }))!;
+}
+export async function startChatApprovalRun(threadId: string, approvalId: string, decision: "approved" | "denied", requestId: string, token: string): Promise<ChatRunSnapshot> {
+  return (await runRequest(`chats/${encodeURIComponent(threadId)}/approvals/${encodeURIComponent(approvalId)}/runs`, token, "POST", { request_id: requestId, decision }))!;
+}
+export async function startChatQuestionRun(threadId: string, questionId: string, answer: { option_id?: string; text?: string }, requestId: string, token: string): Promise<ChatRunSnapshot> {
+  return (await runRequest(`chats/${encodeURIComponent(threadId)}/questions/${encodeURIComponent(questionId)}/runs`, token, "POST", { request_id: requestId, ...answer }))!;
+}
+export async function fetchChatModelSettings(threadId: string, token: string): Promise<ModelSettings> {
+  const response=await fetch(`/api/chats/${encodeURIComponent(threadId)}/model-settings`,{cache:"no-store",headers:authHeaders(token)});
+  if(!response.ok)throw await parseError(response,"Не удалось загрузить модель чата.");
+  return response.json();
+}
+export async function updateChatModelSettings(threadId: string, token: string, settings: ModelSettings): Promise<ModelSettings> {
+  const response=await fetch(`/api/chats/${encodeURIComponent(threadId)}/model-settings`,{method:"PUT",headers:{...authHeaders(token),"Content-Type":"application/json"},body:JSON.stringify(settings)});
+  if(!response.ok)throw await parseError(response,"Не удалось изменить модель чата.");
+  return response.json();
+}
+export async function resetChatModelSettings(threadId: string, token: string): Promise<ModelSettings> {
+  const response=await fetch(`/api/chats/${encodeURIComponent(threadId)}/model-settings`,{method:"DELETE",headers:authHeaders(token)});
+  if(!response.ok)throw await parseError(response,"Не удалось вернуть модель по умолчанию.");
+  return response.json();
+}
+export function fetchChatRun(runId: string, token: string, signal?: AbortSignal) { return runRequest(`chat/runs/${encodeURIComponent(runId)}`, token, "GET", undefined, signal); }
+export function fetchChatRunByRequest(requestId: string, token: string, signal?: AbortSignal) { return runRequest(`chat/runs/by-request/${encodeURIComponent(requestId)}`, token, "GET", undefined, signal); }
+export function fetchActiveChatRun(threadId: string, token: string, signal?: AbortSignal) { return runRequest(`chats/${encodeURIComponent(threadId)}/runs/active`, token, "GET", undefined, signal); }
+export function cancelChatRun(runId: string, token: string) { return runRequest(`chat/runs/${encodeURIComponent(runId)}/cancel`, token, "POST"); }
+export async function subscribeChatRun(runId: string, after: number, token: string, signal: AbortSignal, onEvent: (event: ChatStreamEvent) => void) {
+  const response = await fetch(`/api/chat/runs/${encodeURIComponent(runId)}/events?after=${after}`, { cache: "no-store", headers: { ...authHeaders(token), Accept: "application/x-ndjson" }, signal });
+  if (!response.ok) throw new ChatRunHttpError(response.status, (await parseError(response, "Не удалось подключиться к ответу.")).message);
+  return consumeChatStream(response, onEvent, true);
+}
 
 export type ChatAttachment = { path: string; name: string; mime_type: string; size_bytes: number };
 
@@ -174,7 +227,7 @@ export async function decideChatApproval(threadId: string, approvalId: string, d
   return consumeChatStream(response, onEvent);
 }
 
-async function consumeChatStream(response: Response, onEvent: (event: ChatStreamEvent) => void): Promise<void> {
+async function consumeChatStream(response: Response, onEvent: (event: ChatStreamEvent) => void, durable = false): Promise<void> {
   if (!response.body) {
     throw new Error("Браузер не получил поток ответа.");
   }
@@ -188,7 +241,7 @@ async function consumeChatStream(response: Response, onEvent: (event: ChatStream
     const event = JSON.parse(line) as ChatStreamEvent;
     onEvent(event);
     if (event.type === "done") completed = true;
-    if (event.type === "error") throw new Error(event.text || "Провайдер прервал генерацию.");
+    if (event.type === "error" && !durable) throw new Error(event.text || "Провайдер прервал генерацию.");
   }
   try {
     while (true) {
@@ -200,7 +253,7 @@ async function consumeChatStream(response: Response, onEvent: (event: ChatStream
       if (done) break;
     }
     consume(buffer);
-    if (!completed) throw new Error("Соединение прервалось до завершения ответа. Частичный текст сохранён в чате.");
+    if (!completed && !durable) throw new Error("Соединение прервалось до завершения ответа. Частичный текст сохранён в чате.");
   } finally {
     try { await reader.cancel(); } catch { /* The request may already have been aborted. */ }
     reader.releaseLock();

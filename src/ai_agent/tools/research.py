@@ -14,7 +14,7 @@ import re
 from ai_agent.security import PROMPT_INJECTION_PATTERN
 from ai_agent.tools.base import ToolResult, failure_result
 from ai_agent.tools.browser import BrowserFailure, PlaywrightBrowserRunner
-from ai_agent.tools.http import HttpSandbox
+from ai_agent.tools.http import HttpSandbox, HttpTransportError, HttpAddressBlocked
 
 
 READABLE_CONTENT_TYPES = ("text/html", "application/xhtml+xml", "application/json", "text/plain")
@@ -149,6 +149,7 @@ class BrowserResearchReader:
         http_fields: dict[str, Any] = {}
         http_response: dict[str, Any] | None = None
         http_offer_failure: ResearchFailure | None = None
+        transport_failure: HttpTransportError | None = None
         if not force_browser:
             try:
                 http_response = self.http.fetch(
@@ -190,13 +191,21 @@ class BrowserResearchReader:
                         http_offer_failure = exc
             except ResearchFailure:
                 raise
+            except HttpAddressBlocked as exc:
+                raise ResearchFailure('private_network_blocked',str(exc)) from exc
+            except HttpTransportError as exc:
+                # Edge verifies HTTPS independently using the system trust store.
+                # Never disable certificate validation or retry a private target.
+                transport_failure = exc
             except ValueError as exc:
                 message = str(exc)
-                code = "private_network_blocked" if "private" in message.casefold() or "local" in message.casefold() else "http_failed"
+                code = "private_network_blocked" if message.startswith('Private, local, link-local') else "http_failed"
                 raise ResearchFailure(code, message, retryable=code == "http_failed") from exc
 
         available, reason = self.browser.availability()
         if not available:
+            if transport_failure:
+                raise ResearchFailure(transport_failure.code,str(transport_failure),True)
             raise ResearchFailure(
                 "unsupported_dynamic_page",
                 reason or "Dynamic page требует browser fallback, но он недоступен.",
@@ -212,6 +221,7 @@ class BrowserResearchReader:
         browser_fields = {
             "title": snapshot.get("title", ""),
             "main_text": snapshot.get("main_text", ""),
+            "main_text_truncated": snapshot.get("main_text_truncated", False),
             "lists": snapshot.get("lists", []),
             "tables": snapshot.get("tables", []),
             "json_ld": snapshot.get("json_ld", []),
@@ -219,6 +229,7 @@ class BrowserResearchReader:
             "images": snapshot.get("images", []),
             "script_count": snapshot.get("script_count", 0),
             **({"catalog_item": snapshot["catalog_item"]} if snapshot.get("catalog_item") else {}),
+            **({"http_fallback_reason": transport_failure.code} if transport_failure else {}),
         }
         refusal = _classify_refusal(snapshot.get("status") or 200, browser_fields, snapshot.get("url", url))
         if refusal:
@@ -416,6 +427,7 @@ def extract_public_page(body: str, headers: dict[str, str] | None = None) -> dic
     return {
         "title": _clean_text(" ".join(parser.title_parts))[:500],
         "main_text": main[:50000],
+        "main_text_truncated": len(main)>50000,
         "lists": parser.lists[:20],
         "tables": parser.tables[:10],
         "json_ld": parser.json_ld[:20],
@@ -457,7 +469,32 @@ def _research_result(*, url: str, locale: str, region: str, adapter: str, method
             fields["catalog_item"] = _catalog_item(adapter, url, fields)
     # Hydration payload is source data for item extraction, never raw model context.
     fields.pop("embedded_data", None)
+    bodies = []
+    def article_bodies(value, depth=0):
+        if depth > 7 or len(bodies) >= 10:
+            return
+        if isinstance(value,dict):
+            if isinstance(value.get('articleBody'),str):
+                bodies.append(_clean_text(value['articleBody']))
+            for item in list(value.values())[:60]:
+                article_bodies(item,depth+1)
+        elif isinstance(value,list):
+            for item in value[:50]:
+                article_bodies(item,depth+1)
+    article_bodies(fields.get('json_ld',[]))
+    main = str(fields.get('main_text',''))
+    preferred = max(bodies,key=len,default='')
+    if len(preferred) >= max(160,len(main)*0.7):
+        fields['main_text'] = preferred[:50000]
+        fields['main_text_source'] = 'json_ld.articleBody'
+    fields['json_ld'] = [_compact_structured_data(item,main_text=str(fields.get('main_text',''))) for item in fields.get('json_ld', [])[:20]]
+    fields['content_limits'] = {'main_text_limit':50000,'images_limit':100,'table_rows_limit':100,
+                                'main_text_truncated':len(preferred)>50000 if fields.get('main_text_source')=='json_ld.articleBody' else fields.get('main_text_truncated',False),
+                                'structured_text_policy':'articleBody omitted only when represented by main_text; long strings are excerpts'}
     _validate_adapter(adapter, url, region, catalog, fields)
+    main = _clean_text(str(fields.get('main_text','')))
+    if (not main or main == _clean_text(str(fields.get('title','')))) and not fields.get('json_ld') and not fields.get('catalog_item'):
+        raise ResearchFailure('no_public_evidence','Страница содержит только заголовок или пустую оболочку, извлекаемые публичные данные отсутствуют.')
     evidence = _evidence(fields, max_fragments)
     if not evidence:
         raise ResearchFailure("no_public_evidence", "Страница не содержит достаточных публичных данных для цитирования.")
@@ -477,6 +514,21 @@ def _research_result(*, url: str, locale: str, region: str, adapter: str, method
         "safety": {"untrusted_external_data": True, "prompt_injection_detected": injection},
         "support": SUPPORT_MATRIX.get(adapter, "supported_generic"),
     }
+
+
+def _compact_structured_data(value, depth=0, *, main_text=''):
+    """Keep public structured facts without duplicating entire article bodies."""
+    if isinstance(value, str):
+        return value if len(value) <= 2400 else value[:2400] + ' [structured text excerpt]'
+    if isinstance(value, list):
+        return [_compact_structured_data(item,depth+1,main_text=main_text) for item in value[:50]] if depth < 8 else []
+    if isinstance(value, dict):
+        if depth >= 8:
+            return {'_excerpt':'nested structured data omitted'}
+        return {key:_compact_structured_data(item,depth+1,main_text=main_text) for key,item in list(value.items())[:60]
+                if not (key=='articleBody' and isinstance(item,str) and main_text
+                        and (_clean_text(item) in main_text or main_text==_clean_text(item)[:50000]))}
+    return value
 
 
 def _validate_http_response(response: dict) -> None:
@@ -684,7 +736,8 @@ def _normalize_region(value: str) -> str:
 def _resolved_region(url: str, requested: str) -> str:
     if requested != "auto":
         return requested
-    return _region_from_path(parse.urlparse(url).path) or "unknown"
+    parsed = parse.urlparse(url)
+    return (_region_from_path(parsed.path) or 'unknown') if parsed.hostname in {'books.apple.com','tv.apple.com'} else 'unknown'
 
 
 def _region_from_path(path: str) -> str | None:

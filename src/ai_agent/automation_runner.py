@@ -64,6 +64,15 @@ class BudgetProvider:
 
 
 class LLMAutomationRunner:
+    allowed_tools = ALLOWED_TOOLS
+
+    def output_prefix(self, user_id, run):
+        with self.database.connect() as connection:
+            row = connection.execute('SELECT automation_id FROM automation_runs WHERE user_id=? AND task_run_id=?', (user_id, run['id'])).fetchone()
+        if row is None:
+            raise ValueError('Автоматизация для запуска не найдена.')
+        return f"automations/{row['automation_id']}/{run['id']}"
+
     def __init__(self,service):
         self.service=service;self.database=service.database
         self.worker_id='automation-agent-'+str(uuid4())
@@ -93,18 +102,16 @@ class LLMAutomationRunner:
         factory=getattr(self.service,'_automation_agent_factory',None)
         agent=self.service._agents.get(key)
         if agent is None:
-            settings=replace(self.service.settings_for_user(user_id),llm_timeout_seconds=min(30,max(1,int(run['budget'].get('max_seconds',300)))),llm_max_retries=0)
+            settings=replace(self.service.settings_for_user(user_id,link['thread_id']),llm_timeout_seconds=min(30,max(1,int(run['budget'].get('max_seconds',300)))),llm_max_retries=0)
             agent=factory(settings,user_id,link['thread_id']) if factory else Agent(settings,user_id=user_id,thread_id=link['thread_id'],task_queue_context=False)
             self.service._agents[key]=agent
         agent.task_queue_context=False
         agent.suppress_autonomous_memory=True
         agent.automation_disable_fallback_files=True
-        with self.database.connect() as connection:
-            row=connection.execute('SELECT automation_id FROM automation_runs WHERE user_id=? AND task_run_id=?',(user_id,run['id'])).fetchone()
-        agent.automation_output_prefix=f"automations/{row['automation_id']}/{run['id']}"
+        agent.automation_output_prefix=self.output_prefix(user_id,run)
         if not getattr(agent,'_automation_tools_scoped',False):
             registry=ToolRegistry()
-            for name in ALLOWED_TOOLS:
+            for name in self.allowed_tools:
                 if agent.tools.has(name):registry.register(agent.tools.get(name))
             agent.tools=registry;agent._automation_tools_scoped=True
         base=agent.provider.base if isinstance(agent.provider,BudgetProvider) else agent.provider
@@ -138,10 +145,13 @@ class LLMAutomationRunner:
         lock=self.service._chat_lock(user_id,thread['id'])
         if not lock.acquire(blocking=False):
             self._finish(user_id,run,agent,'failed','Диалог автоматизации занят.');return
-        prompt=(step.description if step else task.description)+'\n\n[Автоматический запуск]\nВыполни текущую просьбу целиком. Используй инструменты для актуальных фактов и ссылок. Для текстовых исследований сначала читай HTTP/DOM через research_read или browser_read; у browser_read указывай screenshot=false, если скриншот не требуется самой просьбой. Изображения статьи не нужно анализировать для чтения её текста. Не выдавай ошибки, непроверенные сведения или недоступные источники за подтверждение. Если задачу выполнить не удалось, укажи это явно. Новые файлы сохраняются в отдельной папке этого запуска. Ничего не отправляй и не публикуй без явного подтверждения.'
+        prompt=self.step_prompt(task,step)
         try:
             for _ in self.monitor(user_id,run,agent,agent.respond_stream(prompt)):pass
         finally:lock.release()
+
+    def step_prompt(self, task, step):
+        return (step.description if step else task.description)+'\n\n[Автоматический запуск]\nВыполни текущую просьбу целиком. Используй инструменты для актуальных фактов и ссылок. Для текстовых исследований сначала читай HTTP/DOM через research_read или browser_read; у browser_read указывай screenshot=false, если скриншот не требуется самой просьбой. Изображения статьи не нужно анализировать для чтения её текста. Не выдавай ошибки, непроверенные сведения или недоступные источники за подтверждение. Если задачу выполнить не удалось, укажи это явно. Новые файлы сохраняются в отдельной папке этого запуска. Ничего не отправляй и не публикуй без явного подтверждения.'
 
     def resume(self,user_id,thread_id,agent,events):
         link=self.get(user_id,thread_id=thread_id)

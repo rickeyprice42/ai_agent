@@ -72,6 +72,8 @@ def run() -> None:
             assert page.evaluate("AvelinSite.safeReturnPath('https://evil.example/steal')") == "/"
             assert page.evaluate("AvelinSite.safeReturnPath('//evil.example/steal')") == "/"
             assert page.evaluate("AvelinSite.safeConfiguredUrl('javascript:alert(1)', './download.html', true).endsWith('/download.html')")
+            assert page.evaluate("AvelinSite.safeConfiguredUrl('https://agent.tailnet.ts.net/', './app/', true)") == "https://agent.tailnet.ts.net/"
+            assert page.evaluate("AvelinSite.safeConfiguredUrl('https://evil.example/', './app/').startsWith(location.origin)")
             page.locator(".dialog-ok").click()
             page.get_by_role("button", name="Войти / Зарегистрироваться", exact=True).first.click()
             expect(page.get_by_role("dialog")).to_contain_text("не создаёт аккаунт")
@@ -123,7 +125,7 @@ def run() -> None:
 
     print("PASS: AVE-57 presentation, themes/languages, legal and download fallbacks")
     print("PASS: AVE-58 Windows/macOS/iPhone/iPad/Android routing and explicit override")
-    print("PASS: same-origin auth return guard and privacy-minimal CTA event payload")
+    print("PASS: same-origin return guard, configured HTTPS agent target and privacy-minimal CTA event payload")
     print("PASS: no horizontal overflow at 320/360/390/768/1280/1440px")
 
 

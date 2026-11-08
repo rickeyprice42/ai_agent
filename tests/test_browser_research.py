@@ -19,7 +19,7 @@ if str(SRC) not in sys.path:
 from ai_agent.agent import Agent
 from ai_agent.config import Settings
 from ai_agent.security import mark_untrusted_tool_output
-from ai_agent.tools.http import HttpSandbox, _SafeRedirectHandler
+from ai_agent.tools.http import HttpSandbox, HttpTransportError, HttpAddressBlocked, _SafeRedirectHandler
 from ai_agent.tools.browser import PlaywrightBrowserRunner
 from ai_agent.tools.research import (
     BrowserResearchReader,
@@ -102,6 +102,47 @@ PUBLIC_FIXTURES = [
 
 
 class BrowserResearchTests(unittest.TestCase):
+    def test_title_only_shell_is_not_successful_evidence_or_guessed_region(self):
+        result=research_read_result(BrowserResearchReader(FakeHttp(response('<title>Loading</title>')),FakeBrowser(available=False)),{'url':'https://example.com/vi'})
+        self.assertEqual(result.status,'failed')
+        self.assertEqual(result.error.code,'no_public_evidence')
+        data=BrowserResearchReader(FakeHttp(response('<main>Actual public text of the page.</main>')),FakeBrowser(available=False)).read(url='https://example.com/vi')
+        self.assertEqual(data['region'],'unknown')
+
+    def test_tls_transport_uses_verified_browser_fallback_and_is_not_private_network(self):
+        http=FakeHttp(HttpTransportError('tls_error','unable to get local issuer certificate'))
+        browser=FakeBrowser({'url':'https://example.com/article','title':'Verified browser article','status':200,
+                             'main_text':'Actual public article content. '*20})
+        result=BrowserResearchReader(http,browser).read(url='https://example.com/article')
+        self.assertEqual(result['extraction_method'],'browser')
+        self.assertEqual(result['fields']['http_fallback_reason'],'tls_error')
+        self.assertIn('Actual public article',result['fields']['main_text'])
+        unavailable=research_read_result(BrowserResearchReader(http,FakeBrowser(available=False)),{'url':'https://example.com/article'})
+        self.assertEqual(unavailable.error.code,'tls_error')
+
+    def test_private_address_never_gets_browser_transport_fallback(self):
+        browser=FakeBrowser()
+        result=research_read_result(BrowserResearchReader(FakeHttp(HttpAddressBlocked('Blocked private address')),browser),{'url':'https://example.com/article'})
+        self.assertEqual(result.error.code,'private_network_blocked')
+        self.assertEqual(browser.calls,0)
+
+    def test_jsonld_article_body_is_not_duplicated_but_dates_author_and_main_text_remain(self):
+        text='Distinct actual method and limitations. '*300
+        html='<title>Paper</title><main>'+text+'</main><script type="application/ld+json">'+json.dumps({'@type':'Article','articleBody':text,'author':{'name':'Research Team'},'datePublished':'2025-04-29'})+'</script>'
+        fields=BrowserResearchReader(FakeHttp(response(html)),FakeBrowser()).read(url='https://example.com/paper')['fields']
+        self.assertNotIn('articleBody',fields['json_ld'][0])
+        self.assertEqual(fields['json_ld'][0]['datePublished'],'2025-04-29')
+        self.assertIn('Distinct actual method',fields['main_text'])
+        self.assertEqual(fields['json_ld'][0]['author']['name'],'Research Team')
+
+    def test_jsonld_only_article_is_real_content_not_lost_when_body_is_empty(self):
+        text='Real article methodology and limitations. '*100
+        html='<title>Study</title><script type="application/ld+json">'+json.dumps({'@type':'Article','articleBody':text,'datePublished':'2025-05-01'})+'</script>'
+        fields=BrowserResearchReader(FakeHttp(response(html)),FakeBrowser()).read(url='https://example.com/study')['fields']
+        self.assertIn('methodology and limitations',fields['main_text'])
+        self.assertEqual(fields['main_text_source'],'json_ld.articleBody')
+        self.assertNotIn('articleBody',fields['json_ld'][0])
+
     def test_image_references_keep_table_row_identity_and_are_bounded(self):
         html = '<main><p>Public visual catalog for comparing models.</p><table>' + ''.join(
             f'<tr><td>{i}</td><td><img src="/assets/{i}.png" alt="Preview {i}"></td><td>model_{i}</td></tr>'

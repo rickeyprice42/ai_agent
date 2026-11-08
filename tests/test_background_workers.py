@@ -14,7 +14,7 @@ from ai_agent.config import Settings
 from ai_agent.database import AvelinDatabase
 from ai_agent.memory import MemoryStore
 from ai_agent.types import Message, ModelResponse
-from backend.main import _title_worker, _push_worker, _automation_scheduler, _automation_queue_worker
+from backend.main import _title_worker, _push_worker, _automation_scheduler, _automation_queue_worker, _long_task_worker
 from backend.service import AgentService
 
 
@@ -62,7 +62,7 @@ class BackgroundWorkersTests(unittest.TestCase):
         self.assertEqual(calls,['delivered'])
 
     def test_schedule_keeps_ticking_while_one_model_run_blocks_the_consumer(self):
-        gate=Event();running=Event();ticks=[];limits=[]
+        gate=Event();running=Event();ticks=[];limits=[];reports=[]
         async def exercise():
             stop=asyncio.Event();loop=asyncio.get_running_loop()
             class Service:
@@ -72,6 +72,8 @@ class BackgroundWorkersTests(unittest.TestCase):
                     return []
                 def process_automation_queue(self,limit):
                     limits.append(limit);running.set();gate.wait(2);return []
+                def daily_long_task_reports(self):
+                    reports.append('checked');return []
             with patch('backend.main.agent_service',Service()),patch('backend.main.AUTOMATION_POLL_SECONDS',.01):
                 scheduler=asyncio.create_task(_automation_scheduler(stop));consumer=asyncio.create_task(_automation_queue_worker(stop))
                 try:await asyncio.wait_for(stop.wait(),1)
@@ -79,6 +81,19 @@ class BackgroundWorkersTests(unittest.TestCase):
         asyncio.run(exercise())
         self.assertGreaterEqual(len(ticks),3)
         self.assertEqual(limits,[1])
+        self.assertGreaterEqual(len(reports),3)
+
+    def test_approved_long_tasks_have_an_independent_single_consumer(self):
+        calls=[]
+        async def exercise():
+            stop=asyncio.Event();loop=asyncio.get_running_loop()
+            class Service:
+                def process_long_task_queue(self,limit):
+                    calls.append(limit);loop.call_soon_threadsafe(stop.set);return []
+            with patch('backend.main.agent_service',Service()):
+                await _long_task_worker(stop)
+        asyncio.run(exercise())
+        self.assertEqual(calls,[1])
 
 
 if __name__=='__main__':unittest.main()

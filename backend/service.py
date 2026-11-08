@@ -115,7 +115,7 @@ class AgentService:
         key = (user_id, active_thread["id"])
         if key not in self._agents:
             agent = Agent(
-                self.settings_for_user(user_id),
+                self.settings_for_user(user_id,active_thread['id']),
                 user_id=user_id,
                 thread_id=active_thread["id"],
             )
@@ -144,8 +144,8 @@ class AgentService:
             return threads[0]
         return self.database.create_chat_thread(user_id, title="New chat")
 
-    def settings_for_user(self, user_id: str) -> Settings:
-        model_settings = self._normalized_model_settings(user_id)
+    def settings_for_user(self, user_id: str, thread_id: str | None = None) -> Settings:
+        model_settings = self.chat_model_settings(user_id,thread_id) if thread_id else self._normalized_model_settings(user_id)
         return replace(
             self.settings,
             model_provider=model_settings["provider"],
@@ -281,6 +281,13 @@ class AgentService:
         model_name: str,
         ollama_url: str | None = None,
     ) -> dict[str, str]:
+        self._validate_model_choice(provider,model_name)
+        settings = self.database.set_model_settings(user_id=user_id,provider=provider,model_name=model_name,ollama_url=ollama_url)
+        for key in [key for key in self._agents if key[0] == user_id]:
+            self._agents.pop(key, None)
+        return settings
+
+    def _validate_model_choice(self,provider,model_name):
         allowed = {item["provider"]: item["models"] for item in self.available_models()}
         if provider not in allowed:
             raise ValueError("Неподдерживаемый provider.")
@@ -293,15 +300,28 @@ class AgentService:
         if model_name not in allowed[provider]:
             raise ValueError("Модель не найдена для выбранного provider.")
 
-        settings = self.database.set_model_settings(
-            user_id=user_id,
-            provider=provider,
-            model_name=model_name,
-            ollama_url=ollama_url,
-        )
-        for key in [key for key in self._agents if key[0] == user_id]:
-            self._agents.pop(key, None)
-        return settings
+    def chat_model_settings(self,user_id,thread_id):
+        from backend.thread_models import ThreadModels
+        self.resolve_thread(user_id,thread_id)
+        selected=ThreadModels(self.database).get(user_id,thread_id)
+        return {**(selected or self._normalized_model_settings(user_id)),'override':selected is not None}
+
+    def update_chat_model_settings(self,user_id,thread_id,provider=None,model_name=None,ollama_url=None,reset=False):
+        from backend.thread_models import ThreadModels
+        self.resolve_thread(user_id,thread_id)
+        lock=self._chat_lock(user_id,thread_id)
+        if not lock.acquire(blocking=False):raise ChatBusyError('Дождись завершения ответа перед сменой модели в этом чате.')
+        try:
+            detached=getattr(self,'_chat_run_service',None)
+            if detached:detached.assert_available(user_id,thread_id)
+            store=ThreadModels(self.database)
+            if reset:store.reset(user_id,thread_id)
+            else:
+                self._validate_model_choice(provider,model_name)
+                store.set(user_id,thread_id,provider,model_name,ollama_url)
+            self._agents.pop((user_id,thread_id),None)
+            return self.chat_model_settings(user_id,thread_id)
+        finally:lock.release()
 
     def _image_consent_paths(self, user_id: str, paths: list[str] | None) -> set[str]:
         root=self.user_workspace(user_id).resolve()
@@ -354,6 +374,8 @@ class AgentService:
 
     def chat(self, message: str, user_id: str, thread_id: str | None = None, *, attachment_paths: list[str] | None = None,display_message: str | None=None) -> dict[str, str]:
         thread=self.resolve_thread(user_id,thread_id)
+        detached=getattr(self,'_chat_run_service',None)
+        if detached:detached.assert_available(user_id,thread['id'])
         lock=self._chat_lock(user_id,thread['id'])
         if not lock.acquire(blocking=False):
             raise ChatBusyError('В этом чате уже выполняется запрос. Дождись ответа или останови его.')
@@ -392,6 +414,8 @@ class AgentService:
 
     def chat_stream(self, message: str, user_id: str, thread_id: str | None = None, *, attachment_paths: list[str] | None = None,display_message: str | None=None):
         thread=self.resolve_thread(user_id,thread_id)
+        detached=getattr(self,'_chat_run_service',None)
+        if detached:detached.assert_available(user_id,thread['id'])
         lock=self._chat_lock(user_id,thread['id'])
         if not lock.acquire(blocking=False):
             raise ChatBusyError('В этом чате уже выполняется запрос. Дождись ответа или останови его.')
@@ -412,6 +436,8 @@ class AgentService:
 
     def decide_chat_approval(self,user_id: str,thread_id: str,approval_id: str,decision: str):
         self.resolve_thread(user_id,thread_id)
+        detached=getattr(self,'_chat_run_service',None)
+        if detached:detached.assert_available(user_id,thread_id)
         if decision not in {'approved','denied'}:
             raise ValueError('Выберите approved или denied.')
         agent=self.agent_for_user(user_id,thread_id)
@@ -427,24 +453,61 @@ class AgentService:
         try:
             if pending['status']!='pending':
                 raise ChatBusyError('Это действие уже обработано.')
+            runner=self._durable_chat_runner(user_id,thread_id)
+            durable=runner.get(user_id,thread_id=thread_id)
+            if durable:
+                run=self.database.get_task_run(user_id,durable['run_id'])
+                if not run or run['state']!='waiting_approval':
+                    raise ValueError('Запуск приостановлен или завершён. Возобновите его перед подтверждением действия.')
             agent.policy.decide(approval_id,decision)
             agent.action_log.record('approval_decision',decision,{'approval_id':approval_id},'Chat action decision.')
             if decision=='denied':
                 agent.pending_chat_actions.finish(user_id,thread_id,approval_id,'denied')
                 text=f"Действие {pending['tool_name']} отклонено."
                 agent.memory.append_message(Message('assistant',text))
-                from ai_agent.automation_runner import LLMAutomationRunner
-                LLMAutomationRunner(self).deny(user_id,thread_id)
+                runner.deny(user_id,thread_id)
                 events=iter(({'type':'delta','text':text},{'type':'done'}))
             else:
                 events=agent.resume_chat_action_stream(approval_id)
-                from ai_agent.automation_runner import LLMAutomationRunner
-                runner=LLMAutomationRunner(self)
                 events=runner.resume(user_id,thread_id,agent,events) if runner.get(user_id,thread_id=thread_id) else self._chat_completion_events(events,user_id,thread_id,agent)
             return thread_id,_LockedEventStream(events,lock)
         except BaseException:
             lock.release()
             raise
+
+    def _durable_chat_runner(self,user_id,thread_id):
+        from ai_agent.long_tasks import LongTaskPlans, LongTaskRunner
+        from ai_agent.automation_runner import LLMAutomationRunner
+        plans = LongTaskPlans(self.database,user_id).for_thread(thread_id)
+        return LongTaskRunner(self) if any(plan.get('work_thread_id')==thread_id for plan in plans) else LLMAutomationRunner(self)
+
+    def answer_chat_question(self,user_id,thread_id,question_id,request_id,option_id=None,text=None):
+        self.resolve_thread(user_id,thread_id)
+        detached=getattr(self,'_chat_run_service',None)
+        if detached:detached.assert_available(user_id,thread_id)
+        lock=self._chat_lock(user_id,thread_id)
+        if not lock.acquire(blocking=False):raise ChatBusyError('В этом чате уже выполняется запрос.')
+        agent=self.agent_for_user(user_id,thread_id)
+        try:
+            project=self._shared_project_for_thread(user_id,self.resolve_thread(user_id,thread_id))
+            if project:self._ensure_shared_writer(project)
+            pending=agent.pending_questions.get(user_id,thread_id,question_id)
+            source=next((row for row in self.database.list_messages(thread_id) if row['id']==pending['source_message_id']),None)
+            paths=[item['path'] for item in (source or {}).get('artifacts',[]) if item.get('_user_attachment') and item.get('path')]
+            agent.policy.image_attachment_consent=self._image_consent_paths(user_id,paths)
+            question=agent.pending_questions.answer(user_id,thread_id,question_id,request_id,option_id,text)
+            events=self._chat_completion_events(agent.resume_question_stream(question,question['answer']),user_id,thread_id,agent)
+            return thread_id,_LockedEventStream(events,lock,lambda:setattr(agent.policy,'image_attachment_consent',set()))
+        except BaseException:
+            agent.policy.image_attachment_consent=set();lock.release();raise
+
+    def process_long_task_queue(self,limit=1):
+        from ai_agent.long_tasks import process_long_tasks
+        return process_long_tasks(self,limit)
+
+    def daily_long_task_reports(self):
+        from ai_agent.long_tasks import daily_long_task_reports
+        return daily_long_task_reports(self.database)
 
     def _chat_stream_unlocked(self, message: str, user_id: str, thread_id: str | None = None):
         thread = self.resolve_thread(user_id, thread_id)
@@ -465,6 +528,9 @@ class AgentService:
 
     def _notify_chat_completion(self, user_id: str, thread_id: str, message_id: str | None, outcome: str):
         if outcome != "completed" or not message_id:
+            return
+        detached = getattr(self, '_chat_run_service', None)
+        if detached is not None and not detached.claim_completion(user_id,thread_id):
             return
         thread = self.database.get_chat_thread(user_id, thread_id)
         if thread is None or thread.get("deleted_at"):
@@ -674,6 +740,13 @@ class AgentService:
         return self.database.list_task_checkpoints(user_id, run_id)
 
     def control_task(self, user_id: str, task_id: str, action: str) -> dict:
+        from ai_agent.long_tasks import LongTaskPlans
+        store=LongTaskPlans(self.database,user_id)
+        with self.database.connect() as connection:
+            plan=connection.execute('SELECT id FROM long_task_plans WHERE task_id=? AND user_id=?',(task_id,user_id)).fetchone()
+        if plan:
+            result=store.control(plan['id'],action)
+            return {'task':result['task'],'run':result['run']}
         agent = self.agent_for_user(user_id)
         manager = agent.tasks
         handlers = {
@@ -1154,7 +1227,7 @@ class AgentService:
         agent = self.agent_for_user(user_id, active_thread["id"])
         memory = agent.memory.snapshot()
         user = self.database.get_user(user_id)
-        model_settings = self._normalized_model_settings(user_id)
+        model_settings = self.chat_model_settings(user_id,active_thread['id'])
         active_project = None
         if active_thread.get("project_id"):
             active_project = self.database.get_project(user_id, str(active_thread["project_id"]))
@@ -1180,6 +1253,7 @@ class AgentService:
             "action_logs": [_action_log_to_payload(log) for log in agent.action_log.recent(limit=20)],
             "approval_requests": self.database.list_approval_requests(user_id, status="pending"),
             "chat_approvals": agent.pending_chat_actions.list(user_id,active_thread['id']),
+            "chat_questions": agent.pending_questions.list(user_id,active_thread['id']),
             "permission_grants": self.database.list_permission_grants(user_id, active_only=True),
             "extension_proposals": self.database.list_extension_proposals(user_id),
             "connectors": agent.connectors.list(),

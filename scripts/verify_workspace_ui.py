@@ -95,10 +95,15 @@ def run():
     data = fixture()
     stream_requests = []
     model_requests = []
+    chat_models = {}
     attachment_requests = []
     approval_decisions = []
     automation_starts = []
     chat_creations = []
+    chat_creation_payloads = []
+    project_creations = []
+    chat_plans = []
+    plan_decisions = []
     avatar_state = {"bytes": None}
     preview_authorizations = []
     push_requests = []
@@ -112,9 +117,46 @@ def run():
     stream_mode = "complete"
     reject_model = False
     pending_routes = []
+    chat_runs, request_runs, latest_runs = {}, {}, {}
+    cancelled_runs = []
+    api_requests = []
     settings = dict(autonomous_enabled=False, health_autonomous_enabled=False, updated_at=NOW)
+    def public_run(item):
+        return None if item is None else {key:value for key,value in item.items() if not key.startswith('_')}
+    def make_run(payload, reply=None):
+        existing = request_runs.get(payload['request_id'])
+        if existing: return chat_runs[existing]
+        identifier = f'fixture-run-{len(chat_runs)+1}'
+        user = next((item for item in reversed(data['history']) if item['role']=='user'),None) if reply else None
+        item = {'run_id':identifier,'request_id':payload['request_id'],'thread_id':payload['thread_id'],'state':'running','text':'','latest_seq':0,'message_id':identifier+'-assistant','user_message_id':user.get('id') if user else identifier+'-user','user_text':user['content'] if user else payload['message'],'attachments':payload.get('attachments',[]),'artifacts':[],'approvals':[], 'cancel_requested':False,'_mode':'continuation' if reply else stream_mode,'_reply':reply,'_events':None}
+        if not reply:
+            data['history'] = [{'id':item['user_message_id'],'role':'user','content':payload['message'],'status':'complete','artifacts':[{'path':path,'name':'photo.png' if path.endswith('.png') else 'test-note.txt','extension':'.png' if path.endswith('.png') else '.txt','size_bytes':24} for path in payload.get('attachments',[])]}]
+        data['history'].append({'id':item['message_id'],'role':'assistant','content':'','status':'pending'})
+        chat_runs[identifier] = item; request_runs[payload['request_id']] = identifier; latest_runs[payload['thread_id']] = identifier
+        return item
+    def run_events(item):
+        if item['_events'] is not None: return item['_events']
+        mode = item['_mode']; thread = item['thread_id']
+        if mode == 'truncated':
+            item['text'] = 'Частичный текст'
+            events = [{'type':'delta','text':item['text']}]
+        elif mode == 'approval':
+            approval = {'id':'approval-fixture','thread_id':thread,'tool_name':'http_request','risk':'external','scope':{'host':'example.test'},'arguments':{'url':'https://example.test','Authorization':'[REDACTED]'},'summary':'Отправить запрос на example.test','status':'pending','expires_at':NOW}
+            item['approvals'] = [approval]; data['chat_approvals'] = [approval]
+            item['state'] = 'waiting_approval';item['text']='Нужно подтверждение действия.'
+            events = [{'type':'approval','approval':approval},{'type':'delta','text':item['text']},{'type':'done','state':'waiting_approval','outcome':'waiting_approval'}]
+        else:
+            item['text'] = item['_reply'] or 'Тестовый ответ готов.';item['state']='completed'
+            events = [{'type':'status','text':'Продолжаю после решения' if item['_reply'] else 'Читаю файл…','tool':'read_file','phase':'started'},{'type':'status','text':'Файл прочитан','tool':'read_file','phase':'completed'},{'type':'delta','text':item['text']},{'type':'done','state':'completed','outcome':'completed'}]
+        for seq,event in enumerate(events,1): event.update(seq=seq,run_id=item['run_id'],thread_id=thread)
+        item['latest_seq']=len(events);item['_events']=events
+        row=next((row for row in data['history'] if row.get('id')==item['message_id']),None)
+        if row: row.update(content=item['text'],status='pending' if mode=='truncated' else 'complete')
+        next((thread for thread in data['chat_threads'] if thread['id']==item['thread_id']),data['active_thread'])['message_count']=len(data['history'])
+        return events
     def route_api(route):
         path = urlparse(route.request.url).path
+        api_requests.append(route.request.method + ' ' + route.request.url)
         if path == "/api/health":
             body = {"status":"ok"} if legacy_runtime else {"status":"ok","runtime":{"contract":2},"restart_required":False}
         elif path == "/api/auth/me":
@@ -143,7 +185,7 @@ def run():
             body = {"enabled":push_enabled,"public_key":"BC" + "A" * 85 if push_enabled else None,"reason":"Тестовый сервер не отправляет push."}
         elif path.startswith("/api/notifications/push/"):
             push_requests.append({"path":path,"method":route.request.method,"body":route.request.post_data_json,"authorization":route.request.headers.get("authorization")})
-            body = {"ok":True,"queued":1,"subscription_id":"push-fixture"}
+            body = {"state":"pending"} if "/push/test/" in path else {"ok":True,"queued":1,"state":"pending","subscription_id":"push-fixture"}
         elif path == "/api/auth/logout":
             body = {"ok":True}
         elif path == "/api/bootstrap":
@@ -156,6 +198,20 @@ def run():
             body = data
         elif path == "/api/models":
             body = [{"provider": "mock", "label": "Тестовая модель", "models": ["preview", "preview-alternative"], "description": "Preview"}]
+        elif path == "/api/home/suggestions":
+            body = {"basic":[],"advanced":[],"personal":[],"personalization_enabled":False}
+        elif path.startswith("/api/chats/") and path.endswith("/model-settings"):
+            thread = path.split("/")[3]
+            if route.request.method == "PUT":
+                payload = route.request.post_data_json
+                model_requests.append(payload)
+                if reject_model:
+                    route.fulfill(status=503,json={"detail":"Модель временно недоступна"});return
+                chat_models[thread] = {**payload,"override":True}
+            elif route.request.method == "DELETE": chat_models.pop(thread,None)
+            body = chat_models.get(thread,{"provider":data["provider"],"model_name":data["model"],"ollama_url":"","override":False})
+        elif path.endswith("/media"):
+            body = {"thread_id":path.split("/")[3],"images":[],"files":[],"links":[],"next_before":None}
         elif path == "/api/model-settings":
             payload = route.request.post_data_json
             model_requests.append(payload)
@@ -179,12 +235,18 @@ def run():
             body = personal_records
         elif path == "/api/projects" and route.request.method == "POST":
             payload = route.request.post_data_json
-            project = dict(data["projects"][0], id="shared-group", title=payload["title"], description=payload.get("description", ""), shared=payload.get("shared", False), agent_mode="mention_only", role="owner")
+            project = dict(data["projects"][0], id="shared-group" if payload.get("shared") else f"private-project-{len(project_creations)+1}", title=payload["title"], description=payload.get("description", ""), shared=payload.get("shared", False), agent_mode="mention_only", role="owner")
+            project_creations.append(project["id"])
             data["projects"].append(project)
             body = {"project": project}
+        elif path.startswith("/api/projects/") and route.request.method == "PATCH":
+            project = next(item for item in data["projects"] if item["id"] == path.split("/")[3])
+            project.update({key:value for key,value in route.request.post_data_json.items() if key in {"title","description"}})
+            project["revision"] += 1
+            body = {"project":project}
         elif path.endswith("/invitations") and route.request.method == "POST":
             body = {"id":"invite-test", "project_id":"shared-group", "email":route.request.post_data_json.get("email", ""), "role":"editor", "status":"pending", "expires_at":NOW, "created_at":NOW, "token":"test-invite-token"}
-        elif path.endswith("/runs"):
+        elif path.startswith("/api/automations/") and path.endswith("/runs"):
             automation = next((item for item in data["automations"] if item["id"] in path), None)
             body = [automation["last_run"]] if automation and automation.get("last_run") else []
         elif path.startswith("/api/automations/") and path.endswith("/run"):
@@ -193,56 +255,56 @@ def run():
             run = {"id":"manual-run", "automation_id":automation["id"], "scheduled_for":NOW,"task_id":"manual-task", "task_run_id":"manual-task-run", "state":"completed","budget":{},"usage":{},"created_at":NOW,"finished_at":NOW,"result":"Автоматизация подготовила документ.","artifacts":[],"thread_id":data["chat_threads"][0]["id"],"outcome":"completed","approval_ids":[]}
             automation["last_run"] = run
             body = {**run,"state":"queued"}
-        elif "/approvals/" in path and path.endswith("/decision"):
-            decision = route.request.post_data_json["decision"]
-            approval_decisions.append(decision)
+        elif "/approvals/" in path and path.endswith("/runs"):
+            incoming = route.request.post_data_json
+            decision = incoming["decision"]; approval_decisions.append(decision)
             data["chat_approvals"] = []
             reply = "Разрешённое действие завершено." if decision == "approved" else "Действие отклонено."
-            data["history"].append({"role":"assistant","status":"complete","content":reply})
-            events = [{"type":"status","text":"Продолжаю после решения", "thread_id":data["active_thread"]["id"]},{"type":"delta","text":reply,"thread_id":data["active_thread"]["id"]},{"type":"done","thread_id":data["active_thread"]["id"]}]
-            route.fulfill(status=200, content_type="application/x-ndjson",body="\n".join(json.dumps(event,ensure_ascii=False) for event in events)+"\n")
-            return
-        elif path.endswith(("/compactions", "/members", "/invitations", "/shared-items")):
+            body = public_run(make_run({"request_id":incoming["request_id"],"thread_id":path.split("/")[3],"message":""},reply))
+        elif path.startswith("/api/long-tasks/") and path.endswith("/decision"):
+            payload = route.request.post_data_json
+            plan_decisions.append(payload)
+            chat_plans[0]["status"] = "approved" if payload["decision"] == "approved" else "rejected"
+            chat_plans[0]["run"] = {"state":"queued","usage":{}}
+            body = chat_plans[0]
+        elif path.endswith("/plans"):
+            body = chat_plans
+        elif path.endswith(("/compactions", "/members", "/invitations", "/shared-items", "/plans")):
             body = []
         elif path == "/api/chats" and route.request.method == "POST":
             payload = route.request.post_data_json
+            chat_creation_payloads.append(payload)
             shared = any(project["id"] == payload.get("project_id") and project.get("shared") for project in data["projects"])
             thread = next((item for item in data["chat_threads"] if payload.get("reuse_empty") and not payload.get("title") and not shared and item.get("project_id") == payload.get("project_id") and item["message_count"] == 0 and item["title"] in {"Новый диалог", "New chat"} and not item.get("pinned")), None)
             if thread is None:
-                thread = dict(data["chat_threads"][0], id="group-thread" if payload.get("project_id") else "new-thread" if not chat_creations else f"new-thread-{len(chat_creations)+1}", project_id=payload.get("project_id"), title=payload.get("title") or "Новый диалог", message_count=0)
+                thread = dict(data["chat_threads"][0], id="group-thread" if shared else f"project-thread-{len(chat_creations)+1}" if payload.get("project_id") else "new-thread" if not chat_creations else f"new-thread-{len(chat_creations)+1}", project_id=payload.get("project_id"), title=payload.get("title") or "Новый диалог", message_count=0)
                 data["chat_threads"].insert(0, thread)
                 chat_creations.append(thread["id"])
             data["active_thread"] = thread
             data["history"] = []
             body = {"thread": thread}
-        elif path == "/api/chat/stream":
-            payload = route.request.post_data_json
-            stream_requests.append(payload)
-            if stream_mode == "hold":
-                pending_routes.append(route)
-                return
+        elif path == "/api/chat/runs" and route.request.method == "POST":
+            payload = route.request.post_data_json; stream_requests.append(payload)
             if stream_mode == "error":
-                route.fulfill(status=503, json={"detail": "Провайдер временно недоступен. Повтори запрос позже."})
-                return
-            if stream_mode == "truncated":
-                route.fulfill(status=200, content_type="application/x-ndjson", body=json.dumps({"type": "delta", "thread_id": payload["thread_id"], "text": "Частичный текст"}, ensure_ascii=False) + "\n")
-                return
-            if stream_mode == "approval":
-                approval = {"id":"approval-fixture","thread_id":payload["thread_id"],"tool_name":"http_request","risk":"external","scope":{"host":"example.test"},"arguments":{"url":"https://example.test","Authorization":"[REDACTED]"},"summary":"Отправить запрос на example.test", "status":"pending","expires_at":NOW}
-                data["chat_approvals"] = [approval]
-                data["history"] = [{"role":"user","content":payload["message"],"status":"complete"},{"role":"assistant","content":"Нужно подтверждение действия.","status":"complete"}]
-                events = [{"type":"approval","approval":approval,"thread_id":payload["thread_id"]},{"type":"delta","text":"Нужно подтверждение действия.","thread_id":payload["thread_id"]},{"type":"done","thread_id":payload["thread_id"]}]
-                route.fulfill(status=200,content_type="application/x-ndjson",body="\n".join(json.dumps(event,ensure_ascii=False) for event in events)+"\n")
-                return
-            data["history"] = [{"role": "user", "content": payload["message"], "status": "complete", "artifacts":[{"path":path,"name":"photo.png" if path.endswith(".png") else "test-note.txt","extension":".png" if path.endswith(".png") else ".txt","size_bytes":24} for path in payload.get("attachments",[])]},
-                               {"role": "assistant", "content": "Тестовый ответ готов.", "status": "complete"}]
-            data["active_thread"]["message_count"] = 2
-            events = [{"type": "status", "thread_id": payload["thread_id"], "text": "Читаю файл…", "tool": "read_file", "phase": "started"},
-                      {"type": "status", "thread_id": payload["thread_id"], "text": "Файл прочитан", "tool": "read_file", "phase": "completed"},
-                      {"type": "delta", "thread_id": payload["thread_id"], "text": "Тестовый ответ готов."},
-                      {"type": "done", "thread_id": payload["thread_id"]}]
-            route.fulfill(status=200, content_type="application/x-ndjson", body="\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n")
-            return
+                route.fulfill(status=503,json={"detail":"Провайдер временно недоступен. Повтори запрос позже."});return
+            body = public_run(make_run(payload))
+        elif path.startswith("/api/chat/runs/by-request/"):
+            body = public_run(chat_runs.get(request_runs.get(path.rsplit("/",1)[1])))
+        elif path.endswith("/runs/active"):
+            body = public_run(chat_runs.get(latest_runs.get(path.split("/")[3])))
+        elif path.startswith("/api/chat/runs/"):
+            item = chat_runs[path.split("/")[4]]
+            if path.endswith("/events"):
+                if item["_mode"] == "hold" and item["state"] == "running":
+                    pending_routes.append(route);return
+                after = int(parse_qs(urlparse(route.request.url).query).get("after",["0"])[0])
+                events = [event for event in run_events(item) if event["seq"] > after]
+                route.fulfill(content_type="application/x-ndjson",body="".join(json.dumps(event,ensure_ascii=False)+"\n" for event in events));return
+            if path.endswith("/cancel"):
+                cancelled_runs.append(item["run_id"]);item["state"]="cancelled";item["cancel_requested"]=True
+                row=next((row for row in data["history"] if row.get("id")==item["message_id"]),None)
+                if row:row.update(content=item["text"] or "Генерация остановлена.",status="cancelled")
+            body = public_run(item)
         elif path.startswith("/api/workspace/files/"):
             route.fulfill(status=200, content_type="application/octet-stream", body="Synthetic download fixture")
             return
@@ -250,7 +312,7 @@ def run():
             unexpected.append(path)
             route.fulfill(status=404, json={"detail": "Unmocked API"})
             return
-        route.fulfill(status=200, json=body)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body,ensure_ascii=False))
 
     with (OUT / "preview.log").open("w", encoding="utf-8") as log:
         server = subprocess.Popen([str(node), str(FRONTEND / "node_modules/vite/bin/vite.js"),
@@ -271,7 +333,7 @@ def run():
                 context.route("**/api/**", route_api)
                 page = context.new_page()
                 page.on("pageerror", lambda error: errors.append(str(error)))
-                page.goto(URL)
+                page.goto(URL + "/?view=home")
                 expect(page.get_by_role("heading", name="На чём продолжим?")).to_be_visible()
                 expect(page.locator(".recent-card")).to_have_count(3)
                 assert page.locator(".sidebar .panel").count() == 0
@@ -338,7 +400,7 @@ def run():
                 page.screenshot(path=str(OUT / "workspace-chat.png"), full_page=True)
                 results.append("recent card opens saved chat; search and selection work")
                 picker = page.get_by_role("combobox", name="Модель для диалога")
-                with page.expect_response(lambda response: urlparse(response.url).path == "/api/model-settings"):
+                with page.expect_response(lambda response: urlparse(response.url).path.endswith("/model-settings") and response.request.method == "PUT"):
                     picker.select_option(label="preview-alternative")
                 expect(picker).to_have_value(json.dumps(["mock", "preview-alternative"], separators=(",", ":")))
                 expect(picker).to_be_enabled()
@@ -364,6 +426,7 @@ def run():
                     dict(seed,id="pinned-empty",title="New chat",message_count=0,pinned=True),
                 ])
                 page.reload()
+                navigate(page, "Главная")
                 expect(page.locator(".recent-card")).to_have_count(3)
                 navigate(page,"Диалоги")
                 expect(page.locator(".chat-list-item")).to_have_count(6)
@@ -433,8 +496,81 @@ def run():
                 expect(page.get_by_role("textbox", name="Сообщение Avelin")).not_to_have_attribute("placeholder", "Сообщение группе · @Avelin для обращения к агенту")
                 expect(page.locator(".message-role")).to_have_count(0)
                 results.append("separate shared-group create/chat/settings/invite flow; private chat stays unlabelled and has no mention hint")
+                private_project = next(project for project in data["projects"] if project["id"] == "project-1")
+                data["projects"].append(dict(private_project,id="project-other",title="Учёба"))
+                seed_thread = data["chat_threads"][0]
+                data["chat_threads"].extend([dict(seed_thread,id="alpha-project-chat",project_id="project-1",title="План релиза Core",message_count=4),dict(seed_thread,id="other-project-chat",project_id="project-other",title="Только учебный проект",message_count=2)])
+                memberships = {thread["id"]:thread.get("project_id") for thread in data["chat_threads"]}
+                page.reload()
+                navigate(page, "Главная")
+                expect(page.locator(".recent-card").first).to_be_visible()
+                navigate(page,"Проекты")
+                expect(page.locator(".project-card")).to_have_count(2)
+                assert "Семья" not in page.locator(".project-grid").inner_text()
+                page.locator(".project-card").filter(has_text="Core Agent").click()
+                expect(page.locator(".project-detail-header h2")).to_have_text("Core Agent")
+                expect(page.locator(".project-thread")).to_have_count(1)
+                expect(page.locator(".project-thread")).to_contain_text("План релиза Core")
+                assert "Только учебный проект" not in page.locator(".project-workspace").inner_text()
+                page.reload()
+                expect(page.locator(".project-detail-header h2")).to_have_text("Core Agent")
+                page.screenshot(path=str(OUT / "workspace-project-desktop.png"))
+                page.locator(".project-thread").click()
+                expect(page.locator(".chat-list-item")).to_have_count(1)
+                expect(page.locator(".chat-header")).to_contain_text("План релиза Core")
+                page.reload()
+                expect(page.locator(".chat-header")).to_contain_text("План релиза Core")
+                page.get_by_role("button",name="Открыть проект Core Agent",exact=True).click()
+                page.locator(".project-new-chat").click()
+                expect(page.locator(".chat-header")).to_contain_text("Новый диалог")
+                assert chat_creation_payloads[-1]["project_id"] == "project-1"
+                assert all(next(thread for thread in data["chat_threads"] if thread["id"] == identifier).get("project_id") == project_id for identifier,project_id in memberships.items())
+                page.set_viewport_size({"width":390,"height":844})
+                page.get_by_role("button",name="Открыть проект Core Agent",exact=True).click()
+                expect(page.locator(".project-thread")).to_have_count(2)
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.screenshot(path=str(OUT / "workspace-project-mobile.png"))
+                page.get_by_role("navigation",name="Путь проекта").get_by_role("button",name="Проекты",exact=True).click()
+                page.get_by_role("button",name="Новый проект",exact=True).last.click()
+                project_dialog = page.get_by_role("dialog",name="Новый проект",exact=True)
+                project_dialog.get_by_role("textbox",name="Название проекта",exact=True).fill("Тихий проект")
+                project_dialog.get_by_role("textbox",name="Описание проекта",exact=True).fill("Отдельная рабочая область")
+                count_before = len(chat_creations)
+                project_dialog.get_by_role("button",name="Создать проект",exact=True).click()
+                expect(page.locator(".project-detail-header h2")).to_have_text("Тихий проект")
+                expect(page.locator(".project-thread")).to_have_count(0)
+                assert len(chat_creations) == count_before, "creating a project must not create an empty chat"
+                page.get_by_role("button",name="Настройки проекта",exact=True).click()
+                project_settings = page.get_by_role("dialog",name="Настройки проекта",exact=True)
+                project_settings.get_by_role("textbox",name="Название проекта",exact=True).fill("Личный проект")
+                project_settings.get_by_role("button",name="Сохранить изменения",exact=True).click()
+                expect(page.locator(".project-detail-header h2")).to_have_text("Личный проект")
+                navigate(page,"Диалоги")
+                expect(page.locator(".chat-browser-list")).not_to_contain_text("План релиза Core")
+                expect(page.locator(".chat-browser-list")).not_to_contain_text("Только учебный проект")
+                page.set_viewport_size({"width":1440,"height":900})
+                results.append("projects open a separate scoped workspace/chat; new project chat retains scope and existing histories; mobile back/create/settings and personal/shared isolation")
+                chat_plans.append({"id":"plan-fixture","title":"Проверяемый план работы","goal":"Подготовить итоговый отчёт с источниками.","steps":["Проверить исходные данные","Собрать результаты","Проверить документ"],"acceptance_checks":["Источники сохранены","Результат можно скачать"],"status":"draft","revision":1,"digest":"fixture-plan-digest","budget":{"max_steps":20,"max_seconds":600,"max_tokens":6000}})
+                page.goto(URL + "/?view=home")
+                expect(page.locator(".recent-card").first).to_be_visible()
+                page.locator(".recent-card").first.click()
+                expect(page.get_by_role("region",name="Планы и ход работы")).to_contain_text("Проверяемый план работы")
+                page.screenshot(path=str(OUT / "workspace-plan-desktop.png"))
+                page.set_viewport_size({"width":390,"height":844})
+                assert page.locator(".composer").evaluate("e => e.getBoundingClientRect().bottom <= innerHeight + 1")
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                page.locator(".long-task-plans").evaluate("e => e.scrollTop=e.scrollHeight")
+                page.screenshot(path=str(OUT / "workspace-plan-mobile.png"))
+                page.get_by_role("button",name="Утвердить и начать",exact=True).click()
+                expect(page.locator(".long-task-card")).to_contain_text("В очереди")
+                assert plan_decisions == [{"decision":"approved","revision":1,"digest":"fixture-plan-digest","timezone":page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")}]
+                chat_plans.clear()
+                page.goto(URL + "/?view=home")
+                page.set_viewport_size({"width":1440,"height":900})
+                results.append("thread-scoped plan card shows steps/checks/budget, keeps mobile composer reachable and submits exact revision/digest approval")
                 personal_records = populate(data)
                 page.reload()
+                navigate(page, "Главная")
                 expect(page.locator(".recent-card").first).to_be_visible()
                 failures = []
                 for theme in ["light", "dark"]:
@@ -473,7 +609,7 @@ def run():
                      "artifacts": [{"path": "test.docx", "name": long_name + ".docx", "extension": ".docx", "size_bytes": 4096}]}
                 ]
                 data["active_thread"]["title"] = long_name
-                page.reload()
+                page.goto(URL + "/?view=home")
                 expect(page.locator(".recent-card").first).to_be_visible()
                 page.locator(".recent-card").first.click()
                 expect(page.locator(".message-artifacts")).to_be_visible()
@@ -523,7 +659,7 @@ def run():
                 for route in pending_routes:
                     route.abort()
                 expect(page.get_by_role("button", name="Отправить", exact=True)).to_be_visible()
-                page.get_by_role("button", name="Закрыть сообщение об ошибке").click()
+                assert len(cancelled_runs) == 1
                 stream_mode = "error"
                 page.get_by_role("textbox", name="Сообщение Avelin").fill("Проверка ошибки провайдера")
                 page.get_by_role("button", name="Отправить", exact=True).click()
@@ -537,10 +673,12 @@ def run():
                 stream_mode = "truncated"
                 page.get_by_role("textbox", name="Сообщение Avelin").fill("Проверка разрыва потока")
                 page.get_by_role("button", name="Отправить", exact=True).click()
-                expect(page.locator(".workspace-error")).to_contain_text("Соединение прервалось")
-                expect(page.locator(".message-failed").last).to_contain_text("Частичный текст")
-                results.append("truncated stream is marked failed and partial text remains visible")
-                page.get_by_role("button", name="Закрыть сообщение об ошибке").click()
+                expect(page.get_by_role("status",name="Состояние ответа")).to_contain_text("восстанавливаем подключение")
+                expect(page.locator(".message-assistant").last).to_contain_text("Частичный текст")
+                assert page.locator(".message-assistant").last.get_attribute("class").find("message-failed") < 0
+                page.get_by_role("button",name="Остановить",exact=True).click()
+                expect(page.get_by_role("button",name="Отправить",exact=True)).to_be_visible()
+                results.append("truncated subscriber preserves partial response, reconnects and only explicit cancel stops server run")
                 for decision, label, reply in [("approved","Разрешить","Разрешённое действие завершено."),("denied","Отклонить","Действие отклонено.")]:
                     stream_mode = "approval"
                     page.get_by_role("textbox", name="Сообщение Avelin").fill("Запрос с подтверждением")
@@ -555,8 +693,6 @@ def run():
                     expect(popup).to_contain_text("[REDACTED]")
                     if decision == "approved":
                         page.reload()
-                        expect(page.locator(".recent-card").first).to_be_visible()
-                        page.locator(".recent-card").first.click()
                         expect(popup).to_be_visible()
                         expect(popup).to_contain_text("Отправить запрос на example.test")
                     page.screenshot(path=str(OUT / f"workspace-mobile-approval-{decision}.png"))
@@ -582,7 +718,7 @@ def run():
                     const originalFetch=window.fetch.bind(window);
                     window.fetch=async (...args) => {
                         const response=await originalFetch(...args);
-                        if(String(args[0]) !== '/api/chat/stream') return response;
+                        if(!String(args[0]).includes('/events?after=')) return response;
                         window.fetch=originalFetch;
                         const reader=response.body.getReader();
                         return new Response(new ReadableStream({start(controller) {
@@ -597,6 +733,7 @@ def run():
                 page.get_by_role("button",name="Отправить",exact=True).click()
                 expect(page.locator(".attachment-chip")).to_have_count(0)
                 expect(page.get_by_role("button",name="Остановить",exact=True)).to_be_visible()
+                page.wait_for_function("typeof window.finishAcceptedStream === 'function'")
                 page.evaluate("window.finishAcceptedStream()")
                 expect(page.get_by_role("button",name="Отправить",exact=True)).to_be_visible()
                 expect(page.locator(".sent-image img")).to_be_visible()
@@ -609,8 +746,6 @@ def run():
                 assert original_download.value.suggested_filename == "photo.png"
                 image_dialog.get_by_role("button",name="Закрыть окно").click()
                 page.reload()
-                expect(page.locator(".recent-card").first).to_be_visible()
-                page.locator(".recent-card").first.click()
                 expect(page.locator(".sent-image img")).to_be_visible()
                 assert preview_authorizations and all(value == "Bearer fixture-token" for value in preview_authorizations)
                 results.append("sent image preview/lightbox/original download use authorization and survive history refresh")
@@ -618,7 +753,7 @@ def run():
                 touch_context.add_init_script("localStorage.setItem('avelin-auth-token','fixture-token');")
                 touch_context.route("**/api/**",route_api)
                 touch_page=touch_context.new_page()
-                touch_page.goto(URL)
+                touch_page.goto(URL + "/?view=home")
                 home_input=touch_page.get_by_role("textbox",name="Новая задача")
                 home_input.fill("Первая строка")
                 home_input.press("Enter")
@@ -651,7 +786,7 @@ def run():
                 push_context.route("**/api/**",route_api)
                 push_page=push_context.new_page()
                 push_page.on("pageerror",lambda error: errors.append(str(error)))
-                push_page.goto(URL)
+                push_page.goto(URL + "/?view=home")
                 expect(push_page.get_by_role("heading",name="На чём продолжим?")).to_be_visible()
                 navigate(push_page,"Настройки")
                 expect(push_page.get_by_role("button",name="Включить уведомления",exact=True)).to_be_enabled()
@@ -669,7 +804,7 @@ def run():
                 push_page.get_by_role("button",name="Выйти",exact=True).click()
                 expect(push_page.get_by_role("button",name="Вход",exact=True)).to_be_visible()
                 assert push_page.evaluate("pushProbe.unsubscribed") == 2
-                assert [request["method"] for request in push_requests] == ["PUT","POST","DELETE","PUT","DELETE"]
+                assert [request["method"] for request in push_requests if request["method"] != "GET"] == ["PUT","POST","DELETE","PUT","DELETE"]
                 assert all(request["authorization"] == "Bearer fixture-token" for request in push_requests)
                 push_context.close()
                 results.append("push opt-in requests permission only on click; authenticated subscribe/test/unsubscribe/logout contracts (mock, not physical delivery)")
@@ -684,7 +819,7 @@ def run():
                 assert page.evaluate("localStorage.getItem('avelin-active-thread')") != "unavailable-notification-chat"
                 results.append("notification deep-link selects authenticated target chat once; unavailable chat safely falls back without exposing another account")
                 legacy_runtime = True
-                page.goto(URL)
+                page.goto(URL + "/?view=home")
                 expect(page.get_by_role("status",name="Обновление сервера")).to_contain_text("Перезапусти Avelin через лаунчер")
                 legacy_runtime = False
                 page.reload()
@@ -695,7 +830,7 @@ def run():
                 auth_context = browser.new_context(viewport={"width": 1440, "height": 900}, reduced_motion="reduce")
                 auth_page = auth_context.new_page()
                 auth_page.on("pageerror", lambda error: errors.append(str(error)))
-                auth_page.goto(URL)
+                auth_page.goto(URL + "/?view=home")
                 for width in [1440, 768, 390, 320]:
                     auth_page.set_viewport_size({"width": width, "height": 900})
                     for title in ["Вход", "Регистрация"]:
@@ -713,7 +848,7 @@ def run():
                 results.append("no JavaScript errors or unexpected API calls")
                 browser.close()
         except Exception as error:
-            (OUT / "results.json").write_text(json.dumps({"status": "failed", "error": str(error), "completed_checks": results}, ensure_ascii=False, indent=2), encoding="utf-8")
+            (OUT / "results.json").write_text(json.dumps({"status": "failed", "error": str(error), "completed_checks": results, "api_requests":api_requests[-45:],"runs":[public_run(item) for item in chat_runs.values()]}, ensure_ascii=False, indent=2), encoding="utf-8")
             raise
         finally:
             server.terminate()

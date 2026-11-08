@@ -6,6 +6,7 @@ from io import BytesIO
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -57,6 +58,13 @@ def main():
         agent_service.database.add_message('user', 'Проверка изображения', thread_id=thread['id'],
             artifacts=[{**descriptor, '_user_attachment': True, '_display_content': 'Проверка изображения'}])
         agent_service.database.add_message('assistant', 'Фотография получена.', thread_id=thread['id'])
+        project_a = client.post('/api/projects', headers=headers, json={'title':'Core workspace','description':'Личный проект A'}).json()['project']
+        project_b = client.post('/api/projects', headers=headers, json={'title':'Study workspace','description':'Личный проект B'}).json()['project']
+        shared = client.post('/api/projects', headers=headers, json={'title':'Shared team','shared':True}).json()['project']
+        for project, title, content in [(project_a,'Alpha project chat','ALPHA_ONLY_CONTEXT'),(project_b,'Beta project chat','BETA_ONLY_CONTEXT'),(shared,'Shared chat','SHARED_ONLY_CONTEXT')]:
+            scoped = client.post('/api/chats', headers=headers,json={'title':title,'project_id':project['id']}).json()['thread']
+            agent_service.database.add_message('user',content,thread_id=scoped['id'])
+            agent_service.database.add_message('assistant','Контекст сохранён.',thread_id=scoped['id'])
         # A preview must remain protected even if another authenticated user knows the exact path.
         assert client.get('/api/workspace/preview', params={'path': descriptor['path']},
             headers={'Authorization': 'Bearer ' + other['token']}).status_code == 404
@@ -143,8 +151,7 @@ def main():
                     expect(page.get_by_role('alert')).to_be_in_viewport()
                     failure['path'] = '/api/notifications/push/config'
                     page.reload()
-                    expect(page.get_by_role('heading',name='На чём продолжим?')).to_be_visible()
-                    navigate('Настройки')
+                    expect(page.get_by_role('heading',name='Настройки',exact=True)).to_be_visible()
                     expect(page.locator('.push-settings')).to_contain_text('запущенной версии сервера')
                     assert 'Not Found' not in page.locator('.push-settings').inner_text()
                     failure['path'] = ''
@@ -166,8 +173,6 @@ def main():
 
                     failure['path'] = '/api/workspace/preview'
                     page.reload()
-                    expect(page.locator('.recent-card')).to_be_visible()
-                    page.locator('.recent-card').first.tap()
                     expect(page.locator('.sent-image-fallback')).to_contain_text('запущенной версии сервера')
                     with page.expect_download() as download:
                         page.locator('.sent-image-fallback').get_by_role('button',name='Скачать оригинал',exact=True).tap()
@@ -193,6 +198,36 @@ def main():
                     assert stored and stored[0]['timezone'] == 'Europe/Moscow'
                     assert not errors, errors
                     checks.append('device timezone defaults compactly; invalid IANA rejected; chosen timezone reaches real automation API')
+                    with agent_service.database.connect() as connection:
+                        original_messages = [tuple(row) for row in connection.execute('SELECT id,thread_id,role,content FROM messages ORDER BY id')]
+                    navigate('Проекты')
+                    expect(page.locator('.project-card')).to_have_count(2)
+                    page.locator('.project-card').filter(has_text='Core workspace').tap()
+                    expect(page.locator('.project-detail-header h2')).to_have_text('Core workspace')
+                    expect(page.locator('.project-thread')).to_have_count(1)
+                    expect(page.locator('.project-thread')).to_contain_text('Alpha project chat')
+                    page.locator('.project-thread').tap()
+                    expect(page.locator('.messages')).to_contain_text('ALPHA_ONLY_CONTEXT')
+                    expect(page.locator('.messages')).not_to_contain_text('BETA_ONLY_CONTEXT')
+                    page.get_by_role('button',name='Открыть проект Core workspace',exact=True).tap()
+                    page.locator('.project-new-chat').tap()
+                    expect(page.locator('.chat-header strong')).to_have_text(re.compile(r'^(New chat|Новый диалог)$'))
+                    scoped_threads = client.get('/api/chats',headers=headers,params={'project_id':project_a['id']}).json()
+                    assert len(scoped_threads) == 2 and all(item['project_id'] == project_a['id'] for item in scoped_threads)
+                    page.get_by_role('button',name='Открыть проект Core workspace',exact=True).tap()
+                    page.screenshot(path=str(OUT / 'iphone-real-project-workspace.png'))
+                    page.get_by_role('navigation',name='Путь проекта').get_by_role('button',name='Проекты',exact=True).tap()
+                    expect(page.locator('.project-card')).to_have_count(2)
+                    navigate('Диалоги')
+                    expect(page.locator('.chat-browser-list')).not_to_contain_text('Alpha project chat')
+                    expect(page.locator('.chat-browser-list')).not_to_contain_text('Beta project chat')
+                    page.locator('.chat-list-item').filter(has_text='Фото с iPhone').tap()
+                    expect(page.locator('.messages')).to_contain_text('Фотография получена.')
+                    expect(page.locator('.messages')).not_to_contain_text('ALPHA_ONLY_CONTEXT')
+                    with agent_service.database.connect() as connection:
+                        self_same = [tuple(row) for row in connection.execute('SELECT id,thread_id,role,content FROM messages ORDER BY id')]
+                    assert self_same == original_messages, 'project navigation/new draft must not move or rewrite existing messages'
+                    checks.append('real API project workspace scopes history, creates only its own draft, excludes shared/personal chats and preserves all original messages')
                     browser.close()
                 (OUT / 'results.json').write_text(json.dumps({'status':'passed','engine':engine,
                     'checks':checks,'requests':requests,'limitations':'ASGI integration with simulated phone/status-bar; physical iPhone push delivery not tested.'},ensure_ascii=False,indent=2),encoding='utf-8')

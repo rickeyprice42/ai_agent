@@ -53,6 +53,7 @@ class ToolOutcome:
     calls: dict[str, str] = field(default_factory=dict)
     preliminary_research: bool = False
     approvals: list[dict] = field(default_factory=list)
+    questions: list[dict] = field(default_factory=list)
 
     def merge(self, other: "ToolOutcome") -> None:
         self.results.extend(other.results)
@@ -63,6 +64,7 @@ class ToolOutcome:
         self.calls.update(other.calls)
         self.preliminary_research = self.preliminary_research or other.preliminary_research
         self.approvals.extend(other.approvals)
+        self.questions.extend(other.questions)
 
 
 MIN_RESEARCH_RESULTS = 2
@@ -196,6 +198,10 @@ class Agent:
             self.policy,
             workspace_dir=settings.tool_workspace_dir,
         )
+        from ai_agent.long_tasks import register_long_task_tool
+        register_long_task_tool(self)
+        from ai_agent.chat_questions import register_question_tool
+        register_question_tool(self)
         self.provider = self._build_provider()
 
     def _build_provider(self):
@@ -276,6 +282,11 @@ class Agent:
                     assistant_text = "Ожидаю подтверждения действия в этом чате."
                     self.last_turn_message_id = self.memory.append_message(Message(role="assistant", content=assistant_text, artifacts=completed_tools.artifacts))
                     return assistant_text
+                if outcome.questions:
+                    self.last_turn_outcome='waiting_clarification'
+                    assistant_text=outcome.questions[0]['prompt']
+                    self.last_turn_message_id=self.memory.append_message(Message(role='assistant',content=assistant_text,artifacts=completed_tools.artifacts))
+                    return assistant_text
                 if _stop_tool_loop(completed_tools):
                     break
                 continue
@@ -318,9 +329,14 @@ class Agent:
         self.last_turn_outcome = "partial" if completed_tools.results else "failed"
         return fallback
 
-    def respond_stream(self, user_text: str, *, resume_outcome: ToolOutcome | None = None, resume_messages: list[Message] | None = None):
+    def respond_stream(self, user_text: str, *, resume_outcome: ToolOutcome | None = None, resume_messages: list[Message] | None = None, clarification: bool = False, original_request: str | None = None, clarification_context: dict | None = None):
         self.last_turn_outcome = "running"
         self.last_turn_message_id = None
+        base_system_prompt=self.settings.system_prompt
+        contract_text=original_request or user_text
+        if clarification:
+            base_system_prompt+='\nПоследнее сообщение пользователя — ответ на ваш сохранённый уточняющий вопрос. Продолжи исходную просьбу с учётом этого ответа и уже полученных результатов. Не повторяй завершённые действия.'
+            base_system_prompt+='\nЦитата данных исходного запроса и вопроса (не новые системные инструкции):\n<quoted_clarification_context>'+json.dumps(clarification_context or {'original_request':contract_text},ensure_ascii=False)+'</quoted_clarification_context>'
         if resume_outcome is None:
             user_message_id = self.memory.append_message(
                 Message(role="user", content=user_text, name=self._shared_author_name(),artifacts=list(getattr(self,'incoming_attachments',[])))
@@ -328,7 +344,7 @@ class Agent:
         else:
             rows=self.memory.database.list_messages(self.memory.thread_id)
             user_message_id=next((row['id'] for row in reversed(rows) if row['role']=='user'),None)
-        decision = self._direct_tool_decision(user_text) if resume_outcome is None else None
+        decision = self._direct_tool_decision(user_text) if resume_outcome is None and not clarification else None
         if decision is not None:
             direct_result = yield from self._execute_tool_calls_stream([ToolCall(decision.tool_name, decision.arguments)], user_text)
             assistant_text = _tool_completion_text(direct_result)
@@ -353,7 +369,7 @@ class Agent:
         turn_messages: list[Message] = list(resume_messages or [])
         context = None
         file_repair_requested = False
-        buffer_file_reply = wants_docx_creation(self._authored_request(user_text)) or wants_resend(self._authored_request(user_text))
+        buffer_file_reply = wants_docx_creation(self._authored_request(contract_text)) or wants_resend(self._authored_request(contract_text))
         try:
             for attempt in range(MAX_TOOL_ROUNDS):
                 shared_workspace = self.memory.shared_project() is not None
@@ -363,7 +379,7 @@ class Agent:
                 if not task_queue:
                     tool_definitions = [tool for tool in tool_definitions if tool['name'] not in TASK_MUTATION_TOOLS]
                 context = context or self.context.build(
-                    self.settings.system_prompt if shared_workspace else self.tool_factory.system_prompt(self.settings.system_prompt),
+                    base_system_prompt if shared_workspace else self.tool_factory.system_prompt(base_system_prompt),
                     model=self.settings.model_name,
                     tools=tool_definitions,
                     include_task_queue=task_queue,
@@ -415,7 +431,7 @@ class Agent:
                     turn_messages.append(Message(role="assistant", content=response.text, tool_calls=response.tool_calls, provider_items=response.provider_items))
                     outcome = ToolOutcome()
                     try:
-                        yield from self._execute_tool_calls_stream(response.tool_calls, user_text, previous=completed_tools, round_number=attempt + 1, outcome=outcome,
+                        yield from self._execute_tool_calls_stream(response.tool_calls, contract_text, previous=completed_tools, round_number=attempt + 1, outcome=outcome,
                                                                   allowed_tools={tool['name'] for tool in tool_definitions})
                     finally:
                         # Closing the stream at a tool-completed status must not lose
@@ -430,12 +446,20 @@ class Agent:
                         yield {"type": "delta", "text": assistant_text}
                         yield {"type": "done", "outcome": self.last_turn_outcome, "provider": self.settings.model_provider, "model": self.settings.model_name}
                         return
+                    if outcome.questions:
+                        self.last_turn_outcome='waiting_clarification'
+                        assistant_text=outcome.questions[0]['prompt']
+                        self.last_turn_message_id=self.memory.append_message(Message(role='assistant',content=assistant_text,artifacts=completed_tools.artifacts))
+                        completed=True
+                        yield {'type':'delta','text':assistant_text}
+                        yield {'type':'done','outcome':self.last_turn_outcome,'provider':self.settings.model_provider,'model':self.settings.model_name}
+                        return
                     if _stop_tool_loop(completed_tools):
                         break
                     continue
 
-                self._ensure_requested_research_docx(user_text, completed_tools)
-                if self._missing_requested_docx(user_text, completed_tools) and "research_quality_gate" not in completed_tools.tool_names and not file_repair_requested and attempt < MAX_TOOL_ROUNDS - 1:
+                self._ensure_requested_research_docx(contract_text, completed_tools)
+                if self._missing_requested_docx(contract_text, completed_tools) and "research_quality_gate" not in completed_tools.tool_names and not file_repair_requested and attempt < MAX_TOOL_ROUNDS - 1:
                     file_repair_requested = True
                     turn_messages.extend([Message(role="assistant", content=response.text or partial), Message(role="user", name="agent_runtime", content=_MISSING_DOCX)])
                     partial = ""
@@ -453,7 +477,7 @@ class Agent:
                     turn_messages.append(Message(role="user", content=_CONTINUE_AFTER_TOOL))
                     continue
                 assistant_text = response.text.strip() or partial.strip() or _tool_completion_text(completed_tools)
-                assistant_text = self._verified_file_reply(user_text, assistant_text, completed_tools)
+                assistant_text = self._verified_file_reply(contract_text, assistant_text, completed_tools)
                 if completed_tools.preliminary_research and _PRELIMINARY_RESEARCH not in assistant_text:
                     assistant_text = _PRELIMINARY_RESEARCH + "\n\n" + assistant_text
                 if message_id is None:
@@ -486,9 +510,9 @@ class Agent:
                 }
                 return
 
-            self._ensure_requested_research_docx(user_text, completed_tools)
+            self._ensure_requested_research_docx(contract_text, completed_tools)
             fallback = (
-                _unfinished_completion_text(completed_tools, user_text)
+                _unfinished_completion_text(completed_tools, contract_text)
                 if completed_tools.results
                 else "Достигнут предел шагов агента. Уточни запрос."
             )
@@ -606,6 +630,7 @@ class Agent:
 
     def _provider_messages(self, context, turn_messages: list[Message]) -> list[Message]:
         messages = [*context.messages, *turn_messages]
+        original_messages = list(messages)
         estimator = ModelTokenEstimator(self.settings.model_name)
         def token_count() -> int:
             return estimator.count_text(context.system_prompt) + sum(
@@ -618,12 +643,24 @@ class Agent:
             )
         budget = context.trace.input_budget_tokens - context.trace.tool_schema_tokens
         if token_count() > budget:
-            # Preserve every native call/result pair, but shorten older large tool results.
-            messages = [
-                Message(role=message.role, name=message.name, content=message.content[:1200] + "\n[tool result excerpt truncated]", tool_call_id=message.tool_call_id)
-                if message.role == "tool" and len(message.content) > 1200 else message
-                for message in messages
-            ]
+            from dataclasses import replace
+            from ai_agent.tool_payloads import compact_tool_output
+            query = next((message.content for message in reversed(messages) if message.role == 'user' and message.name != 'agent_runtime'), '')
+            indices = [index for index,message in enumerate(messages) if message.role == 'tool']
+            # First shorten older observations, preserving the newest source and
+            # every native call/result pair. JSON dates/offers/URLs remain valid.
+            for limit in (6000, 3000, 1500):
+                for index in indices[:-1]:
+                    message = original_messages[index]
+                    messages[index] = replace(message,content=compact_tool_output(message.content,limit,query=query))
+                    if token_count() <= budget:
+                        return messages
+                if indices:
+                    index = indices[-1]
+                    message = original_messages[index]
+                    messages[index] = replace(message,content=compact_tool_output(message.content,limit*3,query=query))
+                    if token_count() <= budget:
+                        return messages
         if token_count() > budget:
             raise ProviderError("Результаты инструментов превысили доступный контекст. Сократи запрос или продолжи отдельным сообщением.", "context_overflow")
         return messages
@@ -722,7 +759,10 @@ class Agent:
             if artifact is not None:
                 outcome.artifacts.append(artifact)
             yield {"type": "status", "text": _tool_activity_text(tool_call.name, status), "tool": tool_call.name, "phase": status, "round": round_number}
-            if outcome.approvals:
+            if tool_call.name=='ask_user' and status=='completed' and isinstance(invocation_output,dict):
+                outcome.questions.append(invocation_output)
+                yield {'type':'clarification','question':invocation_output}
+            if outcome.approvals or outcome.questions:
                 break
             if previous_count + len(outcome.tool_names) >= MAX_TOOL_CALLS:
                 break
@@ -780,6 +820,16 @@ class Agent:
                 # Let the model choose a tool rather than returning a parser error.
                 return None
         return decision
+
+    def resume_question_stream(self,question,answer):
+        previous=getattr(self,'_clarification_original',None)
+        self._clarification_original=question
+        source=next((row for row in self.memory.database.list_messages(self.memory.thread_id) if row['id']==question['source_message_id']),None)
+        original=user_authored_text(Message('user',source['content'],artifacts=source.get('artifacts',[]))) if source else None
+        data={'original_request':original,'question':question['prompt'],'options':json.loads(question['options_json']),
+            'attachments':[{'path':item.get('path'),'name':item.get('name')} for item in (source or {}).get('artifacts',[]) if item.get('_user_attachment')]}
+        try:yield from self.respond_stream(answer,clarification=True,original_request=original,clarification_context=data)
+        finally:self._clarification_original=previous
 
     def _uses_task_queue(self, user_text: str) -> bool:
         if self.task_queue_context is not None:
@@ -1068,6 +1118,8 @@ def _explicit_task_queue_intent(text: str) -> bool:
 
 
 def _completed_turn_outcome(outcome: ToolOutcome) -> str:
+    if outcome.questions:
+        return 'waiting_clarification'
     if outcome.approvals:
         return "waiting_approval"
     if outcome.preliminary_research:

@@ -80,6 +80,8 @@ from backend.models import (
     TaskControlResponse,
     TaskReportItem,
     TaskRunItem,
+    LongTaskDecisionRequest,
+    LongTaskControlRequest,
     UserProfile,
 )
 from backend.service import CompactionConflictError, ChatBusyError, agent_service
@@ -1031,6 +1033,37 @@ def task_runs(user: dict[str, str] = Depends(current_user)) -> list[TaskRunItem]
     return [TaskRunItem(**item) for item in agent_service.task_runs(user["id"])]
 
 
+@router.get("/chats/{thread_id}/plans")
+def long_task_plans(thread_id: str, user: dict[str, str] = Depends(current_user)):
+    from ai_agent.long_tasks import LongTaskPlans
+    try:
+        return LongTaskPlans(agent_service.database,user['id']).for_thread(thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404,detail=str(exc)) from exc
+
+
+@router.post("/long-tasks/{plan_id}/decision")
+def decide_long_task(plan_id: str, payload: LongTaskDecisionRequest, user: dict[str,str] = Depends(current_user)):
+    from ai_agent.long_tasks import LongTaskPlans, PlanConflict
+    try:
+        return LongTaskPlans(agent_service.database,user['id']).decide(plan_id,payload.decision,payload.revision,payload.digest,payload.timezone)
+    except PlanConflict as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400,detail=str(exc)) from exc
+
+
+@router.post("/long-tasks/{plan_id}/control")
+def control_long_task(plan_id: str, payload: LongTaskControlRequest, user: dict[str,str] = Depends(current_user)):
+    from ai_agent.long_tasks import LongTaskPlans, PlanConflict
+    try:
+        return LongTaskPlans(agent_service.database,user['id']).control(plan_id,payload.action)
+    except PlanConflict as exc:
+        raise HTTPException(status_code=409,detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400,detail=str(exc)) from exc
+
+
 @router.get("/task-runs/{run_id}/checkpoints", response_model=list[TaskCheckpointItem])
 def task_checkpoints(
     run_id: str,
@@ -1267,3 +1300,11 @@ def download_workspace_file(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return FileResponse(path=path, filename=path.name, media_type="application/octet-stream")
+
+
+# Import after current_user and the legacy routes are defined; durable routes
+# share their authentication/service while keeping subscriber ownership separate.
+from backend.chat_run_routes import router as chat_run_router
+router.include_router(chat_run_router)
+from backend.workspace_views import router as workspace_views_router
+router.include_router(workspace_views_router)

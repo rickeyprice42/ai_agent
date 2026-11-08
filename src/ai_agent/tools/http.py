@@ -5,12 +5,13 @@ from html.parser import HTMLParser
 from urllib import error, parse, request
 from xml.etree import ElementTree
 from collections import Counter
-import gzip
 import ipaddress
 import json
 import logging
 import re
 import socket
+import ssl
+from time import monotonic
 import zlib
 
 
@@ -19,6 +20,7 @@ BLOCKED_HEADERS = {"authorization", "cookie", "proxy-authorization"}
 SEARCH_ENDPOINT = "https://www.bing.com/search"
 SEARCH_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Avelin/0.1"
 SEARCH_PROVIDER = "bing_rss"
+SEARCH_LITE_ENDPOINT = "https://lite.duckduckgo.com/lite/"
 APPLE_SEARCH_ENDPOINT = "https://itunes.apple.com/search"
 APPLE_LOOKUP_ENDPOINT = "https://itunes.apple.com/lookup"
 APPLE_CHART_ENDPOINT = "https://rss.applemarketingtools.com/api/v2/{country}/books/top-paid/{limit}/books.json"
@@ -40,6 +42,16 @@ ADULT_BOOK_MARKERS = {
     "sex", "sexual", "эротика", "эротический", "порно",
 }
 logger = logging.getLogger("avelin.research")
+
+
+class HttpTransportError(ValueError):
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+class HttpAddressBlocked(ValueError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +78,7 @@ class HttpSandbox:
         self.timeout_seconds = timeout_seconds
         self.max_response_chars = max_response_chars
         self.allow_private_networks = allow_private_networks
+        self._search_cooldowns: dict[str, float] = {}
 
     def request(
         self,
@@ -117,14 +130,19 @@ class HttpSandbox:
             status = exc.code
             response_headers = dict(exc.headers.items())
             raw_body = b"" if normalized_method == "HEAD" else exc.read(self.max_response_chars + 1)
-        except (error.URLError, TimeoutError) as exc:
-            raise ValueError(f"HTTP request failed: {exc}") from exc
+        except (error.URLError, OSError) as exc:
+            reason = getattr(exc, 'reason', exc)
+            code = 'tls_error' if isinstance(reason, ssl.SSLError) else 'timeout' if isinstance(reason, (TimeoutError, socket.timeout)) else 'network_error'
+            raise HttpTransportError(code, f"HTTP request failed: {exc}") from exc
 
         body, truncated = _decode_body(
             raw_body,
             self.max_response_chars,
             response_headers,
         )
+        # A byte-limited UTF-8 read can end before the character limit. It is
+        # still a truncated transport response and must not look complete.
+        truncated = truncated or len(raw_body) > self.max_response_chars
         return {
             "url": str(final_url),
             "method": normalized_method,
@@ -141,6 +159,7 @@ class HttpSandbox:
         normalized_limit = max(1, min(int(limit), 10))
         plan = _plan_search(normalized_query, country)
         provider = SEARCH_PROVIDER
+        failures: list[str] = []
         candidates: list[dict[str, str]] = []
         if plan.intent == "apple_books":
             try:
@@ -155,27 +174,33 @@ class HttpSandbox:
                 provider = "apple_search_api"
 
         search_url = f"{SEARCH_ENDPOINT}?{parse.urlencode({'q': plan.provider_query, 'format': 'rss'})}"
-        search_request = request.Request(
-            search_url,
-            headers={
-                "User-Agent": SEARCH_USER_AGENT,
-                "Accept-Encoding": "identity",
-                "Accept-Language": "ru,en;q=0.8",
-            },
-            method="GET",
-        )
         if not candidates:
-            try:
-                with request.urlopen(search_request, timeout=self.timeout_seconds) as response:
-                    headers = dict(response.headers.items())
-                    raw_body = response.read(self.max_response_chars * 8)
-            except error.HTTPError as exc:
-                raise ValueError(f"Web search returned HTTP {exc.code}.") from exc
-            except (error.URLError, TimeoutError) as exc:
-                raise ValueError("Web search is temporarily unavailable.") from exc
-
-            body, _ = _decode_body(raw_body, self.max_response_chars * 4, headers)
-            candidates = _parse_search_results(body, max(normalized_limit * 4, 10))
+            lite_url = f"{SEARCH_LITE_ENDPOINT}?{parse.urlencode({'q': plan.provider_query})}"
+            sources = [('duckduckgo_lite', lite_url), ('bing_rss', search_url)]
+            for source, source_url in sources:
+                if self._search_cooldowns.get(source,0) > monotonic():
+                    failures.append(f'{source}: challenge cooldown')
+                    continue
+                try:
+                    req = request.Request(source_url, headers={'User-Agent':SEARCH_USER_AGENT,
+                        'Accept-Encoding':'identity','Accept-Language':'en-US,en;q=0.9,ru;q=0.7'}, method='GET')
+                    with request.urlopen(req,timeout=self.timeout_seconds) as response:
+                        body,_ = _decode_body(response.read(self.max_response_chars*8),self.max_response_chars*4,dict(response.headers.items()))
+                    if re.search(r'(?i)anomaly-modal|challenge-form|g-recaptcha|verify you are human',body):
+                        self._search_cooldowns[source] = monotonic()+300
+                        failures.append(f'{source}: anti-bot challenge; not bypassed')
+                        continue
+                    candidates = _parse_search_results(body,max(normalized_limit*4,10))
+                    if candidates:
+                        provider = source
+                        break
+                    failures.append(f'{source}: no readable search results')
+                except error.HTTPError as exc:
+                    failures.append(f'{source}: HTTP {exc.code}')
+                except (error.URLError,TimeoutError) as exc:
+                    failures.append(f'{source}: transport unavailable')
+            if not candidates and failures:
+                raise ValueError('Web search unavailable: '+ '; '.join(failures))
         if not candidates:
             raise ValueError("Web search returned no readable results.")
         results, rejected = _rank_search_results(plan, candidates, normalized_limit)
@@ -189,7 +214,9 @@ class HttpSandbox:
                 len(candidates),
                 reasons or "none",
             )
-            raise ValueError(f"Web search found no relevant results for the request{suffix}.")
+            provider_notes = '; '.join(failures)
+            raise ValueError(f"Web search found no relevant results for the request{suffix}. Search provider: {provider}."
+                             + (f" Provider notes: {provider_notes}." if provider_notes else ''))
 
         rejected_count = sum(rejected.values())
         reason_summary = ", ".join(f"{key}={value}" for key, value in sorted(rejected.items())) or "none"
@@ -205,6 +232,7 @@ class HttpSandbox:
             f"Search query: {normalized_query}",
             f"Search intent: {plan.intent}",
             f"Search provider: {provider}",
+            *([f"Provider notes: {'; '.join(failures)}"] if failures else []),
             *( [f"Storefront: {plan.storefront}"] if plan.intent.startswith("apple_") else [] ),
             f"Quality: accepted={len(results)}; rejected={rejected_count}",
             f"Rejected reasons: {reason_summary}",
@@ -278,6 +306,8 @@ class HttpSandbox:
             raise ValueError("Only http and https URLs are allowed.")
         if not parsed.hostname:
             raise ValueError("URL must include a hostname.")
+        if parsed.username or parsed.password:
+            raise ValueError("Credentials in URLs are not allowed.")
 
         if not self.allow_private_networks:
             _reject_private_hostname(parsed.hostname)
@@ -310,13 +340,13 @@ def _reject_private_hostname(hostname: str) -> None:
     try:
         addresses = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
-        raise ValueError(f"Could not resolve hostname: {hostname}") from exc
+        raise HttpTransportError('network_error', f"Could not resolve hostname: {hostname}") from exc
 
     for address in addresses:
         ip_raw = address[4][0]
         ip = ipaddress.ip_address(ip_raw)
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
-            raise ValueError("Private, local, link-local, multicast and unspecified addresses are blocked.")
+            raise HttpAddressBlocked("Private, local, link-local, multicast and unspecified addresses are blocked.")
 
 
 def _decode_body(
@@ -326,13 +356,18 @@ def _decode_body(
 ) -> tuple[str, bool]:
     normalized_headers = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
     content_encoding = normalized_headers.get("content-encoding", "").lower()
+    compressed_truncated = False
     try:
         if "gzip" in content_encoding or raw_body.startswith(b"\x1f\x8b"):
-            raw_body = gzip.decompress(raw_body)
+            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            raw_body = decoder.decompress(raw_body,max_chars * 4 + 1)
+            compressed_truncated = not decoder.eof or bool(decoder.unconsumed_tail) or bool(decoder.unused_data)
         elif "deflate" in content_encoding:
-            raw_body = zlib.decompress(raw_body)
+            decoder = zlib.decompressobj()
+            raw_body = decoder.decompress(raw_body,max_chars * 4 + 1)
+            compressed_truncated = not decoder.eof or bool(decoder.unconsumed_tail) or bool(decoder.unused_data)
     except (OSError, zlib.error):
-        return "<response body could not be decompressed>", False
+        return "<response body could not be decompressed>", True
 
     charset = "utf-8"
     content_type = normalized_headers.get("content-type", "")
@@ -345,7 +380,7 @@ def _decode_body(
         text = raw_body.decode(charset, errors="replace")
     except LookupError:
         text = raw_body.decode("utf-8", errors="replace")
-    truncated = len(text) > max_chars
+    truncated = len(text) > max_chars or compressed_truncated
     if truncated:
         text = text[:max_chars]
     return text, truncated
@@ -584,7 +619,8 @@ def _rank_search_results(
         # snippet: entitlement is verified from the actual item page, never an index.
         # Price belongs to the fetched product page/offer. Search snippets often
         # omit it; rejecting those URLs prevents the verification step entirely.
-        if (plan.price_required or plan.intent == "generic") and len(topical_terms) >= 2 and len(overlap) < 2:
+        if ((plan.price_required or plan.intent == "generic") and len(topical_terms) >= 2 and len(overlap) < 2
+                and not (plan.identity_terms and overlap)):
             rejected["topic_mismatch"] += 1
             continue
         if not overlap and not preferred_apple_source and not preferred_tv_source:
@@ -645,7 +681,11 @@ def _discovery_identity_terms(query: str, price_required: bool) -> tuple[str, ..
         if token.casefold() in SEARCH_STOP_WORDS or token.casefold() in {"usd", "eur", "rub", "gbp", "us", "uk"}:
             continue
         # Reference codes are explicit constraints even in a lowercase query.
-        reference = any(char.isdigit() for char in token) and any(char.isalpha() for char in token)
+        # A short version hint (v4, v2) is not an immutable product identity:
+        # the official landing page may omit its version from the snippet.
+        # Quoted references remain strict, including intentionally short SKUs.
+        reference = (any(char.isdigit() for char in token)
+                     and (sum(char.isalpha() for char in token) >= 2 or sum(char.isdigit() for char in token) >= 3))
         proper_name = price_required and token[0].isupper() and len(token) > 1
         if reference or proper_name:
             result.append(token)

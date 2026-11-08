@@ -8,6 +8,9 @@ export type FileArtifact = {
 };
 
 export type ChatMessage = {
+  id?: string | null;
+  client_request_id?: string;
+  run_id?: string;
   role: ChatRole;
   content: string;
   name?: string | null;
@@ -17,6 +20,20 @@ export type ChatMessage = {
   provider?: string | null;
   model?: string | null;
   artifacts?: FileArtifact[];
+};
+
+export type ChatRunState = "queued" | "running" | "completed" | "waiting_approval" | "waiting_clarification" | "failed" | "cancelled" | "interrupted" | "partial";
+export type ChatQuestionItem = {
+  id: string; thread_id: string; prompt: string; options: { id: string; label: string }[];
+  allow_free_text: boolean; status: string; answer?: string | null;
+};
+export type ChatRunSnapshot = {
+  run_id: string; request_id: string; thread_id: string; state: ChatRunState;
+  text: string; latest_seq: number; outcome?: string | null; error?: string | null;
+  message_id?: string | null; user_message_id?: string | null; user_text?: string;
+  attachments?: string[]; artifacts?: FileArtifact[]; approvals?: ChatApprovalItem[];
+  questions?: ChatQuestionItem[]; approval_history?: ChatApprovalItem[];
+  cancel_requested?: boolean;
 };
 
 export type ChatThreadItem = {
@@ -110,6 +127,7 @@ export type BootstrapPayload = {
   action_logs: ActionLogItem[];
   approval_requests: ApprovalRequestItem[];
   chat_approvals?: ChatApprovalItem[];
+  chat_questions?: ChatQuestionItem[];
   permission_grants: PermissionGrantItem[];
   extension_proposals: ExtensionProposalItem[];
   connectors: ConnectorItem[];
@@ -126,7 +144,9 @@ export type ChatApprovalItem = {
   scope: Record<string, unknown>;
   arguments?: Record<string, unknown>;
   summary?: string;
+  reason?: string;
   status: string;
+  action_status?: string;
   expires_at: string;
 };
 
@@ -413,6 +433,7 @@ export type ModelSettings = {
   provider: string;
   model_name: string;
   ollama_url: string;
+  override?: boolean;
 };
 
 export type CompactionSummaryItem = {

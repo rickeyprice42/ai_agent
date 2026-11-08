@@ -7,6 +7,17 @@ import { AvatarEditor } from "./AvatarEditor";
 import { SentImage, CopyableCode } from "./ChatMedia";
 import { PushSettings, detachPush } from "./PushSettings";
 import { TimezonePicker, deviceTimezone } from "./TimezonePicker";
+import { ProjectWorkspace, type ProjectDialogMode } from "./ProjectWorkspace";
+import { LongTaskPanel } from "./LongTaskPanel";
+import { ChatListRow } from "./ChatListRow";
+import { ChatClarification } from "./ChatClarification";
+import { ThreadMediaDrawer } from "./ThreadMediaDrawer";
+import { CompactActionLog } from "./CompactActionLog";
+import { HomeSuggestions } from "./HomeSuggestions";
+import { SharedWorkspace, SharedChatHeader } from "./SharedWorkspace";
+import { fetchThreadMedia, threadMediaUrl } from "./threadMedia";
+import { readNavigation, saveNavigation, urlNavigation, type WorkspaceView, type SettingsView } from "./workspaceNavigation";
+import { forgetChatRetryPayloads, mergeChatRunMessages, newChatRequestId, useDurableChat } from "./useDurableChat";
 import {
   archiveProject,
   archiveChatThread,
@@ -48,6 +59,9 @@ import {
   fetchMemorySummary,
   fetchPersonalMemory,
   fetchModelProviders,
+  fetchChatModelSettings,
+  updateChatModelSettings,
+  resetChatModelSettings,
   fetchProjectInvitations,
   fetchProjectMembers,
   fetchSharedProjectItems,
@@ -55,7 +69,6 @@ import {
   login as authLogin,
   markNotificationRead,
   logout as authLogout,
-  openWorkspaceFolder,
   register as authRegister,
   rememberChat,
   rollbackContextCompaction,
@@ -82,9 +95,12 @@ import type { ChatAttachment } from "./api";
 import type {
   BootstrapPayload,
   ChatApprovalItem,
+  ChatQuestionItem as ChatQuestion,
   AutomationRunItem,
   AutonomousMemorySettings,
   ChatMessage,
+  ChatThreadItem,
+  ChatRunSnapshot,
   ContextCompactionItem,
   ContextCompactionReview,
   FileArtifact,
@@ -104,8 +120,6 @@ const AUTH_TOKEN_KEY = "avelin-auth-token";
 const ACTIVE_THREAD_KEY = "avelin-active-thread";
 
 
-type WorkspaceView = "home" | "chat" | "shared" | "projects" | "memory" | "automations" | "tasks" | "files" | "settings";
-type SettingsView = "general" | "connections" | "tools" | "security" | "activity";
 const WORKSPACE_NAV: { id: WorkspaceView; label: string; icon: IconName }[] = [
   { id: "home", label: "Главная", icon: "home" },
   { id: "chat", label: "Диалоги", icon: "chat" },
@@ -323,7 +337,6 @@ export default function App() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isSending, setIsSending] = useState(false);
   const [isExecutingStep, setIsExecutingStep] = useState(false);
   const [isSavingAutomation, setIsSavingAutomation] = useState(false);
   const [automationRuns, setAutomationRuns] = useState<Record<string, AutomationRunItem[]>>({});
@@ -345,16 +358,17 @@ export default function App() {
   const [extensionThreatModel, setExtensionThreatModel] = useState("Расширение не получает доступ к сети, файлам или секретам; результат проверяет пользователь.");
   const [extensionContent, setExtensionContent] = useState("# Meeting summary\n\nВыдели решения, ответственных и сроки. Не выполняй внешние действия.\n");
   const [extensionTests, setExtensionTests] = useState('[{"input":{"name":"Avelin"},"expected":{"message":"Hello Avelin"}}]');
-  const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false);
   const [isClearingMemory, setIsClearingMemory] = useState(false);
   const [isExportingMemory, setIsExportingMemory] = useState(false);
   const [deletingNoteId, setDeletingNoteId] = useState<string | null>(null);
   const [downloadingArtifactPath, setDownloadingArtifactPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [animatedMessageKey, setAnimatedMessageKey] = useState<string | null>(null);
-  const [authToken, setAuthToken] = useState(() => window.localStorage.getItem(AUTH_TOKEN_KEY) ?? "");
-  const [activeThreadId, setActiveThreadId] = useState(() => window.localStorage.getItem(ACTIVE_THREAD_KEY) ?? "");
+  const [authToken, setAuthTokenState] = useState(() => window.localStorage.getItem(AUTH_TOKEN_KEY) ?? "");
+  const [activeThreadId, setActiveThreadState] = useState(() => window.localStorage.getItem(ACTIVE_THREAD_KEY) ?? "");
   const [activeProjectId, setActiveProjectId] = useState("");
+  const [projectWorkspaceId, setProjectWorkspaceId] = useState(() => new URLSearchParams(location.search).get("project")?.slice(0, 128) || "");
+  const [projectDialog, setProjectDialog] = useState<ProjectDialogMode>(null);
   const [projectMembers, setProjectMembers] = useState<ProjectMemberItem[]>([]);
   const [projectInvitations, setProjectInvitations] = useState<ProjectInvitationItem[]>([]);
   const [sharedProjectItems, setSharedProjectItems] = useState<SharedProjectItem[]>([]);
@@ -367,7 +381,9 @@ export default function App() {
   const [inviteLink, setInviteLink] = useState("");
   const [joinToken, setJoinToken] = useState(() => new URLSearchParams(location.search).get("invite") || "");
   const [chatApprovals, setChatApprovals] = useState<ChatApprovalItem[]>([]);
+  const [chatQuestions, setChatQuestions] = useState<ChatQuestion[]>([]);
   const [approvalDialogDismissed, setApprovalDialogDismissed] = useState(false);
+  useEffect(() => { setApprovalDialogDismissed(false); }, [chatApprovals.map((item) => item.id).join("|")]);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
@@ -382,13 +398,16 @@ export default function App() {
   const [selectedProvider, setSelectedProvider] = useState(EMPTY_BOOTSTRAP.provider);
   const [selectedModel, setSelectedModel] = useState(EMPTY_BOOTSTRAP.model);
   const [isModelSaving, setIsModelSaving] = useState(false);
+  const [chatModel, setChatModel] = useState<{ threadId: string; provider: string; model_name: string; override?: boolean } | null>(null);
+  const [isChatModelLoading, setIsChatModelLoading] = useState(false);
   const [generationActivity, setGenerationActivity] = useState<string[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState("");
   const [avatarVersion, setAvatarVersion] = useState(0);
   const [runtimeNotice, setRuntimeNotice] = useState<string | null>(null);
-  const [openedImage, setOpenedImage] = useState<{ url: string; artifact: FileArtifact } | null>(null);
+  const [openedImage, setOpenedImage] = useState<{ url: string; artifact: FileArtifact; messageId?: string | null } | null>(null);
+  const [mediaOpen, setMediaOpen] = useState(false);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const [compactions, setCompactions] = useState<ContextCompactionItem[]>([]);
   const [compactionReview, setCompactionReview] = useState<ContextCompactionReview | null>(null);
@@ -396,10 +415,7 @@ export default function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readStoredThemeMode());
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveTheme(readStoredThemeMode()));
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [view, setView] = useState<WorkspaceView>(() => {
-    const requested = new URLSearchParams(location.search).get("view");
-    return WORKSPACE_NAV.some((item) => item.id === requested) ? requested as WorkspaceView : "home";
-  });
+  const [view, setView] = useState<WorkspaceView>(() => urlNavigation()?.view || "home");
   const [settingsView, setSettingsView] = useState<SettingsView>("general");
   const [chatSearch, setChatSearch] = useState("");
   const [isChatListOpen, setIsChatListOpen] = useState(false);
@@ -408,17 +424,41 @@ export default function App() {
   const workspaceRef = useRef<HTMLElement | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   const followLatestMessageRef = useRef(true);
+  const initialNavigationRef = useRef(urlNavigation());
+  const navigationAccountRef = useRef("");
 
-  function navigate(next: WorkspaceView) {
+  function projectRoute(projectId: string, screen: "projects" | "chat") {
+    const destination = new URL(location.href);
+    destination.searchParams.set("view", screen);
+    destination.searchParams.set("project", projectId);
+    history.replaceState(null, "", destination.pathname + destination.search);
+  }
+
+  function navigate(next: WorkspaceView, preserveThread = false) {
     setView(next);
     setIsSidebarOpen(false);
+    if (next === "projects" && !preserveThread) setProjectWorkspaceId("");
     if (next === "chat") setIsChatListOpen(true);
-    if (next === "chat" && bootstrap.projects.some((project) => project.id === bootstrap.active_thread.project_id && project.shared)) {
-      const personal = bootstrap.chat_threads.find((thread) => !bootstrap.projects.some((project) => project.id === thread.project_id && project.shared));
-      if (personal) void refreshBootstrap(false, false, authToken, personal.id);
+    if (next === "chat" && !preserveThread && bootstrap.active_thread.project_id) {
+      const personal = bootstrap.chat_threads.find((thread) => !thread.project_id);
+      setMessages([]);
+      setChatApprovals([]);
+      if (personal) {
+        setActiveThreadId(personal.id);
+        void refreshBootstrap(false, false, authToken, personal.id);
+      } else void handleCreateChat(null);
     }
-    if (next === "shared") setSharedGroupId("");
+    if (next === "shared" && !preserveThread) setSharedGroupId("");
+    const destination = new URL(location.href);
+    destination.searchParams.set("view", next);
+    if (!preserveThread) destination.searchParams.delete("project");
+    history.replaceState(null, "", destination.pathname + destination.search);
   }
+
+  useEffect(() => {
+    if (!currentUser?.id || navigationAccountRef.current !== currentUser.id || isLoading) return;
+    saveNavigation(currentUser.id, { view, settingsView, projectId: projectWorkspaceId, groupId: sharedGroupId, threadId: activeThreadId });
+  }, [currentUser?.id, view, settingsView, projectWorkspaceId, sharedGroupId, activeThreadId, isLoading]);
 
   useEffect(() => {
     const desktop = window.matchMedia("(min-width: 901px)");
@@ -459,13 +499,60 @@ export default function App() {
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const generationControllerRef = useRef<AbortController | null>(null);
+  const authTokenRef = useRef(authToken); authTokenRef.current = authToken;
+  const activeThreadRef = useRef(activeThreadId); activeThreadRef.current = activeThreadId;
+  const bootstrapRequestRef = useRef(0);
+  const currentRunRef = useRef<ChatRunSnapshot | null>(null);
+  useEffect(() => {
+    if (!authToken || !activeThreadId) { setChatModel(null); return; }
+    let cancelled = false;
+    setIsChatModelLoading(true);
+    void fetchChatModelSettings(activeThreadId, authToken).then((settings) => {
+      if (!cancelled) setChatModel({ ...settings, threadId: activeThreadId });
+    }).catch((err) => {
+      if (!cancelled) { setChatModel(null); setError(err instanceof Error ? err.message : "Не удалось загрузить модель диалога."); }
+    }).finally(() => { if (!cancelled) setIsChatModelLoading(false); });
+    return () => { cancelled = true; };
+  }, [authToken, activeThreadId, bootstrap.provider, bootstrap.model]);
+  const durable = useDurableChat({ userId: currentUser?.id || "", token: authToken, threadId: activeThreadId,
+    onAccepted: (run) => setAttachments((current) => current.filter((file) => !(run.attachments || []).includes(file.path))),
+    onTerminal: async (run) => {
+      if (run.thread_id !== activeThreadRef.current) return;
+      const token = authTokenRef.current;
+      setMessages((current) => mergeChatRunMessages(current, run));
+      // Pending actions in bootstrap are authoritative. A recovered older run
+      // can have no approvals while the thread already awaits a newer one.
+      await refreshBootstrap(false, false, token, run.thread_id);
+      if (token === authTokenRef.current && run.thread_id === activeThreadRef.current && ["failed", "partial", "interrupted"].includes(run.state)) setError(run.error || "Ответ завершён не полностью. Частичный результат сохранён.");
+    } });
+  currentRunRef.current = durable.run;
+  const isSending = durable.busy;
+  const renderedMessages = useMemo(() => {
+    const result = mergeChatRunMessages(messages, durable.run);
+    if (!durable.unconfirmed || !durable.pendingRequestId) return result;
+    const requestId = durable.pendingRequestId;
+    const recovered = result.map((item) => item.role === "assistant" && item.client_request_id === requestId ? { ...item, status: "unconfirmed", content: "Отправка пока не подтверждена сервером." } : item);
+    if (!recovered.some((item) => item.role === "user" && item.client_request_id === requestId) && durable.pendingUserText) recovered.push({ role: "user", content: durable.pendingUserText, status: "complete", client_request_id: requestId });
+    if (!recovered.some((item) => item.role === "assistant" && item.client_request_id === requestId)) recovered.push({ role: "assistant", content: "Отправка пока не подтверждена сервером.", status: "unconfirmed", client_request_id: requestId });
+    return recovered;
+  }, [messages, durable.run, durable.unconfirmed, durable.pendingRequestId, durable.pendingUserText]);
+  function setActiveThreadId(value: string) {
+    if (value !== activeThreadRef.current) { durable.disconnect(); setChatQuestions([]); setMediaOpen(false); setOpenedImage(null); }
+    activeThreadRef.current = value;
+    setActiveThreadState(value);
+  }
+  function setAuthToken(value: string) {
+    if (value !== authTokenRef.current) { durable.disconnect(); setMediaOpen(false); setOpenedImage(null); }
+    authTokenRef.current = value;
+    setAuthTokenState(value);
+  }
+  useEffect(() => { setGenerationActivity(durable.activities); }, [durable.activities]);
 
   const messageCountLabel = useMemo(() => {
     if (isLoading) return "Загрузка истории...";
-    if (messages.length === 0) return "Диалог пока пуст";
-    return `Сообщений в истории: ${messages.length}`;
-  }, [isLoading, messages.length]);
+    if (renderedMessages.length === 0) return "Диалог пока пуст";
+    return `Сообщений в истории: ${renderedMessages.length}`;
+  }, [isLoading, renderedMessages.length]);
 
   useEffect(() => {
     const draft = window.localStorage.getItem(DRAFT_KEY) ?? window.localStorage.getItem("nova-draft");
@@ -516,7 +603,7 @@ export default function App() {
   useEffect(() => {
     const container = messagesEndRef.current?.parentElement;
     if (container && followLatestMessageRef.current) container.scrollTop = container.scrollHeight;
-  }, [messages, isSending, animatedMessageKey]);
+  }, [renderedMessages, isSending, animatedMessageKey]);
 
   useEffect(() => {
     followLatestMessageRef.current = true;
@@ -535,7 +622,7 @@ export default function App() {
   }, [view]);
 
   useEffect(() => {
-    if (!authToken || !activeProjectId) {
+    if (!authToken || !activeProjectId || !bootstrap.projects.some((project) => project.id === activeProjectId && project.shared)) {
       setProjectMembers([]);
       setProjectInvitations([]);
       setSharedProjectItems([]);
@@ -559,20 +646,32 @@ export default function App() {
     }
 
     window.localStorage.setItem(AUTH_TOKEN_KEY, authToken);
+    let cancelled = false;
     void fetchMe(authToken)
       .then((user) => {
+        if (cancelled || authTokenRef.current !== authToken) return;
         setCurrentUser(user);
+        const savedNavigation = readNavigation(user.id);
+        const destination = initialNavigationRef.current || savedNavigation;
+        initialNavigationRef.current = null;
+        navigationAccountRef.current = user.id;
+        setView(destination?.view || "home");
+        setSettingsView(savedNavigation?.settingsView || "general");
+        setProjectWorkspaceId(destination?.projectId || "");
+        setSharedGroupId(savedNavigation?.groupId || "");
         void fetchModelProviders(authToken)
           .then(setModelProviders)
           .catch(() => setModelProviders([]));
-        return refreshBootstrap(true, false, authToken, activeThreadId);
+        return refreshBootstrap(true, false, authToken, destination?.threadId || activeThreadId);
       })
       .catch(() => {
+        if (cancelled || authTokenRef.current !== authToken) return;
         window.localStorage.removeItem(AUTH_TOKEN_KEY);
         setAuthToken("");
         setCurrentUser(null);
         setIsLoading(false);
       });
+    return () => { cancelled = true; };
   }, [authToken]);
 
   useEffect(() => {
@@ -580,6 +679,9 @@ export default function App() {
       const nextTheme = resolveTheme(themeMode);
       setResolvedTheme(nextTheme);
       document.documentElement.dataset.theme = nextTheme;
+      document.documentElement.style.backgroundColor = nextTheme === "dark" ? "#09090b" : "#f4f3ef";
+      document.documentElement.style.colorScheme = nextTheme;
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", nextTheme === "dark" ? "#09090b" : "#f4f3ef");
     }
 
     applyTheme();
@@ -602,6 +704,7 @@ export default function App() {
     if (!token) {
       return;
     }
+    const requestId = ++bootstrapRequestRef.current;
 
     if (initial) {
       setIsLoading(true);
@@ -623,20 +726,23 @@ export default function App() {
         fetchAutonomousMemorySettings(token),
         fetchMemorySummary(token)
       ]);
+      if (requestId !== bootstrapRequestRef.current || token !== authTokenRef.current) return;
       setBootstrap(data);
       setChatApprovals(data.chat_approvals ?? []);
       setMemoryOverview(memoryData);
       setPersonalMemory(personalMemoryData);
       setAutonomousMemorySettings(autonomousSettingsData);
       setMemorySummary(memorySummaryData);
-      setMessages(data.history);
+      setMessages(mergeChatRunMessages(data.history, currentRunRef.current?.thread_id === data.active_thread.id ? currentRunRef.current : null));
       setActiveThreadId(data.active_thread.id);
+      setChatQuestions(data.chat_questions ?? []);
       setActiveProjectId(data.active_thread.project_id ?? "");
       window.localStorage.setItem(ACTIVE_THREAD_KEY, data.active_thread.id);
       setCurrentUser(data.user);
       setSelectedProvider(data.provider);
       setSelectedModel(data.model);
       const contextSnapshots = await fetchContextCompactions(token, data.active_thread.id).catch(() => []);
+      if (requestId !== bootstrapRequestRef.current || token !== authTokenRef.current || data.active_thread.id !== activeThreadRef.current) return;
       setCompactions(contextSnapshots);
       setCompactionReview(null);
       setError(unavailableNotificationThread ? "Диалог из уведомления недоступен этому аккаунту или был удалён." : null);
@@ -654,9 +760,11 @@ export default function App() {
         }
       }
     } catch (err) {
+      if (requestId !== bootstrapRequestRef.current || token !== authTokenRef.current) return;
       const fallback = err instanceof Error ? err.message : "Неизвестная ошибка.";
       setError(fallback);
     } finally {
+      if (requestId !== bootstrapRequestRef.current || token !== authTokenRef.current) return;
       if (initial) {
         setIsLoading(false);
       } else {
@@ -666,99 +774,45 @@ export default function App() {
   }
 
   async function submitMessage(message: string, targetThreadId = activeThreadId) {
-    if (chatApprovals.length) { setApprovalDialogDismissed(false); return; }
+    if (chatApprovals.length && targetThreadId === activeThreadRef.current) { setApprovalDialogDismissed(false); return; }
+    if (chatQuestions.length && targetThreadId === activeThreadRef.current) return;
     const normalized = message.trim() || (attachments.length ? "Проанализируй прикреплённые файлы." : "");
-    if (!normalized || isSending || isUploading || isModelSaving || !authToken) {
-      return;
-    }
-
+    const busyTarget = currentRunRef.current?.thread_id === targetThreadId && ["queued", "running"].includes(currentRunRef.current.state);
+    if (!normalized || !targetThreadId || isUploading || isModelSaving || !authToken || isLoading || busyTarget || (targetThreadId === activeThreadId && (durable.checking || durable.starting || durable.unconfirmed))) return;
+    const requestId = newChatRequestId();
+    const token = authToken;
     const sentAttachments = [...attachments];
-    let accepted = false;
-    const optimisticMessage: ChatMessage = { role: "user", content: normalized, status: "complete", artifacts: sentAttachments.map((file) => ({ ...file, extension: `.${file.name.split(".").pop()}` })) };
-    const pendingMessage: ChatMessage = { role: "assistant", content: "", status: "pending" };
+    const optimistic: ChatMessage = { role: "user", content: normalized, status: "complete", client_request_id: requestId, artifacts: sentAttachments.map((file) => ({ ...file, extension: `.${file.name.split(".").pop()}` })) };
     followLatestMessageRef.current = true;
-    setMessages((current) => [...current, optimisticMessage, pendingMessage]);
+    setMessages((current) => [...current, optimistic, { role: "assistant", content: "", status: "pending", client_request_id: requestId }]);
     setInput("");
-    setIsSending(true);
     setError(null);
     setAnimatedMessageKey(null);
     setGenerationActivity([]);
-
-    const controller = new AbortController();
-    generationControllerRef.current = controller;
-
     try {
-      await sendMessageStream(
-        normalized,
-        authToken,
-        targetThreadId || null,
-        controller.signal,
-        (event) => {
-          if (event.thread_id) {
-            setActiveThreadId(event.thread_id);
-            window.localStorage.setItem(ACTIVE_THREAD_KEY, event.thread_id);
-          }
-          if (event.type === "delta" && event.text) {
-            setMessages((current) => {
-              const next = [...current];
-              let index = -1;
-              for (let candidate = next.length - 1; candidate >= 0; candidate -= 1) {
-                if (next[candidate].role === "assistant" && next[candidate].status === "pending") {
-                  index = candidate;
-                  break;
-                }
-              }
-              if (index >= 0) next[index] = { ...next[index], content: next[index].content + event.text };
-              return next;
-            });
-          }
-          if (event.type === "status" && event.text) {
-            setGenerationActivity((current) => current[current.length - 1] === event.text ? current : [...current, event.text!].slice(-12));
-          }
-          if (event.type === "approval" && event.approval) { setChatApprovals((current) => [...current.filter((item) => item.id !== event.approval!.id), event.approval!]); setApprovalDialogDismissed(false); }
-          if (event.type === "done") {
-            setMessages((current) => current.map((item) =>
-              item.role === "assistant" && item.status === "pending" ? { ...item, status: "complete" } : item
-            ));
-          }
-        },
-        sentAttachments.map((attachment) => attachment.path),
-        () => { accepted = true; setAttachments([]); }
-      );
-      await refreshBootstrap(false, false, authToken, window.localStorage.getItem(ACTIVE_THREAD_KEY));
-      window.localStorage.removeItem(DRAFT_KEY);
-      if (window.matchMedia("(pointer: fine)").matches) textareaRef.current?.focus({ preventScroll: true });
+      await durable.start(normalized, targetThreadId, sentAttachments.map((file) => file.path), requestId);
     } catch (err) {
-      if (!accepted) setInput((current) => current || message);
-      const cancelled = controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError");
-      const fallback = cancelled
-        ? "Генерация остановлена."
-        : err instanceof Error ? err.message : "Неизвестная ошибка.";
-      setError(fallback);
-      setMessages((current) => current.map((item) =>
-        item.role === "assistant" && item.status === "pending"
-          ? { ...item, status: cancelled ? "cancelled" : "failed", error: fallback }
-          : item
-      ));
-    } finally {
-      generationControllerRef.current = null;
-      setIsSending(false);
+      if (token !== authTokenRef.current || targetThreadId !== activeThreadRef.current) return;
+      const failure = err instanceof Error ? err.message : "Не удалось начать ответ.";
+      setError(failure);
+      setInput((current) => current || message);
+      setMessages((current) => current.map((item) => item.role === "assistant" && item.client_request_id === requestId ? { ...item, status: "failed", error: failure } : item));
     }
   }
 
   function handleStopGeneration() {
-    generationControllerRef.current?.abort();
+    void durable.cancel();
   }
 
   async function handleHomeSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const message = input.trim() || (attachments.length ? "Проанализируй прикреплённые файлы." : "");
-    if (!message || isSending || isStartingChat || isUploading || isModelSaving || !authToken) return;
+    if (!message || isStartingChat || isUploading || isModelSaving || !authToken) return;
     setIsStartingChat(true);
     try {
       const payload = await createChatThread(authToken, undefined, null, true);
       await refreshBootstrap(false, false, authToken, payload.thread.id);
-      navigate("chat");
+      navigate("chat", true);
       setChatSearch("");
       setIsChatListOpen(false);
       await submitMessage(message, payload.thread.id);
@@ -805,12 +859,12 @@ export default function App() {
     textareaRef.current?.focus();
   }
 
-  async function handleDownloadArtifact(artifact: FileArtifact) {
+  async function handleDownloadArtifact(artifact: FileArtifact, messageId?: string | null) {
     if (!authToken || downloadingArtifactPath) return;
     setDownloadingArtifactPath(artifact.path);
     setError(null);
     try {
-      const blob = await downloadWorkspaceFile(artifact.path, authToken);
+      const blob = isGroupChat && messageId ? await fetchThreadMedia(threadMediaUrl(activeThreadId, messageId, artifact.path), authToken) : await downloadWorkspaceFile(artifact.path, authToken);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -831,18 +885,23 @@ export default function App() {
     await refreshBootstrap();
   }
 
-  async function handleCreateChat() {
-    if (!authToken || isStartingChat || isSending) return;
+  async function handleCreateChat(projectId?: string | null) {
+    if (!authToken || isStartingChat) return;
     setIsStartingChat(true);
     setError(null);
     try {
-      const payload = await createChatThread(authToken, undefined, activeProjectId || null, true);
+      const currentThread = bootstrap.chat_threads.find((item) => item.id === activeThreadId) || bootstrap.active_thread;
+      const targetProjectId = projectId !== undefined ? projectId : view === "projects" ? projectWorkspaceId || null : view === "shared" ? sharedGroupId || null : currentThread.project_id || null;
+      const payload = await createChatThread(authToken, undefined, targetProjectId, true);
       setActiveThreadId(payload.thread.id);
       window.localStorage.setItem(ACTIVE_THREAD_KEY, payload.thread.id);
       setInput("");
       setAnimatedMessageKey(null);
       await refreshBootstrap(false, false, authToken, payload.thread.id);
-      navigate("chat");
+      const project = bootstrap.projects.find((item) => item.id === targetProjectId);
+      navigate(project?.shared ? "shared" : "chat", true);
+      if (project?.shared) setSharedGroupId(project.id);
+      else if (project) projectRoute(project.id, "chat");
       setChatSearch("");
       setIsChatListOpen(false);
     } catch (err) {
@@ -851,14 +910,16 @@ export default function App() {
   }
 
   async function handleSelectChat(threadId: string) {
-    if (!authToken || isSending) return;
+    if (!authToken) return;
     const thread = bootstrap.chat_threads.find((item) => item.id === threadId);
     const group = bootstrap.projects.find((item) => item.id === thread?.project_id && item.shared);
-    navigate(group ? "shared" : "chat");
+    navigate(group ? "shared" : "chat", true);
     if (group) setSharedGroupId(group.id);
+    else if (thread?.project_id) projectRoute(thread.project_id, "chat");
     setIsChatListOpen(false);
     if (threadId === activeThreadId) return;
     setChatApprovals([]);
+    setMessages([]);
     setActiveThreadId(threadId);
     window.localStorage.setItem(ACTIVE_THREAD_KEY, threadId);
     setInput("");
@@ -869,16 +930,15 @@ export default function App() {
   async function handleFocusProject(projectId: string) {
     const project = bootstrap.projects.find((item) => item.id === projectId);
     if (project?.shared) { await handleOpenGroup(project.id); return; }
+    if (!project) return;
     setActiveProjectId(projectId);
-    const firstThread = bootstrap.chat_threads.find((thread) => thread.project_id === projectId);
-    if (firstThread) {
-      await handleSelectChat(firstThread.id);
-    }
-    navigate("projects");
+    setProjectWorkspaceId(projectId);
+    navigate("projects", true);
+    projectRoute(projectId, "projects");
   }
 
   async function handleOpenGroup(projectId: string) {
-    if (!authToken || isSending) return;
+    if (!authToken) return;
     try {
       const latest = await fetchBootstrap(authToken);
       const project = latest.projects.find((item) => item.id === projectId && item.shared);
@@ -941,62 +1001,72 @@ export default function App() {
   }
 
   async function handleChatApproval(approval: ChatApprovalItem, decision: "approved" | "denied") {
-    if (!authToken || isSending || approvingStepId) return;
+    if (!authToken || isSending || durable.checking || approvingStepId) return;
+    const requestId = newChatRequestId();
+    const token = authToken;
+    const threadId = activeThreadId;
     setApprovingStepId(approval.id);
     setError(null);
     setChatApprovals((current) => current.filter((item) => item.id !== approval.id));
-    setMessages((current) => [...current, { role: "assistant", content: "", status: "pending" }]);
+    setMessages((current) => [...current, { role: "assistant", content: "", status: "pending", client_request_id: requestId }]);
     setGenerationActivity([]);
-    setIsSending(true);
-    const controller = new AbortController(); generationControllerRef.current = controller;
     try {
-      await decideChatApproval(activeThreadId, approval.id, decision, authToken, controller.signal, (event) => {
-        if (event.type === "approval" && event.approval) { setChatApprovals((current) => [...current, event.approval!]); setApprovalDialogDismissed(false); }
-        if (event.type === "status" && event.text) setGenerationActivity((current) => [...current, event.text!].slice(-12));
-        if (event.type === "delta" && event.text) setMessages((current) => current.map((message, index) => index === current.length - 1 ? { ...message, content: message.content + event.text } : message));
-      });
-      await refreshBootstrap(false, false);
+      await durable.approve(threadId, approval.id, decision, requestId);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Не удалось подтвердить действие.";
-      setError(message);
-      setMessages((current) => current.map((item) => item.status === "pending" ? { ...item, status: controller.signal.aborted ? "cancelled" : "failed", error: message } : item));
-      const latest = await fetchBootstrap(authToken, activeThreadId).catch(() => null);
-      if (latest) setChatApprovals(latest.chat_approvals ?? []);
-    } finally { setApprovingStepId(null); setIsSending(false); generationControllerRef.current = null; }
-  }
-
-  async function handleCreateProject() {
-    if (!authToken) return;
-    const title = window.prompt("Название проекта");
-    if (!title?.trim()) return;
-    const description = window.prompt("Краткое описание проекта", "") ?? "";
-    setError(null);
-    try {
-      const payload = await createProject(authToken, title.trim(), description.trim());
-      setActiveProjectId(payload.project.id);
-      await refreshBootstrap(false, false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось создать проект.");
+      if (token !== authTokenRef.current || threadId !== activeThreadRef.current) return;
+      setError(err instanceof Error ? err.message : "Не удалось подтвердить действие.");
+      await refreshBootstrap(false, false, token, threadId);
+    } finally {
+      if (token === authTokenRef.current && threadId === activeThreadRef.current) setApprovingStepId(null);
     }
   }
 
-  async function handleRenameProject() {
-    if (!authToken || !activeProjectId) return;
-    const project = bootstrap.projects.find((item) => item.id === activeProjectId);
-    const title = window.prompt("Новое название проекта", project?.title ?? "");
-    if (!title?.trim()) return;
-    const description = window.prompt("Описание проекта", project?.description ?? "") ?? project?.description ?? "";
+  async function handleQuestionAnswer(question: ChatQuestion, answer: { option_id?: string; text?: string }) {
+    if (!authToken || isSending || durable.checking) return;
+    const token = authToken, threadId = activeThreadId, requestId = newChatRequestId();
+    setError(null); setChatQuestions((current) => current.filter((item) => item.id !== question.id));
+    setMessages((current) => [...current, { role: "assistant", content: "", status: "pending", client_request_id: requestId }]);
+    try { await durable.answer(threadId, question.id, answer, requestId); }
+    catch (err) {
+      if (token !== authTokenRef.current || threadId !== activeThreadRef.current) return;
+      setError(err instanceof Error ? err.message : "Не удалось отправить ответ.");
+      await refreshBootstrap(false, false, token, threadId);
+    }
+  }
+
+  async function handleCreateProject(title: string, description: string) {
+    if (!authToken || workspaceBusy) return;
+    setWorkspaceBusy(true);
     setError(null);
     try {
-      await updateProject(authToken, activeProjectId, {
+      const payload = await createProject(authToken, title.trim(), description.trim());
+      await refreshBootstrap(false, false);
+      setProjectWorkspaceId(payload.project.id);
+      setActiveProjectId(payload.project.id);
+      setProjectDialog(null);
+      navigate("projects", true);
+      projectRoute(payload.project.id, "projects");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось создать проект.");
+    } finally { setWorkspaceBusy(false); }
+  }
+
+  async function handleRenameProject(title: string, description: string) {
+    if (!authToken || !projectWorkspaceId || workspaceBusy) return;
+    const project = bootstrap.projects.find((item) => item.id === projectWorkspaceId);
+    setWorkspaceBusy(true);
+    setError(null);
+    try {
+      await updateProject(authToken, projectWorkspaceId, {
         title: title.trim(),
         description: description.trim(),
         expected_revision: project?.revision
       });
       await refreshBootstrap(false, false);
+      setProjectDialog(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось обновить проект.");
-    }
+    } finally { setWorkspaceBusy(false); }
   }
 
   async function handleInviteMember() {
@@ -1083,15 +1153,18 @@ export default function App() {
   }
 
   async function handleArchiveProject() {
-    if (!authToken || !activeProjectId) return;
+    if (!authToken || !projectWorkspaceId || workspaceBusy) return;
+    setWorkspaceBusy(true);
     setError(null);
     try {
-      await archiveProject(authToken, activeProjectId);
+      await archiveProject(authToken, projectWorkspaceId);
       setActiveProjectId("");
+      setProjectDialog(null);
+      navigate("projects");
       await refreshBootstrap(false, false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось архивировать проект.");
-    }
+    } finally { setWorkspaceBusy(false); }
   }
 
   async function handleRestoreProject(projectId: string) {
@@ -1107,16 +1180,19 @@ export default function App() {
   }
 
   async function handleDeleteProject() {
-    if (!authToken || !activeProjectId) return;
+    if (!authToken || !projectWorkspaceId || workspaceBusy) return;
     if (!window.confirm("Удалить проект из активного списка? Чаты останутся в истории и сохранят привязку.")) return;
     setError(null);
+    setWorkspaceBusy(true);
     try {
-      await deleteProject(authToken, activeProjectId);
+      await deleteProject(authToken, projectWorkspaceId);
       setActiveProjectId("");
+      setProjectDialog(null);
+      navigate("projects");
       await refreshBootstrap(false, false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось удалить проект.");
-    }
+    } finally { setWorkspaceBusy(false); }
   }
 
   async function handleAssignActiveChatToProject(projectId: string | null) {
@@ -1418,15 +1494,16 @@ export default function App() {
     }
   }
 
-  async function handleDeleteChat() {
-    if (!authToken || !activeThreadId) return;
-    if (!window.confirm("Удалить текущий чат? Он будет скрыт через soft-delete, без окончательного удаления.")) return;
+  async function handleDeleteChat(threadId = activeThreadId) {
+    if (!authToken || !threadId) return;
+    const target = bootstrap.chat_threads.find((thread) => thread.id === threadId);
+    if (!window.confirm(`Удалить диалог «${target?.title || "Диалог"}»? Он будет скрыт из списка без окончательного удаления.`)) return;
     setError(null);
     try {
-      await deleteChatThread(authToken, activeThreadId);
-      const nextThread = bootstrap.chat_threads.find((thread) => thread.id !== activeThreadId);
-      setActiveThreadId(nextThread?.id ?? "");
-      await refreshBootstrap(false, false, authToken, nextThread?.id ?? null);
+      await deleteChatThread(authToken, threadId);
+      const nextId = threadId === activeThreadRef.current ? bootstrap.chat_threads.find((thread) => thread.id !== threadId)?.id : activeThreadRef.current;
+      if (threadId === activeThreadRef.current) setActiveThreadId(nextId ?? "");
+      await refreshBootstrap(false, false, authToken, nextId ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось удалить чат.");
     }
@@ -1706,20 +1783,6 @@ export default function App() {
     }
   }
 
-  async function handleOpenWorkspaceFolder() {
-    if (!authToken || isOpeningWorkspace) return;
-    setIsOpeningWorkspace(true);
-    setError(null);
-
-    try {
-      await openWorkspaceFolder(authToken);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось открыть рабочую папку.");
-    } finally {
-      setIsOpeningWorkspace(false);
-    }
-  }
-
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsAuthSubmitting(true);
@@ -1750,24 +1813,43 @@ export default function App() {
   }
 
   async function handleLogout() {
-    if (authToken) {
-      await detachPush(authToken).catch(() => {});
-      await authLogout(authToken);
-    }
+    const token = authTokenRef.current;
+    if (currentUser?.id) forgetChatRetryPayloads(currentUser.id);
+    durable.disconnect();
     window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    window.localStorage.removeItem(DRAFT_KEY);
     setAuthToken("");
     setCurrentUser(null);
     setBootstrap(EMPTY_BOOTSTRAP);
     setMessages([]);
+    setChatApprovals([]);
+    setChatQuestions([]);
+    setApprovingStepId(null);
+    setAttachments([]);
     setActiveThreadId("");
     setActiveProjectId("");
     window.localStorage.removeItem(ACTIVE_THREAD_KEY);
     setInput("");
     setModelProviders([]);
+    if (token) {
+      await detachPush(token).catch(() => {});
+      await authLogout(token).catch(() => {});
+    }
   }
 
-  async function handleChangeModel(provider: string, model: string) {
-    if (!authToken || isModelSaving || isSending || (provider === selectedProvider && model === selectedModel)) return;
+  async function handleChangeModel(provider: string, model: string, threadScope = false) {
+    if (!authToken || isModelSaving || (threadScope && isSending)) return;
+    if (threadScope) {
+      const token = authToken, threadId = activeThreadId;
+      setIsModelSaving(true); setError(null);
+      try {
+        const settings = await updateChatModelSettings(threadId, token, { provider, model_name: model, ollama_url: "" });
+        if (token === authTokenRef.current && threadId === activeThreadRef.current) setChatModel({ ...settings, threadId });
+      } catch (err) { if (token === authTokenRef.current && threadId === activeThreadRef.current) setError(err instanceof Error ? err.message : "Не удалось изменить модель диалога."); }
+      finally { if (token === authTokenRef.current) setIsModelSaving(false); }
+      return;
+    }
+    if (provider === selectedProvider && model === selectedModel) return;
     const previousProvider = selectedProvider;
     const previousModel = selectedModel;
     setSelectedProvider(provider);
@@ -1799,37 +1881,50 @@ export default function App() {
     }
   }
 
-  function modelPicker(className = "") {
-    const currentIsListed = modelProviders.some((provider) => provider.provider === selectedProvider && provider.models.includes(selectedModel));
+  function modelPicker(className = "", threadScope = false) {
+    const scoped = threadScope && chatModel?.threadId === activeThreadId ? chatModel : null;
+    const providerName = scoped?.provider || selectedProvider, modelName = scoped?.model_name || selectedModel;
+    const currentIsListed = modelProviders.some((provider) => provider.provider === providerName && provider.models.includes(modelName));
     return <label className={`chat-model-picker ${className}`}><span className="sr-only">Модель для диалога</span><select
       aria-label="Модель для диалога"
-      title={isModelSaving ? "Переключаем модель…" : selectedModel}
-      value={JSON.stringify([selectedProvider, selectedModel])}
-      disabled={isModelSaving || isSending || isLoading || modelProviders.length === 0}
-      onChange={(event) => { const [provider, model] = JSON.parse(event.target.value) as [string, string]; void handleChangeModel(provider, model); }}
-    >{!currentIsListed ? <option value={JSON.stringify([selectedProvider, selectedModel])}>{selectedModel}</option> : null}
+      title={isModelSaving ? "Переключаем модель…" : threadScope ? `Только этот диалог · ${modelName}` : `По умолчанию для новых диалогов · ${modelName}`}
+      value={JSON.stringify([providerName, modelName])}
+      disabled={isModelSaving || (threadScope && (isSending || isChatModelLoading || isSharedViewer)) || isLoading || modelProviders.length === 0}
+      onChange={(event) => { const [provider, model] = JSON.parse(event.target.value) as [string, string]; void handleChangeModel(provider, model, threadScope); }}
+    >{!currentIsListed ? <option value={JSON.stringify([providerName, modelName])}>{modelName}</option> : null}
       {modelProviders.map((provider) => <optgroup label={provider.label} key={provider.provider}>{provider.models.map((model) => <option key={model} value={JSON.stringify([provider.provider, model])}>{model}</option>)}</optgroup>)}
-    </select>{isModelSaving ? <span className="model-saving" role="status">Переключаем…</span> : null}</label>;
+    </select>{isModelSaving ? <span className="model-saving" role="status">Переключаем…</span> : null}{threadScope && scoped?.override ? <button className="model-reset text-button" type="button" disabled={isModelSaving || isSending} title="Использовать модель по умолчанию для новых диалогов" onClick={() => {
+      const token = authToken, threadId = activeThreadId;
+      setIsModelSaving(true);
+      void resetChatModelSettings(threadId, token).then((settings) => { if (token === authTokenRef.current && threadId === activeThreadRef.current) setChatModel({ ...settings, threadId }); }).catch((err) => { if (token === authTokenRef.current && threadId === activeThreadRef.current) setError(err.message); }).finally(() => { if (token === authTokenRef.current) setIsModelSaving(false); });
+    }}>По умолчанию</button> : null}</label>;
   }
   const activeProject = bootstrap.projects.find((project) => project.id === activeProjectId) ?? bootstrap.active_project;
-  const chatProject = bootstrap.projects.find((project) => project.id === bootstrap.active_thread.project_id) ?? bootstrap.active_project;
+  const selectedThread = bootstrap.chat_threads.find((thread) => thread.id === activeThreadId) || bootstrap.active_thread;
+  const chatProject = bootstrap.projects.find((project) => project.id === selectedThread.project_id) ?? (bootstrap.active_project?.id === selectedThread.project_id ? bootstrap.active_project : null);
   const isGroupChat = Boolean(chatProject?.shared);
+  const isProjectChat = view === "chat" && Boolean(chatProject && !chatProject.shared);
   const isSharedViewer = Boolean(isGroupChat && chatProject?.role === "viewer");
   const sharedGroups = bootstrap.projects.filter((project) => project.shared);
   const personalProjects = bootstrap.projects.filter((project) => !project.shared);
-  const personalThreads = bootstrap.chat_threads.filter((thread) => {
-    if (bootstrap.projects.some((project) => project.id === thread.project_id && project.shared)) return false;
+  const visibleThread = (thread: ChatThreadItem) => {
     const automaticTitle = ["New chat", "Новый диалог"].includes(thread.title) || (thread.title === "Main conversation" && thread.id === thread.user_id);
     return thread.id === activeThreadId || thread.message_count > 0 || thread.pinned || !automaticTitle;
-  });
-  const visibleThreads = view === "shared" ? bootstrap.chat_threads.filter((thread) => thread.project_id === sharedGroupId) : personalThreads;
+  };
+  const personalThreads = bootstrap.chat_threads.filter((thread) => !thread.project_id && visibleThread(thread));
+  const workspaceProject = personalProjects.find((project) => project.id === projectWorkspaceId) || null;
+  const projectThreads = bootstrap.chat_threads.filter((thread) => thread.project_id === projectWorkspaceId && visibleThread(thread));
+  const visibleThreads = view === "shared" ? bootstrap.chat_threads.filter((thread) => thread.project_id === sharedGroupId) : isProjectChat ? bootstrap.chat_threads.filter((thread) => thread.project_id === chatProject?.id && visibleThread(thread)) : personalThreads;
+  const chatScope = (thread: ChatThreadItem) => (thread.project_id || null) === (chatProject?.id || null);
   const isChatView = view === "chat" || (view === "shared" && Boolean(sharedGroupId));
+  const unavailableApprovals = durable.run?.thread_id === activeThreadId ? (durable.run.approval_history || []).slice(0, 1).filter((item) => (["expired", "revoked"].includes(item.status) || item.action_status === "interrupted") && !chatApprovals.some((pending) => pending.id === item.id)) : [];
+  const navigationView = isProjectChat ? "projects" : view;
 
   function automationResult(automationId: string, fallback?: AutomationRunItem | null) {
     const run = automationRuns[automationId]?.[0] || fallback;
     if (!run) return <p className="muted">Ещё не запускалась.</p>;
     const state = ({queued:"В очереди",running:"Выполняется",completed:"Завершено",failed:"Не удалось выполнить",cancelled:"Отменено",waiting_approval:"Нужно подтверждение",paused:"На паузе"} as Record<string,string>)[run.state] || run.state;
-    return <div className="automation-result"><p className="muted">{state}{run.finished_at ? ` · ${formatFileTime(run.finished_at)}` : ""}</p>{run.thread_id ? <button className="text-button" type="button" disabled={isSending} onClick={() => void handleSelectChat(run.thread_id!)}><WorkspaceIcon name="chat" />{run.state === "waiting_approval" ? "Открыть диалог и подтвердить" : "Открыть диалог запуска"}</button> : null}{run.result || run.failure_reason ? <details><summary>Результат</summary><p>{run.result || run.failure_reason}</p></details> : null}{run.artifacts?.length ? <div className="automation-artifacts">{run.artifacts.map((file) => <button className="text-button" key={file.path} type="button" onClick={() => void handleDownloadArtifact({path:file.path,name:file.name || file.path.split("/").pop() || "Файл",extension:file.extension || `.${file.path.split(".").pop()}`,size_bytes:file.size_bytes || 0})}><WorkspaceIcon name="files" />{file.name || file.path}</button>)}</div> : null}</div>;
+    return <div className="automation-result"><p className="muted">{state}{run.finished_at ? ` · ${formatFileTime(run.finished_at)}` : ""}</p>{run.thread_id ? <button className="text-button" type="button" disabled={isStartingChat} onClick={() => void handleSelectChat(run.thread_id!)}><WorkspaceIcon name="chat" />{run.state === "waiting_approval" ? "Открыть диалог и подтвердить" : "Открыть диалог запуска"}</button> : null}{run.result || run.failure_reason ? <details><summary>Результат</summary><p>{run.result || run.failure_reason}</p></details> : null}{run.artifacts?.length ? <div className="automation-artifacts">{run.artifacts.map((file) => <button className="text-button" key={file.path} type="button" onClick={() => void handleDownloadArtifact({path:file.path,name:file.name || file.path.split("/").pop() || "Файл",extension:file.extension || `.${file.path.split(".").pop()}`,size_bytes:file.size_bytes || 0})}><WorkspaceIcon name="files" />{file.name || file.path}</button>)}</div> : null}</div>;
   }
 
   if (authToken && !currentUser && isLoading) {
@@ -2052,11 +2147,11 @@ export default function App() {
             </details>
           ) : null}
 
-          {bootstrap.archived_chat_threads.length > 0 ? (
+          {bootstrap.archived_chat_threads.filter(chatScope).length > 0 ? (
             <details className="thread-archive">
-              <summary>Архив ({bootstrap.archived_chat_threads.length})</summary>
+              <summary>Архив ({bootstrap.archived_chat_threads.filter(chatScope).length})</summary>
               <div className="thread-list">
-                {bootstrap.archived_chat_threads.map((thread) => (
+                {bootstrap.archived_chat_threads.filter(chatScope).map((thread) => (
                   <button
                     className="thread-item"
                     key={thread.id}
@@ -2073,135 +2168,8 @@ export default function App() {
         </section>
   );
   const panels = {
-    shared: <section className="shared-overview"><div className="section-heading"><div><h3>Общие пространства</h3><p>Разговоры с участниками и Avelin в одном месте.</p></div><div className="shared-overview-actions"><button className="ghost-button" type="button" onClick={() => setGroupDialog("join")}>Присоединиться</button><button type="button" className="primary-button" onClick={() => setGroupDialog("create")}><WorkspaceIcon name="plus" />Новая группа</button></div></div>{sharedGroups.length ? <div className="shared-group-grid">{sharedGroups.map((group) => <button className="shared-group-card" key={group.id} type="button" onClick={() => void handleOpenGroup(group.id)}><span className="group-avatar">{group.title.slice(0, 1).toUpperCase()}</span><strong>{group.title}</strong><small>{group.description || "Общий чат"}</small><WorkspaceIcon name="arrow" /></button>)}</div> : <div className="shared-empty"><WorkspaceIcon name="projects" /><h3>Здесь можно работать вместе</h3><p>Создай группу и пригласи участников по ссылке.</p></div>}</section>,
-    projects: (        <section className="panel project-panel">
-          <div className="panel-heading panel-heading-compact">
-            <div>
-              <p className="eyebrow">Projects</p>
-              <h3>Рабочие области</h3>
-            </div>
-            <button className="ghost-button" onClick={() => void handleCreateProject()} type="button">
-              Новый
-            </button>
-          </div>
-
-          <div className="project-list">
-            {personalProjects.length === 0 ? (
-              <p className="muted">Проектов пока нет.</p>
-            ) : (
-              personalProjects.map((project) => (
-                <button
-                  className={project.id === activeProjectId ? "project-item project-item-active" : "project-item"}
-                  key={project.id}
-                  onClick={() => void handleFocusProject(project.id)}
-                  type="button"
-                >
-                  <span>{project.title}</span>
-                  <small>{project.shared ? `${project.role} · shared` : `${project.chat_count} чатов`}</small>
-                </button>
-              ))
-            )}
-          </div>
-
-          <div className="thread-actions">
-            <button className="mini-button" disabled={!activeProjectId || activeProject?.role === "viewer"} onClick={() => void handleRenameProject()} type="button">
-              Назвать
-            </button>
-            <button className="mini-button" disabled={!activeProjectId || activeProject?.role !== "owner"} onClick={() => void handleArchiveProject()} type="button">
-              Архив
-            </button>
-            <button className="mini-button" disabled={!activeProjectId || activeProject?.role !== "owner"} onClick={() => void handleDeleteProject()} type="button">
-              Удалить
-            </button>
-            <button className="mini-button" disabled={!activeThreadId} onClick={() => void handleAssignActiveChatToProject(null)} type="button">
-              Без проекта
-            </button>
-          </div>
-
-          {bootstrap.projects.length > 0 ? (
-            <label className="project-select">
-              Чат в проекте
-              <select
-                value={bootstrap.active_thread.project_id ?? ""}
-                onChange={(event) => void handleAssignActiveChatToProject(event.target.value || null)}
-              >
-                <option value="">Без проекта</option>
-                {personalProjects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-
-          {activeProject?.shared && view === "shared" ? (
-            <details className="workspace-panel" open={activeProject.shared}>
-              <summary>Shared workspace · {activeProject.role}</summary>
-              <label className="project-select">
-                Режим Avelin
-                <select
-                  value={activeProject.agent_mode}
-                  disabled={activeProject.role === "viewer" || workspaceBusy}
-                  onChange={(event) => void handleAgentMode(event.target.value as "mention_only" | "explicit" | "off")}
-                >
-                  <option value="mention_only">Только по @Avelin</option>
-                  <option value="explicit">На каждый явный запрос</option>
-                  <option value="off">Выключен</option>
-                </select>
-              </label>
-              <div className="workspace-actions">
-                {activeProject.role === "owner" ? (
-                  <button className="mini-button" disabled={workspaceBusy} onClick={() => void handleInviteMember()} type="button">Пригласить</button>
-                ) : null}
-                {activeProject.role !== "viewer" ? (
-                  <button className="mini-button" disabled={workspaceBusy} onClick={() => void handleCreateSharedItem()} type="button">Поделиться</button>
-                ) : null}
-              </div>
-              <div className="workspace-members">
-                {projectMembers.map((member) => (
-                  <div className="workspace-row" key={member.user_id}>
-                    <span>{member.display_name} · {member.role}</span>
-                    {activeProject.role === "owner" && member.role !== "owner" ? (
-                      <button className="mini-button mini-button-danger" disabled={workspaceBusy} onClick={() => void handleRemoveMember(member)} type="button">Удалить</button>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-              {projectInvitations.filter((item) => item.status === "pending").map((invite) => (
-                <small key={invite.id}>Invite: {invite.email} · {invite.role} · до {formatFileTime(invite.expires_at)}</small>
-              ))}
-              <div className="workspace-board">
-                {sharedProjectItems.length === 0 ? <small>Общая доска пуста. Личная память и файлы сюда не попадают автоматически.</small> : sharedProjectItems.map((item) => (
-                  <article className="workspace-board-item" key={item.id}>
-                    <b>{item.kind} · {item.title}</b>
-                    <span>{String(item.content.text ?? "")}</span>
-                    <small>revision {item.revision}</small>
-                  </article>
-                ))}
-              </div>
-            </details>
-          ) : null}
-
-          {bootstrap.archived_projects.length > 0 ? (
-            <details className="thread-archive">
-              <summary>Архив проектов ({bootstrap.archived_projects.length})</summary>
-              <div className="project-list">
-                {bootstrap.archived_projects.map((project) => (
-                  <button
-                    className="project-item"
-                    key={project.id}
-                    onClick={() => void handleRestoreProject(project.id)}
-                    type="button"
-                  >
-                    <span>{project.title}</span>
-                    <small>Вернуть в активные</small>
-                  </button>
-                ))}
-              </div>
-            </details>
-          ) : null}
-        </section>),
+    shared: <SharedWorkspace groups={sharedGroups} busy={workspaceBusy || isStartingChat} onOpen={(id) => void handleOpenGroup(id)} onCreate={() => setGroupDialog("create")} onJoin={() => setGroupDialog("join")} />,
+    projects: <ProjectWorkspace projects={personalProjects.map((project) => ({...project, chat_count: bootstrap.chat_threads.filter((thread) => thread.project_id === project.id && visibleThread(thread)).length}))} archived={bootstrap.archived_projects.filter((project) => !project.shared)} project={workspaceProject} threads={projectThreads} busy={workspaceBusy || isStartingChat} dialog={projectDialog} error={error} onDialog={(mode) => { setError(null); setProjectDialog(mode); }} onBack={() => navigate("projects")} onOpen={(id) => void handleFocusProject(id)} onChat={(id) => void handleSelectChat(id)} onNewChat={() => void handleCreateChat(workspaceProject?.id || null)} onSave={(title, description) => projectDialog === "create" ? handleCreateProject(title, description) : handleRenameProject(title, description)} onArchive={() => void handleArchiveProject()} onDelete={() => void handleDeleteProject()} onRestore={(id) => void handleRestoreProject(id)} />,
     memory: (        <section className="panel">
           <div className="panel-heading">
             <div>
@@ -2566,9 +2534,6 @@ export default function App() {
               <p className="eyebrow">Files</p>
               <h3>Файлы агента</h3>
             </div>
-            <button className="ghost-button" disabled={isOpeningWorkspace} onClick={() => void handleOpenWorkspaceFolder()} type="button">
-              {isOpeningWorkspace ? "Открываю..." : "Открыть"}
-            </button>
           </div>
           <div className="workspace-file-list">
             {bootstrap.workspace_files.length === 0 ? (
@@ -2613,7 +2578,7 @@ export default function App() {
           </div>
           <div className="model-controls">
             {modelPicker()}
-            <p className="muted">Выбор применяется сразу. Модель также можно сменить в чате.</p>
+            <p className="muted">Модель по умолчанию для новых диалогов. В каждом чате можно выбрать свою.</p>
           </div>
         </section>
         <section className="panel panel-compact">
@@ -2848,21 +2813,7 @@ export default function App() {
               <h3>Журнал действий</h3>
             </div>
           </div>
-          <div className="action-log-list">
-            {bootstrap.action_logs.length === 0 ? (
-              <p className="muted">Действий пока нет.</p>
-            ) : (
-              bootstrap.action_logs.slice(0, 6).map((log) => (
-                <article className="action-log-item" key={log.id}>
-                  <div>
-                    <strong>{log.tool_name}</strong>
-                    <span className={`state-badge state-${log.status}`}>{log.status}</span>
-                  </div>
-                  <p>{log.result}</p>
-                </article>
-              ))
-            )}
-          </div>
+          <CompactActionLog logs={bootstrap.action_logs} />
         </section> : null}
     </div>),
   };
@@ -2881,14 +2832,14 @@ export default function App() {
         <button className="nav-search" onClick={() => navigate("chat")} type="button"><WorkspaceIcon name="search" /><span>Найти диалог</span></button>
         <nav className="primary-nav" aria-label="Разделы">
           {WORKSPACE_NAV.map((item) => (
-            <button key={item.id} className={view === item.id ? "nav-item is-active" : "nav-item"} aria-label={item.label} aria-current={view === item.id ? "page" : undefined} onClick={() => navigate(item.id)} type="button">
+            <button key={item.id} className={navigationView === item.id ? "nav-item is-active" : "nav-item"} aria-label={item.label} aria-current={navigationView === item.id ? "page" : undefined} onClick={() => navigate(item.id)} type="button">
               <WorkspaceIcon name={item.icon} /><span>{item.label}</span>
               {item.id === "chat" && personalThreads.length > 0 ? <small>{personalThreads.length}</small> : null}
             </button>
           ))}
         </nav>
-        <div className="nav-projects"><div className="nav-caption"><span>Рабочие области</span><button className="icon-button" aria-label="Новый проект" onClick={() => { navigate("projects"); void handleCreateProject(); }} type="button"><WorkspaceIcon name="plus" /></button></div>
-          {personalProjects.slice(0, 5).map((project) => <button key={project.id} className="nav-project" disabled={isSending} onClick={() => void handleFocusProject(project.id)} type="button" title={project.title}><i /><span>{project.title}</span></button>)}
+        <div className="nav-projects"><div className="nav-caption"><span>Рабочие области</span><button className="icon-button" aria-label="Новый проект" disabled={isStartingChat} onClick={() => { navigate("projects"); setProjectDialog("create"); }} type="button"><WorkspaceIcon name="plus" /></button></div>
+          {personalProjects.slice(0, 5).map((project) => <button key={project.id} className="nav-project" disabled={isStartingChat} onClick={() => void handleFocusProject(project.id)} type="button" title={project.title}><i /><span>{project.title}</span></button>)}
           {personalProjects.length === 0 ? <p className="nav-empty">Место для твоих идей</p> : null}
           {personalProjects.length > 5 ? <button className="text-button" type="button" onClick={() => navigate("projects")}>Все проекты</button> : null}
         </div>
@@ -2899,7 +2850,7 @@ export default function App() {
       </aside>
 
       <main className={`workspace workspace-view-${isChatView ? "chat" : view}`} ref={workspaceRef}>
-        <div className="workspace-toolbar"><button ref={menuButtonRef} className="icon-button mobile-menu-button" aria-label="Открыть навигацию" aria-expanded={isSidebarOpen} aria-controls="workspace-navigation" onClick={() => setIsSidebarOpen(true)} type="button"><WorkspaceIcon name="menu" /></button><span>{view === "home" ? "Личное пространство" : view === "settings" ? "Настройки" : WORKSPACE_NAV.find((item) => item.id === view)?.label}</span><button className="icon-button" aria-label="Уведомления и задачи" onClick={() => navigate("tasks")} type="button"><WorkspaceIcon name="bell" />{bootstrap.notifications.some((item) => !item.read_at) ? <i className="notification-dot" /> : null}</button></div>
+        <div className="workspace-toolbar"><button ref={menuButtonRef} className="icon-button mobile-menu-button" aria-label="Открыть навигацию" aria-expanded={isSidebarOpen} aria-controls="workspace-navigation" onClick={() => setIsSidebarOpen(true)} type="button"><WorkspaceIcon name="menu" /></button>{isProjectChat && chatProject ? <button className="project-toolbar-link text-button" type="button" aria-label={`Открыть проект ${chatProject.title}`} disabled={isStartingChat} onClick={() => void handleFocusProject(chatProject.id)}><WorkspaceIcon name="projects" /><span>{chatProject.title}</span></button> : <span>{view === "home" ? "Личное пространство" : view === "settings" ? "Настройки" : WORKSPACE_NAV.find((item) => item.id === view)?.label}</span>}<button className="icon-button" aria-label="Уведомления и задачи" onClick={() => navigate("tasks")} type="button"><WorkspaceIcon name="bell" />{bootstrap.notifications.some((item) => !item.read_at) ? <i className="notification-dot" /> : null}</button></div>
         {runtimeNotice ? <aside className="runtime-notice" role="status" aria-label="Обновление сервера">{runtimeNotice}</aside> : null}
         {error ? <div className="workspace-error" role="alert">{error}<button className="icon-button" aria-label="Закрыть сообщение об ошибке" onClick={() => setError(null)} type="button"><WorkspaceIcon name="close" /></button></div> : null}
         {isLoading ? <p className="workspace-loading" role="status">Загружаем твоё пространство…</p> : null}
@@ -2909,30 +2860,29 @@ export default function App() {
             <form className="home-composer" onSubmit={handleHomeSubmit}>
               <textarea ref={textareaRef} aria-label="Новая задача" value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && window.matchMedia("(pointer: fine)").matches) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="Попроси Avelin сделать что-нибудь…" rows={3} disabled={isStartingChat} />
               {attachmentChips()}
-              <div className="home-composer-bottom"><div className="composer-tools">{attachmentControls()}{modelPicker()}</div><button className="send-icon" aria-label="Начать диалог" type="submit" disabled={(!input.trim() && !attachments.length) || isSending || isStartingChat || isLoading || isUploading || isModelSaving}><WorkspaceIcon name="arrow" /></button></div>
+              <div className="home-composer-bottom"><div className="composer-tools">{attachmentControls()}{modelPicker()}</div><button className="send-icon" aria-label="Начать диалог" type="submit" disabled={(!input.trim() && !attachments.length) || isStartingChat || isLoading || isUploading || isModelSaving}><WorkspaceIcon name="arrow" /></button></div>
             </form>
-            <div className="home-suggestions">{QUICK_ACTIONS.slice(2).map((action) => <button className="text-button" type="button" key={action} onClick={() => void handleQuickAction(action)}>{action}<WorkspaceIcon name="arrow" /></button>)}</div>
+            <HomeSuggestions token={authToken} onSelect={(prompt) => void handleQuickAction(prompt)} disabled={isStartingChat} />
             <section className="home-recent" aria-labelledby="recent-heading">
               <div className="section-heading"><div><h3 id="recent-heading">Продолжить работу</h3><p>Твои последние диалоги</p></div><button className="text-button" type="button" onClick={() => navigate("chat")}>Все диалоги <WorkspaceIcon name="arrow" /></button></div>
               <div className="recent-grid">
-                {personalThreads.filter((thread) => thread.message_count > 0).slice(0, 3).map((thread) => <button className="recent-card" type="button" key={thread.id} disabled={isSending} onClick={() => void handleSelectChat(thread.id)}><div className="recent-card-top"><span className="card-icon"><WorkspaceIcon name={thread.project_id ? "projects" : "chat"} /></span><small>{bootstrap.projects.find((project) => project.id === thread.project_id)?.title ?? "Личное"}</small></div><h4>{thread.title}</h4><p>{thread.message_count} сообщений</p><footer><span>{formatFileTime(thread.updated_at)}</span><WorkspaceIcon name="arrow" /></footer></button>)}
+                {personalThreads.filter((thread) => thread.message_count > 0).slice(0, 3).map((thread) => <button className="recent-card" type="button" key={thread.id} disabled={isStartingChat} onClick={() => void handleSelectChat(thread.id)}><div className="recent-card-top"><span className="card-icon"><WorkspaceIcon name={thread.project_id ? "projects" : "chat"} /></span><small>{bootstrap.projects.find((project) => project.id === thread.project_id)?.title ?? "Личное"}</small></div><h4>{thread.title}</h4><p>{thread.message_count} сообщений</p><footer><span>{formatFileTime(thread.updated_at)}</span><WorkspaceIcon name="arrow" /></footer></button>)}
                 {!personalThreads.some((thread) => thread.message_count > 0) ? <div className="quiet-empty"><WorkspaceIcon name="chat" /><p>Здесь появятся твои диалоги.</p><span>Начни с первого запроса выше.</span></div> : null}
               </div>
             </section>
             <section className="home-activity"><div className="section-heading"><div><h3>Активность</h3><p>Последние действия Avelin</p></div><button className="text-button" type="button" onClick={() => { setSettingsView("activity"); navigate("settings"); }}>Журнал <WorkspaceIcon name="arrow" /></button></div>
-              {bootstrap.action_logs.slice(0, 3).map((log) => <div className="activity-row" key={log.id}><span className="card-icon"><WorkspaceIcon name="tasks" /></span><div><strong>{({ create_docx: "Документ Word", write_file: "Сохранение файла", web_search: "Поиск в интернете", browser_read: "Чтение страницы", http_request: "Запрос к сайту" } as Record<string, string>)[log.tool_name] ?? log.tool_name}</strong><span>{log.status === "completed" ? "Завершено" : log.status === "failed" ? "Не удалось выполнить" : log.status === "blocked" ? "Ожидает разрешения" : log.status}</span></div><time>{formatFileTime(log.created_at)}</time></div>)}
-              {bootstrap.action_logs.length === 0 ? <p className="activity-empty">Пока здесь тихо. Выполненные действия появятся автоматически.</p> : null}
+              <CompactActionLog logs={bootstrap.action_logs} limit={3} compact />
             </section>
           </div>
         ) : null}
         {isChatView ? <div className={`chat-layout ${isChatListOpen ? "chat-list-open" : ""}`}>
           <button className="mobile-chat-toggle text-button" type="button" aria-expanded={isChatListOpen} onClick={() => setIsChatListOpen(!isChatListOpen)}>
-            <WorkspaceIcon name="chat" />{isChatListOpen ? "Вернуться к сообщению" : "Все диалоги"}
+            <WorkspaceIcon name="chat" />{isChatListOpen ? "Вернуться к сообщению" : isProjectChat ? "Диалоги проекта" : "Все диалоги"}
           </button>
           <div className="chat-browser">
             <div className="section-heading">
-              <h2>{view === "shared" ? "Группа" : "Диалоги"}</h2>
-              <button className="icon-button" aria-label="Новый диалог" disabled={isSending || isStartingChat || isSharedViewer} type="button" onClick={() => void handleCreateChat()}><WorkspaceIcon name="plus" /></button>
+              <h2>{view === "shared" ? "Группа" : isProjectChat ? "Диалоги проекта" : "Диалоги"}</h2>
+              <button className="icon-button" aria-label="Новый диалог" disabled={isStartingChat || isSharedViewer} type="button" onClick={() => void handleCreateChat()}><WorkspaceIcon name="plus" /></button>
             </div>
             <label className="chat-search">
               <WorkspaceIcon name="search" />
@@ -2940,9 +2890,7 @@ export default function App() {
             </label>
             <div className="chat-browser-list">
               {visibleThreads.filter((thread) => thread.title.toLocaleLowerCase().includes(chatSearch.toLocaleLowerCase())).map((thread) => (
-                <button type="button" key={thread.id} disabled={isSending} aria-current={thread.id === activeThreadId ? "true" : undefined} className={thread.id === activeThreadId ? "chat-list-item is-active" : "chat-list-item"} onClick={() => void handleSelectChat(thread.id)} title={thread.title}>
-                  <span>{thread.title}</span><small>{thread.message_count} сообщений</small>
-                </button>
+                <ChatListRow key={thread.id} thread={thread} selected={thread.id === activeThreadId} disabled={isStartingChat} canDelete={!isSharedViewer} onOpen={() => void handleSelectChat(thread.id)} onDelete={() => void handleDeleteChat(thread.id)} />
               ))}
               {!visibleThreads.some((thread) => thread.title.toLocaleLowerCase().includes(chatSearch.toLocaleLowerCase())) ? (
                 <p className="chat-search-empty" role="status">{chatSearch ? "Диалоги не найдены. Попробуй другое название." : "Здесь появятся твои диалоги."}</p>
@@ -2952,33 +2900,34 @@ export default function App() {
           </div>
         <section className="chat-card">
           <div className="chat-header">
-            <div>
-              <strong title={(isGroupChat ? chatProject?.title : bootstrap.active_thread.title) || "Диалог"}>{(isGroupChat ? chatProject?.title : bootstrap.active_thread.title) || "Диалог"}</strong>
+            {isGroupChat && chatProject ? <SharedChatHeader project={chatProject} participantCount={projectMembers.length} onBack={() => navigate("shared")} onSettings={() => { setInviteLink(""); setGroupDialog("settings"); }} /> : <div>
+              <strong title={(isGroupChat ? chatProject?.title : selectedThread.title) || "Диалог"}>{(isGroupChat ? chatProject?.title : selectedThread.title) || "Диалог"}</strong>
               <p className="muted">{messageCountLabel}</p>
-            </div>
-            {modelPicker()}
-            {isGroupChat ? <button className="icon-button" type="button" aria-label="Настройки группы" onClick={() => { setInviteLink(""); setGroupDialog("settings"); }}><WorkspaceIcon name="settings" /></button> : null}
+            </div>}
+            {modelPicker("", true)}
+            <button className="icon-button" type="button" aria-label="Вложения диалога" title="Вложения диалога" onClick={() => setMediaOpen(true)}><WorkspaceIcon name="files" /></button>
           </div>
 
+          {!isGroupChat && chatProject?.role !== "viewer" ? <LongTaskPanel token={authToken} threadId={activeThreadId} onOpenChat={(id: string) => void handleSelectChat(id)} disabled={isSending} /> : null}
           <div className="messages" role="region" aria-label="Сообщения диалога" tabIndex={0} onScroll={(event) => {
             const element = event.currentTarget;
             followLatestMessageRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
           }}>
-            {messages.length === 0 && !isLoading ? (
+            {renderedMessages.length === 0 && !isLoading ? (
               <div className="empty-state">
                 <p>{isGroupChat ? "Начните разговор в группе" : "Напиши первое сообщение"}</p>
                 <span>{isGroupChat ? "Обратись к @Avelin, когда нужна помощь агента." : "Диалог, файлы и инструменты — в одном месте."}</span>
               </div>
             ) : null}
 
-            {messages.map((message, index) => {
+            {renderedMessages.map((message, index) => {
               const messageKey = `${message.role}-${index}`;
 
               return (
                 <article className={`message message-${message.role} message-${message.status ?? "complete"}`} key={messageKey}>
                   {isGroupChat ? <span className="message-role">{formatRoleLabel(message, bootstrap.agent_name, true)}</span> : null}
                   <div className="message-content">
-                    {message.role === "assistant" && index === messages.length - 1 && generationActivity.length > 0 ? <details className="generation-activity"><summary>Подробности{isSending ? ` · ${generationActivity[generationActivity.length - 1]}` : ""}</summary><ol aria-label="Действия Avelin" aria-live="polite">{generationActivity.map((activity, activityIndex) => <li key={activityIndex}>{activity}</li>)}</ol></details> : null}
+                    {message.role === "assistant" && index === renderedMessages.length - 1 && generationActivity.length > 0 ? <details className="generation-activity"><summary>Подробности{isSending ? ` · ${generationActivity[generationActivity.length - 1]}` : ""}</summary><ol aria-label="Действия Avelin" aria-live="polite">{generationActivity.map((activity, activityIndex) => <li key={activityIndex}>{activity}</li>)}</ol></details> : null}
                     {message.status === "pending" && !message.content ? (
                       <div className="typing-dots" role="status" aria-label="Avelin печатает"><span /><span /><span /></div>
                     ) : animatedMessageKey === messageKey ? (
@@ -2991,7 +2940,7 @@ export default function App() {
                           pre: ({ node: _node, children }) => <CopyableCode>{children}</CopyableCode>,
                           a: ({ node: _node, href, children, ...props }) => {
                             const artifact = artifactForLink(href, message.artifacts);
-                            if (artifact) return <button className="markdown-file-link" type="button" disabled={downloadingArtifactPath === artifact.path} onClick={() => void handleDownloadArtifact(artifact)}>{children}</button>;
+                            if (artifact) return <button className="markdown-file-link" type="button" disabled={downloadingArtifactPath === artifact.path} onClick={() => void handleDownloadArtifact(artifact, message.id)}>{children}</button>;
                             if (!href || (!/^https?:\/\//i.test(href) && !href.startsWith("#") && !href.startsWith("mailto:"))) return <span title="Файл не подтверждён среди результатов">{children}</span>;
                             return <a {...props} href={href} target="_blank" rel="noreferrer">{children}</a>;
                           },
@@ -3010,13 +2959,13 @@ export default function App() {
                     {message.error ? <p className="message-error">{message.error}</p> : null}
                     {message.artifacts?.length ? (
                       <div className="message-artifacts" aria-label={message.role === "user" ? "Вложения" : "Созданные файлы"}>
-                        {message.artifacts.map((artifact) => /\.(png|jpe?g|webp|heic|heif|avif|gif|tiff?|bmp)$/i.test(artifact.path) ? <SentImage key={artifact.path} artifact={artifact} token={authToken} onOpen={(url, file) => setOpenedImage({ url, artifact: file })} onDownload={() => void handleDownloadArtifact(artifact)} /> : (
+                        {message.artifacts.map((artifact) => /\.(png|jpe?g|webp|heic|heif|avif|gif|tiff?|bmp)$/i.test(artifact.path) ? <SentImage key={artifact.path} artifact={artifact} token={authToken} previewUrl={isGroupChat && message.id ? threadMediaUrl(activeThreadId, message.id, artifact.path, true) : undefined} onOpen={(url, file) => setOpenedImage({ url, artifact: file, messageId: message.id })} onDownload={() => void handleDownloadArtifact(artifact, message.id)} /> : (
                           <button
                             className="artifact-card"
                             disabled={downloadingArtifactPath === artifact.path}
                             key={artifact.path}
                             title={artifact.name}
-                            onClick={() => void handleDownloadArtifact(artifact)}
+                            onClick={() => void handleDownloadArtifact(artifact, message.id)}
                             type="button"
                           >
                             <span className="artifact-icon" aria-hidden="true">
@@ -3038,10 +2987,15 @@ export default function App() {
               );
             })}
 
+            {chatApprovals.map((approval) => <aside className="permission-chat-card" key={approval.id} aria-label="Запрос разрешения"><strong>{approval.summary || approval.tool_name}</strong><p>{approval.reason || "Для этого действия требуется твоё разрешение. Подробности можно проверить перед подтверждением."}</p><button className="text-button" type="button" onClick={() => setApprovalDialogDismissed(false)}>Проверить и ответить</button></aside>)}
+            {unavailableApprovals.map((approval) => <aside className="permission-chat-card" key={approval.id} aria-label="Недействительное разрешение"><strong>{approval.summary || approval.tool_name}</strong>{approval.reason ? <p>{approval.reason}</p> : null}<p>{approval.status === "expired" ? "Срок разрешения истёк." : approval.status === "revoked" ? "Разрешение отозвано." : "Запрос разрешения прерван."} Попроси Avelin продолжить задачу для нового запроса.</p></aside>)}
+            {chatQuestions.map((question) => <ChatClarification key={question.id} question={question} disabled={isSending || durable.checking || durable.unconfirmed} onAnswer={(answer) => void handleQuestionAnswer(question, answer)} />)}
             <div ref={messagesEndRef} />
           </div>
 
           <form className="composer" onSubmit={handleSubmit}>
+            {durable.notice ? <p className="muted" role="status" aria-label="Состояние ответа" style={{ fontSize: 12, margin: "0 0 8px", lineHeight: 1.4 }}>{durable.notice}</p> : null}
+            {durable.unconfirmed ? <button className="text-button" type="button" onClick={() => { if (durable.canRetry) void durable.retryStart(); else void durable.recover(); }}>{durable.canRetry ? "Повторить отправку" : "Проверить состояние"}</button> : null}
             {chatApprovals.length ? <button className="approval-banner" type="button" onClick={() => setApprovalDialogDismissed(false)}>Требуется подтверждение · {chatApprovals[0].summary || chatApprovals[0].tool_name}</button> : null}
             {attachmentChips()}
             <textarea
@@ -3059,21 +3013,22 @@ export default function App() {
               <span className="muted">{window.matchMedia("(pointer: fine)").matches ? "Enter — отправить · Shift + Enter — новая строка" : "Enter — новая строка"}</span>
               <div className="composer-actions">
                 {isSending ? (
-                  <button className="stop-button" onClick={handleStopGeneration} type="button">Остановить</button>
+                  <button className="stop-button" disabled={durable.stopping} onClick={handleStopGeneration} type="button">{durable.stopping ? "Ждём подтверждение…" : "Остановить"}</button>
                 ) : (
-                  <button className="send-icon" aria-label="Отправить" title="Отправить" disabled={(!input.trim() && !attachments.length) || isSharedViewer || isUploading || isModelSaving || chatApprovals.length > 0} type="submit"><WorkspaceIcon name="arrow" /></button>
+                  <button className="send-icon" aria-label="Отправить" title="Отправить" disabled={(!input.trim() && !attachments.length) || isSharedViewer || isUploading || isModelSaving || isLoading || durable.checking || durable.unconfirmed || chatApprovals.length > 0 || chatQuestions.length > 0} type="submit"><WorkspaceIcon name="arrow" /></button>
                 )}
               </div>
             </div>
           </form>
         </section></div> : null}
-        {view !== "home" && !isChatView ? <div className="workspace-page"><header className="page-heading"><h2>{view === "settings" ? "Настройки" : WORKSPACE_NAV.find((item) => item.id === view)?.label}</h2></header>{view === "settings" ? <nav className="settings-tabs" aria-label="Разделы настроек">{SETTINGS_NAV.map((item) => <button type="button" key={item.id} aria-current={settingsView === item.id ? "page" : undefined} className={settingsView === item.id ? "is-active" : ""} onClick={() => setSettingsView(item.id)}>{item.label}</button>)}</nav> : null}{panels[view as keyof typeof panels]}</div> : null}
+        {view !== "home" && !isChatView ? <div className="workspace-page">{!(view === "projects" && workspaceProject) ? <header className="page-heading"><h2>{view === "settings" ? "Настройки" : WORKSPACE_NAV.find((item) => item.id === view)?.label}</h2></header> : null}{view === "settings" ? <nav className="settings-tabs" aria-label="Разделы настроек">{SETTINGS_NAV.map((item) => <button type="button" key={item.id} aria-current={settingsView === item.id ? "page" : undefined} className={settingsView === item.id ? "is-active" : ""} onClick={() => setSettingsView(item.id)}>{item.label}</button>)}</nav> : null}{panels[view as keyof typeof panels]}</div> : null}
       </main>
-      <WorkspaceDialog open={Boolean(openedImage)} title={openedImage?.artifact.name || "Изображение"} onClose={() => setOpenedImage(null)}>{openedImage ? <div className="image-lightbox"><img src={openedImage.url} alt={openedImage.artifact.name} /><button className="ghost-button" type="button" onClick={() => void handleDownloadArtifact(openedImage.artifact)}>Скачать оригинал</button></div> : null}</WorkspaceDialog>
+      <ThreadMediaDrawer open={mediaOpen} token={authToken} threadId={activeThreadId || null} onClose={() => setMediaOpen(false)} onError={setError} />
+<WorkspaceDialog open={Boolean(openedImage)} title={openedImage?.artifact.name || "Изображение"} onClose={() => setOpenedImage(null)}>{openedImage ? <div className="image-lightbox"><img src={openedImage.url} alt={openedImage.artifact.name} /><button className="ghost-button" type="button" onClick={() => void handleDownloadArtifact(openedImage.artifact, openedImage.messageId)}>Скачать оригинал</button></div> : null}</WorkspaceDialog>
       <WorkspaceDialog open={groupDialog === "create"} title="Новая группа" onClose={() => { if (!workspaceBusy) setGroupDialog(null); }}><form className="dialog-form" onSubmit={handleCreateGroup}><label>Название<input value={groupTitle} onChange={(event) => setGroupTitle(event.target.value)} required maxLength={120} placeholder="Например, Семья или Команда" /></label><label>Описание<textarea value={groupDescription} onChange={(event) => setGroupDescription(event.target.value)} maxLength={1000} rows={3} placeholder="Необязательно" /></label><p className="muted">В группе будет отдельный общий чат. По умолчанию Avelin отвечает по @Avelin.</p><button type="submit" disabled={workspaceBusy || !groupTitle.trim()}>{workspaceBusy ? "Создаём…" : "Создать группу"}</button></form></WorkspaceDialog>
       <WorkspaceDialog open={groupDialog === "join"} title="Присоединиться к группе" onClose={() => { if (!workspaceBusy) setGroupDialog(null); }}><form className="dialog-form" onSubmit={handleJoinGroup}><p className="muted">Вставь приглашение. После подтверждения тебе станет доступен общий чат группы.</p><label>Ссылка или код приглашения<input value={joinToken} onChange={(event) => setJoinToken(event.target.value)} required autoComplete="off" /></label><button type="submit" disabled={workspaceBusy || !joinToken.trim()}>{workspaceBusy ? "Подключаем…" : "Присоединиться"}</button></form></WorkspaceDialog>
       <WorkspaceDialog open={groupDialog === "settings"} title={activeProject?.title || "Настройки группы"} onClose={() => setGroupDialog(null)}><div className="group-settings"><label>Когда отвечает Avelin<select value={activeProject?.agent_mode || "mention_only"} disabled={activeProject?.role === "viewer" || workspaceBusy} onChange={(event) => void handleAgentMode(event.target.value as "mention_only" | "explicit" | "off")}><option value="mention_only">По обращению @Avelin</option><option value="explicit">На каждое сообщение</option><option value="off">Выключен</option></select></label><section><h3>Участники</h3>{projectMembers.map((member) => <div className="group-member" key={member.user_id}><span><strong>{member.display_name}</strong><small>{member.role === "owner" ? "Владелец" : member.role === "editor" ? "Участник" : "Только чтение"}</small></span>{activeProject?.role === "owner" && member.role !== "owner" ? <button className="text-button" disabled={workspaceBusy} type="button" onClick={() => void handleRemoveMember(member)}>Удалить</button> : null}</div>)}</section>{activeProject?.role === "owner" ? <form className="dialog-form group-invite" onSubmit={handleCreateGroupInvite}><h3>Пригласить участника</h3><label>Email<input type="email" value={inviteEmail} onChange={(event) => { setInviteEmail(event.target.value); setInviteLink(""); }} placeholder="Необязательно — для персональной ссылки" /></label><label>Доступ<select value={inviteRole} onChange={(event) => { setInviteRole(event.target.value as "editor" | "viewer"); setInviteLink(""); }}><option value="editor">Участник</option><option value="viewer">Только чтение</option></select></label><button type="submit" disabled={workspaceBusy}>{workspaceBusy ? "Создаём…" : "Создать ссылку"}</button>{inviteLink ? <label>Одноразовое приглашение<input aria-label="Ссылка приглашения" readOnly value={inviteLink} onFocus={(event) => event.target.select()} /><small>{inviteEmail ? `Войти по этой ссылке может аккаунт ${inviteEmail}.` : "Ссылка даёт доступ одному вошедшему участнику."} Отправь её получателю.</small><button className="ghost-button" type="button" onClick={() => void navigator.clipboard.writeText(inviteLink).catch(() => setError("Выдели и скопируй ссылку вручную."))}>Копировать ссылку</button></label> : null}</form> : null}</div></WorkspaceDialog>
-      <WorkspaceDialog open={isChatView && chatApprovals.length > 0 && !approvalDialogDismissed} title="Разрешить действие?" onClose={() => setApprovalDialogDismissed(true)}>{chatApprovals[0] ? <div className="approval-dialog"><p>{chatApprovals[0].summary || chatApprovals[0].tool_name}</p><p className="muted">После решения Avelin продолжит работу в этом чате.</p>{chatApprovals[0].expires_at ? <p className="approval-expiry">Действует до {formatFileTime(chatApprovals[0].expires_at)}</p> : null}<details><summary>Подробности действия</summary><dl><dt>Инструмент</dt><dd>{chatApprovals[0].tool_name}</dd>{chatApprovals[0].arguments ? <><dt>Аргументы</dt><dd><pre>{JSON.stringify(chatApprovals[0].arguments, null, 2)}</pre></dd></> : null}<dt>Область доступа</dt><dd><pre>{JSON.stringify(chatApprovals[0].scope, null, 2)}</pre></dd></dl></details><div className="dialog-button-row"><button className="ghost-button" type="button" disabled={isSending || Boolean(approvingStepId)} onClick={() => void handleChatApproval(chatApprovals[0], "denied")}>Отклонить</button><button type="button" disabled={isSending || Boolean(approvingStepId)} onClick={() => void handleChatApproval(chatApprovals[0], "approved")}>Разрешить</button></div></div> : null}</WorkspaceDialog>
+<WorkspaceDialog open={isChatView && chatApprovals.length > 0 && !approvalDialogDismissed} title="Разрешить действие?" onClose={() => setApprovalDialogDismissed(true)}>{chatApprovals[0] ? <div className="approval-dialog"><p>{chatApprovals[0].summary || chatApprovals[0].tool_name}</p><p className="permission-reason">{chatApprovals[0].reason || "Для этого действия требуется твоё разрешение."}</p><p className="muted">После решения Avelin продолжит работу в этом чате.</p>{chatApprovals[0].expires_at ? <p className="approval-expiry">Действует до {formatFileTime(chatApprovals[0].expires_at)}</p> : null}<details><summary>Подробности действия</summary><dl><dt>Инструмент</dt><dd>{chatApprovals[0].tool_name}</dd>{chatApprovals[0].arguments ? <><dt>Аргументы</dt><dd><pre>{JSON.stringify(chatApprovals[0].arguments, null, 2)}</pre></dd></> : null}<dt>Область доступа</dt><dd><pre>{JSON.stringify(chatApprovals[0].scope, null, 2)}</pre></dd></dl></details><div className="dialog-button-row"><button className="ghost-button" type="button" disabled={isSending || Boolean(approvingStepId)} onClick={() => void handleChatApproval(chatApprovals[0], "denied")}>Отклонить</button><button type="button" disabled={isSending || Boolean(approvingStepId)} onClick={() => void handleChatApproval(chatApprovals[0], "approved")}>Разрешить</button></div></div> : null}</WorkspaceDialog>
     </div>
   );
 }

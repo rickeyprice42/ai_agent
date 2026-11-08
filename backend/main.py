@@ -40,6 +40,7 @@ async def _automation_scheduler(stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
             queued = await asyncio.to_thread(agent_service.tick_automations)
+            await asyncio.to_thread(agent_service.daily_long_task_reports)
             if queued:
                 logger.info("automation scheduler queued=%s", len(queued))
         except Exception:
@@ -75,6 +76,18 @@ async def _push_worker(stop: asyncio.Event) -> None:
             pass
 
 
+async def _long_task_worker(stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(agent_service.process_long_task_queue,limit=1)
+        except Exception:
+            logger.exception('long task worker failed')
+        try:
+            await asyncio.wait_for(stop.wait(),timeout=5)
+        except TimeoutError:
+            pass
+
+
 async def _title_worker(stop: asyncio.Event) -> None:
     def provider_for(user_id):
         settings = replace(agent_service.settings_for_user(user_id), llm_timeout_seconds=12,
@@ -93,20 +106,25 @@ async def _title_worker(stop: asyncio.Event) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    from backend.chat_runs import chat_runs_for
+    chat_runs = chat_runs_for(agent_service)
     stop = asyncio.Event()
     scheduler = asyncio.create_task(_automation_scheduler(stop))
     automation_worker = asyncio.create_task(_automation_queue_worker(stop))
     push_worker = asyncio.create_task(_push_worker(stop))
     title_worker = asyncio.create_task(_title_worker(stop))
+    long_task_worker = asyncio.create_task(_long_task_worker(stop))
     try:
         yield
     finally:
+        chat_runs.close()
         stop.set()
         scheduler.cancel()
         automation_worker.cancel()
         push_worker.cancel()
         title_worker.cancel()
-        for worker in (scheduler, automation_worker, push_worker, title_worker):
+        long_task_worker.cancel()
+        for worker in (scheduler, automation_worker, push_worker, title_worker,long_task_worker):
             with suppress(asyncio.CancelledError):
                 await worker
 

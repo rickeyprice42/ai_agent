@@ -121,8 +121,8 @@ function openDownload() {
 function openAuth() {
   const authPath = config.auth.path || "./app/";
   if (config.auth.enabled) {
-    const destination = new URL(safeConfiguredUrl(authPath, "./app/"));
-    destination.searchParams.set("returnTo", safeReturnPath());
+    const destination = new URL(safeConfiguredUrl(authPath, "./app/", true));
+    if (destination.origin === location.origin) destination.searchParams.set("returnTo", safeReturnPath());
     emitCtaEvent("auth_open", null, true);
     location.assign(destination.href);
     return;

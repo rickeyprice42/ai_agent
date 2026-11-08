@@ -21,6 +21,10 @@ class PushEndpoint(BaseModel):
     endpoint: str = Field(min_length=1, max_length=4096)
 
 
+class PushTestRequest(BaseModel):
+    request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{16,80}$")
+
+
 @router.get("/config")
 def push_config(user: dict = Depends(routes.current_user)):
     return push_service_for(routes.agent_service).public_config(user["id"])
@@ -40,8 +44,13 @@ def push_unsubscribe(payload: PushEndpoint, user: dict = Depends(routes.current_
 
 
 @router.post("/test")
-def push_test(user: dict = Depends(routes.current_user)):
+def push_test(payload: PushTestRequest | None = None, user: dict = Depends(routes.current_user)):
     try:
-        return push_service_for(routes.agent_service).test(user["id"])
+        return push_service_for(routes.agent_service).test(user["id"], payload.request_id if payload else None)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/test/{request_id}")
+def push_test_status(request_id: str, user: dict = Depends(routes.current_user)):
+    return push_service_for(routes.agent_service).test_status(user["id"], request_id)

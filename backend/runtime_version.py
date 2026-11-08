@@ -12,7 +12,7 @@ API_CONTRACT = 2
 def source_signature(root: Path = ROOT) -> str:
     digest = sha256()
     files = list((root / 'backend').glob('*.py')) + list((root / 'src/ai_agent').rglob('*.py'))
-    for candidate in [root / 'requirements.txt']:
+    for candidate in [root / 'requirements.txt', root / 'requirements.server.txt']:
         if candidate.is_file():
             files.append(candidate)
     for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):

@@ -227,7 +227,9 @@ class MemoryStore:
             name=message.name,
             thread_id=self.thread_id,
             artifacts=message.artifacts,
-            author_user_id=self.user_id if message.role == "user" else None,
+            # The role still identifies the assistant. Author attribution binds
+            # generated files to the initiating member's isolated workspace.
+            author_user_id=self.user_id,
         )
         self.database.auto_title_chat_thread(self.user_id, self.thread_id)
         return message_id
@@ -250,6 +252,7 @@ class MemoryStore:
             provider=provider,
             model=model,
             artifacts=artifacts,
+            author_user_id=self.user_id,
         )
 
     def update_message(

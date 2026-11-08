@@ -1,10 +1,75 @@
 from pathlib import Path
 import sys
 import unittest
+from io import BytesIO
+from urllib import parse
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
-from ai_agent.tools.http import _plan_search,_rank_search_results
+from ai_agent.tools.http import HttpSandbox,HttpTransportError,_decode_body,_plan_search,_rank_search_results
+
+class SearchResponse(BytesIO):
+    headers={'Content-Type':'text/html; charset=utf-8'}
+
 
 class SearchAuditTests(unittest.TestCase):
+    def test_utf8_byte_cap_and_compressed_body_are_honestly_bounded(self):
+        import gzip
+        response=SearchResponse(('я'*20).encode())
+        response.status=200
+        response.getcode=lambda:200
+        response.geturl=lambda:'https://example.com/data'
+        with patch.object(HttpSandbox,'_validate_url',return_value=parse.urlparse('https://example.com/data')),patch('ai_agent.tools.http.request.build_opener') as opener:
+            opener.return_value.open.return_value=response
+            result=HttpSandbox(max_response_chars=10).fetch('https://example.com/data')
+        self.assertTrue(result['truncated'])
+        text,truncated=_decode_body(gzip.compress(b'x'*1000000),1000,{'Content-Encoding':'gzip'})
+        self.assertEqual(len(text),1000)
+        self.assertTrue(truncated)
+
+    def test_direct_ssl_exception_is_typed_as_tls_not_private_network(self):
+        import ssl
+        with patch.object(HttpSandbox,'_validate_url',return_value=parse.urlparse('https://example.com/data')),patch('ai_agent.tools.http.request.build_opener') as opener:
+            opener.return_value.open.side_effect=ssl.SSLCertVerificationError('unable to get local issuer certificate')
+            with self.assertRaises(HttpTransportError) as error:
+                HttpSandbox().fetch('https://example.com/data')
+            self.assertEqual(error.exception.code,'tls_error')
+
+    def test_lite_discovery_is_primary_and_preserves_direct_result_url(self):
+        href='//duckduckgo.com/l/?'+parse.urlencode({'uddg':'https://arxiv.org/abs/2505.09388'})
+        html=f'<a class="result-link" href="{href}">Qwen3 Technical Report</a><td class="result-snippet">A multilingual Qwen3 tool calling study.</td>'
+        with patch('ai_agent.tools.http.request.urlopen',return_value=SearchResponse(html.encode())) as call:
+            result=HttpSandbox().search('Qwen3 technical report multilingual tool calling 2025')
+            self.assertEqual(call.call_count,1)
+            self.assertIn('lite.duckduckgo.com',call.call_args.args[0].full_url)
+            self.assertIn('Search provider: duckduckgo_lite',result)
+            self.assertIn('https://arxiv.org/abs/2505.09388',result)
+            self.assertIn('discovery snippets only',result)
+
+    def test_lite_challenge_is_not_executed_and_fallback_is_bounded_with_cooldown(self):
+        rss=b'<rss><channel><item><title>Qwen3 Technical Report</title><link>https://arxiv.org/abs/2505.09388</link><description>Qwen3 multilingual tool calling.</description></item></channel></rss>'
+        sandbox=HttpSandbox()
+        with patch('ai_agent.tools.http.request.urlopen',side_effect=[SearchResponse(b'<form id="challenge-form">Verify you are human</form>'),SearchResponse(rss),SearchResponse(rss)]) as call:
+            self.assertIn('bing_rss',sandbox.search('Qwen3 technical report'))
+            self.assertIn('bing_rss',sandbox.search('Qwen3 multilingual study'))
+            self.assertEqual(call.call_count,3)
+            self.assertIn('bing.com',call.call_args.args[0].full_url)
+
+    def test_exact_model_repository_is_discoverable_without_every_query_facet_in_snippet(self):
+        plan=_plan_search('Qwen3 technical report multilingual tool calling 2025')
+        repo={'title':'GitHub - QwenLM/Qwen3: Qwen3 is the large language model series',
+              'url':'https://github.com/QwenLM/Qwen3','snippet':'Weights and open dense and Mixture-of-Expert models.'}
+        noise={'title':'University of California, Berkeley','url':'https://www.berkeley.edu/','snippet':'Our degree programs and research.'}
+        accepted,_=_rank_search_results(plan,[repo,noise],5)
+        self.assertEqual(accepted,[repo])
+
+    def test_unquoted_short_version_hint_does_not_hide_relevant_leaderboard_source(self):
+        plan=_plan_search('Berkeley function calling leaderboard BFCL V4 2025')
+        candidate={'title':'Berkeley Function Calling Leaderboard','url':'https://gorilla.cs.berkeley.edu/leaderboard.html',
+                   'snippet':'BFCL evaluates function calling capabilities.'}
+        accepted,_=_rank_search_results(plan,[candidate],5)
+        self.assertEqual(accepted,[candidate])
+        self.assertNotIn('V4',plan.identity_terms)
+
     def test_domain_query_does_not_accept_dutch_television_noise(self):
         plan=_plan_search('tv.apple.com/us/movie wolfs')
         self.assertEqual(plan.intent,'apple_tv_catalog')

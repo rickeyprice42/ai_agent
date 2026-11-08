@@ -382,6 +382,7 @@ def register_builtin_tools(
                 limit=int(args.get("limit", 5)),
                 country=str(args.get("country", "")).strip() or None,
             ),
+            timeout_seconds=float(http.timeout_seconds * 4 + 5),
         )
     )
 
@@ -420,6 +421,7 @@ def register_builtin_tools(
             "status": {"type": ["integer", "null"]},
             "dom_hash": {"type": "string"},
             "main_text": {"type": "string"},
+            "main_text_truncated": {"type": "boolean"},
             "elements": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
             "lists": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
             "tables": {"type": "array", "items": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}},

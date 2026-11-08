@@ -1,0 +1,25 @@
+[Unit]
+Description=Avelin personal agent API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=avelin
+Group=avelin
+WorkingDirectory=/opt/avelin/current
+EnvironmentFile=/etc/avelin/avelin.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/avelin/venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/avelin/current/.logs /var/lib/avelin
+
+[Install]
+WantedBy=multi-user.target

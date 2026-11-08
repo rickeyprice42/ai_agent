@@ -9,6 +9,18 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/brand/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#0b0b0d" />
+    <script>
+      (() => {
+        let mode = "auto";
+        try { mode = localStorage.getItem("avelin-theme-mode") || "auto"; } catch {}
+        const hour = new Date().getHours();
+        const theme = mode === "dark" || (mode !== "light" && (hour < 7 || hour >= 21)) ? "dark" : "light";
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+        document.documentElement.style.backgroundColor = theme === "dark" ? "#09090b" : "#f4f3ef";
+        document.querySelector('meta[name="theme-color"]').content = theme === "dark" ? "#09090b" : "#f4f3ef";
+      })();
+    </script>
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Avelin" />

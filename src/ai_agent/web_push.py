@@ -39,6 +39,33 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Keep upstream diagnostics useful without persisting its body, tokens or URLs.
+PUSH_REASONS = frozenset({"BadTtl", "BadUrgency", "BadWebPushRequest", "BadWebPushTopic",
+    "VapidPkHashMismatch", "IdleTimeout", "BadAuthorizationHeader", "BadJwtToken",
+    "BadVapidPublicKey", "BadPath", "MethodNotAllowed", "PayloadTooLarge",
+    "TooManyRequests", "InternalServerError", "ServiceUnavailable", "Shutdown"})
+
+
+def _response_reason(response) -> str | None:
+    try:
+        reason = response.json().get("reason")
+        return reason if reason in PUSH_REASONS else None
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _public_subject(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+        host = (parsed.hostname if parsed.scheme == "https" else parsed.path.rsplit("@", 1)[-1]
+            if parsed.scheme == "mailto" and "@" in parsed.path else "") or ""
+        return (bool(host) and "." in host and not host.casefold().endswith((".local", ".localhost", ".invalid", ".test"))
+            and host.casefold() not in {"localhost", "127.0.0.1"} and not parsed.username and not parsed.password
+            and not parsed.fragment and not any(ord(char) < 33 for char in value))
+    except ValueError:
+        return False
+
+
 def _decode_key(value: str, length: int) -> bytes:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+={0,2}", value):
         raise ValueError("Некорректные ключи push-подписки.")
@@ -94,7 +121,19 @@ class PushConfig:
     def load(cls, root: Path) -> "PushConfig":
         private = Path(os.getenv("WEB_PUSH_VAPID_PRIVATE_KEY_FILE") or root / "data/web-push/private.pem")
         public = os.getenv("WEB_PUSH_VAPID_PUBLIC_KEY", "")
-        subject = os.getenv("WEB_PUSH_VAPID_SUBJECT", "https://avelin.local")
+        subject = os.getenv("WEB_PUSH_VAPID_SUBJECT", "").strip()
+        # Older releases shipped a local placeholder accepted by config validation,
+        # but rejected by Apple's VAPID authentication. Reuse this installation's
+        # existing HTTPS preview origin, never invent an operator email/domain.
+        if not subject or subject == "https://avelin.local":
+            try:
+                preview = json.loads((root / ".local/remote-preview.json").read_text(encoding="utf-8"))["url"]
+                parsed = urlsplit(preview)
+                candidate = f"{parsed.scheme}://{parsed.netloc}"
+                if _public_subject(candidate):
+                    subject = candidate
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
         if not public and private.is_file():
             try:
                 from cryptography.hazmat.primitives import serialization
@@ -125,8 +164,8 @@ class PushConfig:
                 return "Публичный ключ VAPID не соответствует приватному."
         except (ValueError, OSError, ImportError):
             return "Некорректные ключи VAPID на сервере."
-        if not self.subject.startswith(("https://", "mailto:")):
-            return "Не настроен контакт VAPID."
+        if not _public_subject(self.subject):
+            return "Укажите действующий HTTPS-адрес или email контакта VAPID: локальный адрес Apple не принимает."
         return ""
 
 
@@ -176,15 +215,32 @@ class WebPushService:
             connection.execute("DELETE FROM push_subscriptions WHERE user_id=? AND endpoint=?", (user_id, endpoint))
         return {"ok": True}
 
-    def test(self, user_id: str) -> dict:
+    def test(self, user_id: str, request_id: str | None = None) -> dict:
+        if self.config.reason():
+            raise ValueError(self.config.reason())
+        request_id = request_id or uuid4().hex
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", request_id):
+            raise ValueError("Некорректный идентификатор проверки уведомления.")
         with self.database.connect() as connection:
             count = connection.execute("SELECT COUNT(*) FROM push_subscriptions WHERE user_id=? AND active=1", (user_id,)).fetchone()[0]
         if not count:
             raise ValueError("Сначала включите push-уведомления на этом устройстве.")
-        self.database.create_in_app_notification(user_id, deduplication_key=f"push-test:{uuid4()}",
+        self.database.create_in_app_notification(user_id, deduplication_key=f"push-test:{request_id}",
             kind="push_test", title="Avelin", body="Проверка push-уведомлений.", entity_type="settings", entity_id="notifications")
         self.enqueue_notifications()
-        return {"ok": True, "queued": count}
+        return {"ok": True, "queued": count, "request_id": request_id, **self.test_status(user_id, request_id)}
+
+    def test_status(self, user_id: str, request_id: str) -> dict:
+        with self.database.connect() as connection:
+            notification = connection.execute("SELECT id FROM in_app_notifications WHERE user_id=? AND kind='push_test' AND deduplication_key=?",
+                (user_id, f"push-test:{request_id}")).fetchone()
+            if notification is None:
+                return {"state": "not_found"}
+            rows = connection.execute("SELECT state,last_error FROM push_deliveries WHERE notification_id=?", (notification["id"],)).fetchall()
+        states = {row["state"] for row in rows}
+        state = "accepted" if "delivered" in states else "sending" if "sending" in states else "pending" if not rows or "pending" in states else "failed"
+        error = next((row["last_error"] for row in rows if row["last_error"]), None)
+        return {"state": state, "reason": error if state == "failed" else None}
 
     def enqueue_notifications(self) -> int:
         stamp = _now().isoformat()
@@ -194,8 +250,15 @@ class WebPushService:
                 LEFT JOIN push_deliveries d ON d.subscription_id=s.id AND d.notification_id=n.id
                 WHERE d.id IS NULL ORDER BY n.rowid LIMIT 500""").fetchall()
             for row in rows:
+                approval = None
+                key = str(row["deduplication_key"] or "")
+                if row["kind"] == "approval_required" and key.startswith("chat-approval:"):
+                    approval = connection.execute(
+                        "SELECT tool_name,risk FROM approval_requests WHERE id=? AND user_id=?",
+                        (key.removeprefix("chat-approval:"), row["user_id"]),
+                    ).fetchone()
                 connection.execute("INSERT OR IGNORE INTO push_deliveries(id,subscription_id,notification_id,payload_json,next_attempt_at,created_at) VALUES(?,?,?,?,?,?)",
-                    (str(uuid4()), row["subscription_id"], row["id"], json.dumps(_notification_payload(dict(row)), ensure_ascii=False), stamp, stamp))
+                    (str(uuid4()), row["subscription_id"], row["id"], json.dumps(_notification_payload(dict(row), approval=dict(approval) if approval else None), ensure_ascii=False), stamp, stamp))
         return len(rows)
 
     def deliver_pending(self, limit: int = 4) -> list[dict]:
@@ -217,17 +280,21 @@ class WebPushService:
                 connection.execute("UPDATE push_deliveries SET state='sending',attempts=attempts+1,locked_until=?,claim_token=? WHERE id=?",
                     ((stamp+timedelta(seconds=60)).isoformat(), claim_token, row["id"]))
             status = 0
+            upstream_reason = None
             try:
                 status = int(self.sender({"endpoint":row["endpoint"],"keys":{"p256dh":row["p256dh"],"auth":row["auth"]}}, json.loads(row["payload_json"])))
             except Exception as exc:
                 response = getattr(exc, "response", None)
                 status = int(getattr(response, "status_code", 0) or 0)
+                upstream_reason = _response_reason(response)
             attempts = row["attempts"] + 1
             delivered = 200 <= status < 300
             expired = status in {404, 410}
             permanent = status in {400, 401, 403} or expired or attempts >= 6
             state = "delivered" if delivered else ("failed" if permanent else "pending")
             reason = None if delivered else f"push_http_{status}" if status else "push_transport_error"
+            if reason and upstream_reason:
+                reason += ":" + upstream_reason
             with self.database.connect() as connection:
                 changed = connection.execute("UPDATE push_deliveries SET state=?,locked_until=NULL,claim_token=NULL,last_error=?,delivered_at=?,next_attempt_at=? WHERE id=? AND claim_token=?",
                     (state, reason, stamp.isoformat() if delivered else None,
@@ -251,12 +318,16 @@ class WebPushService:
         return result.status_code
 
 
-def _notification_payload(notification: dict) -> dict:
+def _notification_payload(notification: dict, *, approval: dict | None = None) -> dict:
     kind = notification["kind"]
     if kind == "push_test":
         body = "Push-уведомления Avelin работают."
     elif kind == "approval_required":
-        body = "Для продолжения задачи требуется ваше подтверждение."
+        if approval:
+            from ai_agent.chat_approvals import approval_reason
+            body = approval_reason(approval["tool_name"], approval["risk"])
+        else:
+            body = "Для продолжения задачи требуется ваше подтверждение."
     elif kind == "task_report":
         key = str(notification.get("deduplication_key") or "")
         body = ("Задача завершилась ошибкой. Подробности доступны в Avelin." if key.endswith(":failed")
@@ -270,7 +341,7 @@ def _notification_payload(notification: dict) -> dict:
         body = "В Avelin появилось новое уведомление."
     # Lockscreen receives no prompt, source text, tool arguments or raw errors.
     url = "/?view=automations" if notification["entity_type"] in {"automation","task_run","task","task_report"} else "/?view=settings"
-    if kind == "chat_completed" and notification["entity_type"] == "chat":
+    if kind in {"chat_completed", "approval_required"} and notification["entity_type"] == "chat":
         url = "/?view=chat&thread=" + quote(str(notification.get("entity_id") or ""), safe="")
     return {"title":"Avelin","body":body,"tag":f"avelin:{notification['id']}", "data":{"url":url}}
 

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { fetchImagePreview } from "./api";
+import { fetchThreadMedia } from "./threadMedia";
 import type { FileArtifact } from "./types";
 
-export function SentImage({ artifact, token, onOpen, onDownload }: { artifact: FileArtifact; token: string; onOpen: (url: string, artifact: FileArtifact) => void; onDownload: () => void }) {
+export function SentImage({ artifact, token, previewUrl, onOpen, onDownload }: { artifact: FileArtifact; token: string; previewUrl?: string; onOpen: (url: string, artifact: FileArtifact) => void; onDownload: () => void }) {
   const [url, setUrl] = useState("");
   const [failed, setFailed] = useState(false);
   const [error, setError] = useState("");
@@ -10,13 +11,13 @@ export function SentImage({ artifact, token, onOpen, onDownload }: { artifact: F
     let cancelled = false;
     let objectUrl = "";
     setUrl(""); setFailed(false); setError("");
-    void fetchImagePreview(artifact.path, token).then((blob) => {
+    void (previewUrl ? fetchThreadMedia(previewUrl, token) : fetchImagePreview(artifact.path, token)).then((blob) => {
       if (cancelled) return;
       objectUrl = URL.createObjectURL(blob);
       setUrl(objectUrl);
     }).catch((err) => { if (!cancelled) { setFailed(true); setError(err instanceof Error ? err.message : "Не удалось открыть изображение."); } });
     return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [artifact.path, token]);
+  }, [artifact.path, token, previewUrl]);
   return <div className="sent-image"><button className="sent-image-preview" type="button" disabled={!url || failed} aria-label={`Открыть изображение ${artifact.name}`} onClick={() => onOpen(url, artifact)}>
     {url && !failed ? <img src={url} alt={artifact.name} onError={() => { setFailed(true); setError("Браузер не смог показать предпросмотр. Оригинал можно скачать."); }} /> : <span>{failed ? "Предпросмотр недоступен" : "Загрузка изображения…"}</span>}
     <small>{artifact.name}</small>

@@ -80,7 +80,8 @@ python -c "from fastapi.testclient import TestClient; from backend.main import a
 - `GET /api/models` - список доступных provider-ов и моделей.
 - `GET /api/tools`, `/api/tools/{name}` и `/api/tools/capabilities` - discovery production-контрактов инструментов.
 - `GET /api/model-settings` и `PUT /api/model-settings` - чтение и смена активной модели пользователя.
-- `POST /api/chat/stream` - поток NDJSON с событиями `delta`, `status`, `done` и `error`.
+- `POST /api/chat/runs` - серверная генерация с request ID, независимая от подключённого экрана; статус и поток восстанавливаются через `GET /api/chat/runs/{id}` и `/events?after=N`, отдельный `/cancel` останавливает ответ.
+- `POST /api/chat/stream` - совместимый legacy NDJSON; текущий web-клиент использует серверные runs. Подробнее: [фоновая генерация](docs/chat-background.md).
 - `GET /api/chats/{thread_id}/context-trace` - последний воспроизводимый trace состава контекста.
 - `GET /api/chats/{thread_id}/compactions` - список циклов сжатия и их статусы.
 - `GET /api/chats/{thread_id}/compactions/{id}` - summary вместе с исходными сообщениями для проверки.
@@ -114,7 +115,10 @@ Avelin OpenAI API:
 
 В новом окружении при наличии ключа OpenAI основной маршрут использует `gpt-6.1-sol`.
 Явные настройки `.env` и существующих аккаунтов сохраняют приоритет. Модель можно
-сменить непосредственно в чате; выбор сохраняется сразу. Для Ollama-маршрута OpenAI
+сменить непосредственно в чате; выбор сохраняется отдельно для каждого диалога.
+Настройка модели по умолчанию применяется к новым чатам. Разрешения и уточняющие
+вопросы восстанавливаются после перезагрузки; подробнее: [диалоги и совместная работа](docs/chat-interactions.md).
+Для Ollama-маршрута OpenAI
 может работать резервом. Для изображений основной маршрут использует
 `gemma4:31b`, резервный — `gpt-6-luna`. Переключение reasoning происходит только
 до начала выдачи ответа, чтобы пользователь не получил смесь двух ответов.
@@ -200,7 +204,7 @@ policy автоматически, а клики и другие взаимод�
 устаревший `expected_dom_hash` останавливает действие до клика.
 Для исследовательского чтения используется `research_read`: сначала bounded HTTP с
 извлечением `main`/`article`, таблиц, списков и JSON-LD, а browser fallback запускается
-только для JavaScript-страницы. Результат содержит provenance, region/locale,
+для JavaScript-страницы или при ошибке транспорта/TLS, сохраняя проверку TLS в браузере. Результат содержит provenance, region/locale,
 confidence и хэши цитируемых фрагментов. Login, paywall, anti-bot, private network,
 downloads и неподтверждённая каталожная доступность завершаются typed failure.
 Актуальные ограничения перечислены в [support matrix](docs/research-support-matrix.md).

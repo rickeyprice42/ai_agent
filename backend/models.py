@@ -497,6 +497,7 @@ class FileArtifactItem(BaseModel):
 
 
 class HistoryItem(BaseModel):
+    id: str | None = None
     role: str
     content: str
     name: str | None = None
@@ -570,6 +571,17 @@ class TaskCheckpointItem(BaseModel):
 class TaskControlResponse(BaseModel):
     task: TaskItem
     run: TaskRunItem
+
+
+class LongTaskDecisionRequest(BaseModel):
+    decision: str = Field(pattern="^(approved|rejected)$")
+    revision: int = Field(ge=1)
+    digest: str = Field(pattern="^[a-f0-9]{64}$")
+    timezone: str = Field(default="UTC", min_length=1, max_length=80)
+
+
+class LongTaskControlRequest(BaseModel):
+    action: str = Field(pattern="^(pause|resume|cancel)$")
 
 
 class AutomationCreateRequest(BaseModel):
@@ -789,6 +801,7 @@ class BootstrapResponse(BaseModel):
     action_logs: list[ActionLogItem]
     approval_requests: list[ApprovalRequestItem] = Field(default_factory=list)
     chat_approvals: list[dict] = Field(default_factory=list)
+    chat_questions: list[dict] = Field(default_factory=list)
     permission_grants: list[PermissionGrantItem] = Field(default_factory=list)
     extension_proposals: list[ExtensionProposalItem] = Field(default_factory=list)
     connectors: list[ConnectorItem] = Field(default_factory=list)

@@ -8,6 +8,8 @@ from urllib import parse
 from uuid import uuid4
 import ipaddress
 import json
+import os
+import shutil
 import socket
 
 from ai_agent.tools.base import ToolError, ToolResult, failure_result
@@ -17,6 +19,7 @@ EDGE_PATHS = (
     Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
     Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
 )
+LINUX_CHROMIUM_COMMANDS = ("chromium", "chromium-browser", "google-chrome-stable", "google-chrome")
 SAFE_SCHEMES = {"http", "https"}
 INTERNAL_SCHEMES = {"about", "blob", "data"}
 # Only public read-only resources needed to render these first-party catalogs.
@@ -58,12 +61,24 @@ class PlaywrightBrowserRunner:
 
     def availability(self) -> tuple[bool, str | None]:
         try:
-            import playwright.sync_api  # noqa: F401
+            from playwright.sync_api import sync_playwright
         except ImportError:
             return False, "Python package playwright не установлен."
-        if not any(path.is_file() for path in EDGE_PATHS):
-            return False, "Microsoft Edge не найден; browser runner не может стартовать."
-        return True, None
+        if os.name == "nt":
+            if not any(path.is_file() for path in EDGE_PATHS):
+                return False, "Microsoft Edge не найден; browser runner не может стартовать."
+            return True, None
+        configured = _linux_browser_executable()
+        if configured is not None:
+            return True, None
+        try:
+            with sync_playwright() as playwright:
+                managed = Path(playwright.chromium.executable_path)
+            if managed.is_file():
+                return True, None
+        except Exception:
+            pass
+        return False, "Chromium не найден; выполни `python -m playwright install chromium`."
 
     def read(
         self,
@@ -131,10 +146,18 @@ class PlaywrightBrowserRunner:
         stage = "startup"
         try:
             with sync_playwright() as playwright:
+                launch_options: dict[str, Any] = {
+                    "headless": True,
+                    "args": ["--disable-background-networking", "--disable-sync"],
+                }
+                if os.name == "nt":
+                    launch_options["channel"] = "msedge"
+                else:
+                    executable = _linux_browser_executable()
+                    if executable is not None:
+                        launch_options["executable_path"] = str(executable)
                 browser = playwright.chromium.launch(
-                    channel="msedge",
-                    headless=True,
-                    args=["--disable-background-networking", "--disable-sync"],
+                    **launch_options,
                 )
                 try:
                     context = browser.new_context(
@@ -221,6 +244,7 @@ class PlaywrightBrowserRunner:
                         "status": response.status if response is not None else None,
                         "dom_hash": final_snapshot["dom_hash"],
                         "main_text": final_snapshot["main_text"],
+                        "main_text_truncated": final_snapshot["main_text_truncated"],
                         "elements": final_snapshot["elements"],
                         "lists": final_snapshot["lists"],
                         "tables": final_snapshot["tables"],
@@ -288,7 +312,8 @@ class PlaywrightBrowserRunner:
                 return {ref, role, name, tag, disabled: Boolean(node.disabled)};
               });
               const main = document.querySelector('main,article,[role="main"]') || document.body;
-              const mainText = ((main && main.innerText) || '').trim().replace(/\n{3,}/g, '\n\n').slice(0, maxText);
+              const fullMainText = ((main && main.innerText) || '').trim().replace(/\n{3,}/g, '\n\n');
+              const mainText = fullMainText.slice(0, maxText);
               const lists = Array.from(document.querySelectorAll('main ul,main ol,article ul,article ol'))
                 .slice(0, 20).map((list) => Array.from(list.querySelectorAll(':scope > li'))
                   .slice(0, 50).map((item) => (item.innerText || '').trim().replace(/\s+/g, ' ')).filter(Boolean));
@@ -304,13 +329,14 @@ class PlaywrightBrowserRunner:
                   alt: (node.alt || '').slice(0, 300),
                   context: ((node.closest('tr,figure,li') || {}).innerText || '').trim().replace(/\s+/g, ' ').slice(0, 500)}))
                 .filter((image) => /^https?:\/\//i.test(image.url));
-              return {mainText, elements, lists, tables, jsonLd, links, images, scriptCount: document.scripts.length};
+              return {mainText, mainTextTruncated: fullMainText.length>maxText, elements, lists, tables, jsonLd, links, images, scriptCount: document.scripts.length};
             }""",
             {"maxElements": self.max_elements, "maxText": self.max_text_chars},
         )
         canonical = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         result = {
             "main_text": str(raw.get("mainText", "")),
+            "main_text_truncated": bool(raw.get("mainTextTruncated",False)),
             "elements": raw.get("elements", []),
             "lists": raw.get("lists", []),
             "tables": raw.get("tables", []),
@@ -438,6 +464,18 @@ def _host_allowed(host: str, allowlist: tuple[str, ...]) -> bool:
         normalized == allowed.rstrip(".") or normalized.endswith("." + allowed.rstrip("."))
         for allowed in allowlist
     )
+
+
+def _linux_browser_executable() -> Path | None:
+    configured = os.getenv("AVELIN_BROWSER_EXECUTABLE", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        return candidate.resolve() if candidate.is_file() else None
+    for command in LINUX_CHROMIUM_COMMANDS:
+        resolved = shutil.which(command)
+        if resolved:
+            return Path(resolved).resolve()
+    return None
 
 
 def _locator_for_action(page, action: dict):

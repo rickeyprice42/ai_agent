@@ -184,7 +184,7 @@ class ContextBuilder:
             raise ContextBudgetError("Output reserve leaves no room for model input.")
         tool_payload = json.dumps(tools or [], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         tool_tokens = estimator.count_text(tool_payload)
-        content_budget = input_budget - tool_tokens - 64
+        content_budget = input_budget - tool_tokens - 64 - max(0,int(getattr(self,'turn_reserve_tokens',0)))
         if content_budget <= 0:
             raise ContextBudgetError("Tool schemas exceed the available context budget.")
 
@@ -386,9 +386,16 @@ class ContextBuilder:
         return f"context_trace:{self.memory.user_id}:{self.memory.thread_id}"
 
     def _complete_rows(self) -> list[dict]:
+        rows = self.memory.database.list_messages(self.memory.thread_id)
+        floor = getattr(self,'history_after_message_id',None)
+        if floor:
+            boundary = next((index for index,item in enumerate(rows) if item['id']==floor),None)
+            if boundary is None:
+                raise ContextBudgetError('Граница этапа не найдена. История не была подменена.')
+            rows = rows[boundary+1:]
         return [
             item
-            for item in self.memory.database.list_messages(self.memory.thread_id)
+            for item in rows
             if item.get("status") == "complete" and not item.get("error") and str(item.get("content") or "").strip()
         ]
 

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import base64
 import json
+import os
 import sys
 import time
 import unittest
@@ -34,7 +35,7 @@ class WebPushTests(unittest.TestCase):
         self.db=AvelinDatabase(self.root/'db.sqlite')
         self.db.ensure_user_defaults('alice');self.db.ensure_user_defaults('bob')
         public=configure(self.root/'keys')
-        self.config=PushConfig(self.root/'keys/private.pem',public)
+        self.config=PushConfig(self.root/'keys/private.pem',public,subject='https://example.org')
         self.calls=[]
         self.service=WebPushService(self.db,self.config,sender=lambda sub,payload:self.calls.append((sub,payload)) or 201)
         key=ec.generate_private_key(ec.SECP256R1())
@@ -156,6 +157,60 @@ class WebPushTests(unittest.TestCase):
         bad=WebPushService(self.db,replace(self.config,public_key='wrong'))
         self.assertFalse(bad.public_config('alice')['enabled'])
 
+    def test_legacy_local_vapid_contact_uses_configured_preview_without_changing_keys(self):
+        preview=self.root/'.local/remote-preview.json'
+        preview.parent.mkdir()
+        preview.write_text(json.dumps({'url':'https://fixture.tail123.ts.net'}),encoding='utf-8')
+        with patch.dict(os.environ, {'WEB_PUSH_VAPID_SUBJECT':'https://avelin.local',
+                'WEB_PUSH_VAPID_PRIVATE_KEY_FILE':str(self.config.private_key_file),'WEB_PUSH_VAPID_PUBLIC_KEY':''}):
+            loaded=PushConfig.load(self.root)
+            self.assertEqual(loaded.subject,'https://fixture.tail123.ts.net')
+            self.assertEqual(loaded.public_key,self.config.public_key)
+            self.assertEqual(loaded.reason(),'')
+            preview.unlink()
+            self.assertIn('VAPID',PushConfig.load(self.root).reason())
+        explicit=replace(self.config,subject='mailto:operator@example.org')
+        self.assertEqual(explicit.reason(),'')
+        for contact in ('https://localhost','https://avelin.local','mailto:user@localhost','https://example.invalid','http://example.org'):
+            self.assertIn('VAPID',replace(self.config,subject=contact).reason())
+
+    def test_backgrounded_test_can_be_recovered_without_a_duplicate_send_and_is_user_scoped(self):
+        self.service.subscribe('alice',self.subscription)
+        request='background-request-12345'
+        first=self.service.test('alice',request)
+        # Simulate losing HTTP response while iOS backgrounds the PWA, then reload.
+        restarted=WebPushService(self.db,self.config,sender=self.service.sender)
+        self.assertEqual(restarted.test_status('alice',request)['state'],'pending')
+        self.assertEqual(restarted.test_status('bob',request),{'state':'not_found'})
+        self.assertEqual(restarted.test('alice',request),first)
+        restarted.deliver_pending()
+        self.assertEqual(restarted.test_status('alice',request)['state'],'accepted')
+        restarted.test('alice',request)
+        self.assertEqual(restarted.deliver_pending(),[])
+        self.assertEqual(len(self.calls),1)
+
+    def test_apple_auth_error_is_visible_as_safe_reason_instead_of_false_delivery(self):
+        self.service.subscribe('alice',self.subscription)
+        request='apple-error-request-12345'
+        self.service.test('alice',request)
+        def rejected(*_):
+            error=RuntimeError('SECRET-ENDPOINT-AND-BODY')
+            error.response=SimpleNamespace(status_code=403,json=lambda:{'reason':'BadJwtToken','endpoint':'SECRET'})
+            raise error
+        self.service.sender=rejected
+        self.service.deliver_pending()
+        self.assertEqual(self.service.test_status('alice',request),{'state':'failed','reason':'push_http_403:BadJwtToken'})
+        with self.db.connect() as db:
+            self.assertNotIn('SECRET',db.execute('SELECT last_error FROM push_deliveries').fetchone()[0])
+        self.service.test('alice','untrusted-reason-12345')
+        def untrusted(*_):
+            error=RuntimeError('SECRET')
+            error.response=SimpleNamespace(status_code=403,json=lambda:{'reason':'SECRET-TOKEN'})
+            raise error
+        self.service.sender=untrusted
+        self.service.deliver_pending()
+        self.assertEqual(self.service.test_status('alice','untrusted-reason-12345')['reason'],'push_http_403')
+
     def test_authenticated_endpoints_queue_test_and_scope_unsubscribe(self):
         service=AgentService.__new__(AgentService)
         service.root_dir=self.root;service.database=self.db;service._web_push_service=self.service
@@ -168,8 +223,11 @@ class WebPushTests(unittest.TestCase):
                 self.assertEqual(client.put('/api/notifications/push/subscription',json=self.subscription).status_code,200)
                 test=client.post('/api/notifications/push/test')
                 self.assertEqual(test.status_code,200,test.text)
-                self.assertEqual(test.json(),{'ok':True,'queued':1})
+                self.assertEqual(test.json()['queued'],1)
+                request_id=test.json()['request_id']
+                self.assertEqual(client.get('/api/notifications/push/test/'+request_id).json()['state'],'pending')
                 self.assertEqual(len(self.service.deliver_pending()),1)
+                self.assertEqual(client.get('/api/notifications/push/test/'+request_id).json()['state'],'accepted')
                 self.assertEqual(client.request('DELETE','/api/notifications/push/subscription',json={'endpoint':self.subscription['endpoint']}).status_code,200)
         finally:app.dependency_overrides=original
         with patch('backend.routes.agent_service',service):
