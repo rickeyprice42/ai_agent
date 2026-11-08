@@ -21,8 +21,10 @@ workspace files in Git.
    `data/workspace/` to `/var/lib/avelin/workspace/`, and copy `data/web-push/` to
    `/var/lib/avelin/web-push/`. Set owner `avelin:avelin` and mode `0600` for private
    files.
-4. Fill `/etc/avelin/avelin.env` and put the existing provider-key file at
-   `/etc/avelin/provider-keys.txt`. Keep both mode `0600` and never print their values.
+4. Fill `/etc/avelin/avelin.env` and keep it owned by `root:root` with mode `0600`.
+   Put the existing provider-key file at `/etc/avelin/provider-keys.txt`, owned by
+   `root:avelin` with mode `0640`, so the unprivileged service can read it without
+   exposing it to other users. Never print either file's values.
 5. Start the API and nginx, then publish the private origin:
 
    ```bash
