@@ -121,6 +121,85 @@ class ChatFileContractsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'бинарный'):
                 agent.files.read_file('binary.txt')
 
+    def test_read_file_lines_reaches_word_text_after_initial_excerpt(self):
+        with isolated_agent([]) as agent:
+            paragraphs = [f'Абзац {i:03} ' + 'данные ' * 23 for i in range(190)]
+            paragraphs.append('Конец исходного диалога')
+            agent.documents.create_docx('dialog.docx', title='Диалог', paragraphs=paragraphs[:100])
+            agent.documents.append_docx('dialog.docx', paragraphs=paragraphs[100:])
+            preview = agent.files.read_file('dialog.docx')
+            self.assertNotIn('Конец исходного диалога', preview)
+            self.assertIn('read_file_lines', preview)
+            tail = agent.files.read_lines('dialog.docx', 190)
+            self.assertIn('Конец исходного диалога', tail['content'])
+            self.assertFalse(tail['truncated'])
+
+    def test_large_attachment_leaves_room_for_a_followup_file_read(self):
+        from ai_agent.memory import ATTACHMENT_BLOCK_MARKER
+
+        path = 'attachments/' + '1' * 32 + '/dialog.txt'
+        other_path = 'attachments/' + '2' * 32 + '/photo.png'
+        authored = 'Прочитай последнюю строку.'
+        preview = ('Строка синтетического документа. ' * 800)[:24000]
+        full_message = authored + ATTACHMENT_BLOCK_MARKER + f'Файл: "{path}"\n{preview}\nФайл: "{other_path}"\n[Конец вложений]'
+        responses = [
+            ModelResponse(tool_calls=[ToolCall('read_file_lines', {'path': path, 'start_line': 2}, 'tail')]),
+            ModelResponse(text='Последняя строка прочитана.'),
+        ]
+        with isolated_agent(responses) as agent:
+            agent.files.write_file(path, 'Начало\nПроверяемый конец документа')
+            agent.incoming_attachments = [
+                {'path': path, '_user_attachment': True, '_display_content': authored},
+                {'path': other_path, '_user_attachment': True},
+            ]
+            events = list(agent.respond_stream(full_message))
+            self.assertEqual(events[-1]['outcome'], 'completed')
+            self.assertIn(other_path, agent.provider.inputs[0][-1].content)
+            self.assertNotIn(preview, agent.provider.inputs[0][-1].content)
+            self.assertIn('Проверяемый конец документа', agent.provider.inputs[1][-1].content)
+            self.assertEqual(agent.memory.database.list_messages(agent.memory.thread_id)[0]['content'], full_message)
+
+    def test_read_file_lines_continues_at_exact_character_after_a_long_line(self):
+        with isolated_agent([]) as agent:
+            agent.files.max_read_chars = 24
+            text = '0123456789abcdefghijklmnopqrstuvwxyz'
+            agent.files.write_file('dialog.txt', text + '\nпоследняя')
+            first = agent.files.read_lines('dialog.txt')
+            self.assertEqual(first['next_start_line'], 1)
+            second = agent.files.read_lines('dialog.txt', first['next_start_line'], start_column=first['next_start_column'])
+            self.assertEqual(first['content'][3:] + second['content'].splitlines()[0][3:], text)
+            self.assertEqual(second['next_start_line'], 2)
+            third = agent.files.read_lines('dialog.txt', second['next_start_line'], start_column=second['next_start_column'])
+            self.assertEqual(second['content'].splitlines()[1][3:] + third['content'][3:], 'последняя')
+
+    def test_read_file_and_page_tool_read_native_pdf_past_first_pages(self):
+        from pypdf import PdfWriter
+        from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+        with isolated_agent([]) as agent:
+            writer = PdfWriter()
+            font = DictionaryObject({NameObject('/Type'): NameObject('/Font'), NameObject('/Subtype'): NameObject('/Type1'), NameObject('/BaseFont'): NameObject('/Helvetica')})
+            for number in range(1, 7):
+                page = writer.add_blank_page(width=400, height=300)
+                page[NameObject('/Resources')] = DictionaryObject({NameObject('/Font'): DictionaryObject({NameObject('/F1'): font})})
+                content = DecodedStreamObject()
+                content.set_data(f'BT /F1 12 Tf 40 200 Td (Page marker {number}) Tj ET'.encode())
+                page[NameObject('/Contents')] = writer._add_object(content)
+            writer.write(agent.files.workspace_dir / 'report.pdf')
+            self.assertIn('Page marker 1', agent.files.read_file('report.pdf'))
+            result = agent.tools.invoke('read_pdf_pages', {'path':'report.pdf','start_page':6})
+            self.assertEqual(result.status, 'completed')
+            self.assertEqual(result.output['end_page'], 6)
+            self.assertIn('Page marker 6', result.output['text'])
+            self.assertFalse(result.output['truncated'])
+            agent.files.max_read_chars = 24
+            first = agent.files.read_pdf_pages('report.pdf', 6)
+            self.assertEqual(first['next_start_page'], 6)
+            last = agent.files.read_pdf_pages('report.pdf', 6, start_character=first['next_start_character'])
+            joined = first['text'].partition('\n')[2] + last['text'].partition('\n')[2]
+            self.assertEqual(joined, 'Page marker 6')
+            self.assertFalse(last['truncated'])
+
     def test_identification_defaults_precise_but_explicit_detail_is_preserved(self):
         self.assertTrue(needs_precise_image('Найди, какой ID у этого скина персонажа'))
         self.assertFalse(needs_precise_image('Опиши картинку'))

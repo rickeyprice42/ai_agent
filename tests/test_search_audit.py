@@ -54,6 +54,17 @@ class SearchAuditTests(unittest.TestCase):
             self.assertEqual(call.call_count,3)
             self.assertIn('bing.com',call.call_args.args[0].full_url)
 
+    def test_unrelated_lite_results_allow_relevant_bing_fallback(self):
+        unrelated = b'<a class="result-link" href="https://example.com/mail">Mail login</a>'
+        relevant = b'<rss><channel><item><title>Qwen3 Technical Report</title><link>https://arxiv.org/abs/2505.09388</link><description>Qwen3 technical report.</description></item></channel></rss>'
+        with patch('ai_agent.tools.http.request.urlopen', side_effect=[SearchResponse(unrelated), SearchResponse(relevant)]) as call:
+            result = HttpSandbox().search('Qwen3 technical report')
+        self.assertEqual(call.call_count, 2)
+        self.assertIn('Search provider: bing_rss', result)
+        self.assertIn('https://arxiv.org/abs/2505.09388', result)
+        self.assertIn('duckduckgo_lite: no relevant results', result)
+        self.assertNotIn('https://example.com/mail', result)
+
     def test_exact_model_repository_is_discoverable_without_every_query_facet_in_snippet(self):
         plan=_plan_search('Qwen3 technical report multilingual tool calling 2025')
         repo={'title':'GitHub - QwenLM/Qwen3: Qwen3 is the large language model series',

@@ -14,6 +14,23 @@ import sys
 MAX_BYTES = 256_000
 MAX_SEQUENCE = 50_000
 MAX_NUMBER = 1_000_000_000_000
+MAX_ADDRESS_SPACE = 256 * 1024 * 1024
+MAX_CPU_SECONDS = 3
+
+
+def limit_worker_resources():
+    if sys.platform != "linux":
+        return
+    import resource
+
+    def restrict(kind, requested):
+        soft, hard = resource.getrlimit(kind)
+        cap = min(value for value in (soft, hard, requested) if value != resource.RLIM_INFINITY)
+        resource.setrlimit(kind, (cap, cap))
+
+    restrict(resource.RLIMIT_AS, MAX_ADDRESS_SPACE)
+    restrict(resource.RLIMIT_CPU, MAX_CPU_SECONDS)
+    restrict(resource.RLIMIT_CORE, 0)
 
 
 def checked(value):
@@ -65,6 +82,7 @@ class BoundedOperations(ast.NodeTransformer):
 
 
 def main():
+    limit_worker_resources()
     raw = sys.stdin.buffer.read(MAX_BYTES + 1)
     if len(raw) > MAX_BYTES:
         raise ValueError("Generated input exceeds the byte limit.")

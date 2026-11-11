@@ -193,7 +193,8 @@ class ResearchQualityTest(unittest.TestCase):
             {"Content-Type": "application/rss+xml; charset=utf-8"},
         )
         sandbox = HttpSandbox()
-        with patch("ai_agent.tools.http.request.urlopen", side_effect=[empty_apple, polluted_rss]):
+        empty_lite = FakeHttpResponse(b"<html></html>")
+        with patch("ai_agent.tools.http.request.urlopen", side_effect=[empty_apple, empty_lite, polluted_rss]):
             with self.assertRaisesRegex(ValueError, "no relevant results"):
                 sandbox.search("недорогие книги Apple Books", limit=5)
 
@@ -207,7 +208,7 @@ class ResearchQualityTest(unittest.TestCase):
         sandbox = HttpSandbox()
         with patch(
             "ai_agent.tools.http.request.urlopen",
-            side_effect=[TimeoutError("timed out"), polluted_rss],
+            side_effect=[TimeoutError("timed out"), FakeHttpResponse(b"<html></html>"), polluted_rss],
         ):
             with self.assertRaisesRegex(ValueError, "no relevant results"):
                 sandbox.search("недорогие книги Apple Books", limit=5)

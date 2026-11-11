@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 import logging
 import sys
 import tempfile
@@ -26,7 +27,7 @@ from backend.service import AgentService
 def temporary_service(database_file: Path) -> AgentService:
     service = AgentService.__new__(AgentService)
     service.root_dir = ROOT
-    service.settings = None
+    service.settings = SimpleNamespace(registration_access_code_hash="")
     service.database = AvelinDatabase(database_file)
     service._agents = {}
     return service

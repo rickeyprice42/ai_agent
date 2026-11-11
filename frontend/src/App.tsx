@@ -1,10 +1,11 @@
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import { FormEvent, KeyboardEvent, lazy, type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown, { defaultUrlTransform, type Options as MarkdownOptions } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { WorkspaceIcon, type IconName } from "./WorkspaceIcon";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { AvatarEditor } from "./AvatarEditor";
-import { SentImage, CopyableCode } from "./ChatMedia";
+import { SentImage } from "./ChatMedia";
+import { ChatProducts, RichResponseBlock } from "./RichChatResponse";
 import { PushSettings, detachPush } from "./PushSettings";
 import { TimezonePicker, deviceTimezone } from "./TimezonePicker";
 import { ProjectWorkspace, type ProjectDialogMode } from "./ProjectWorkspace";
@@ -19,6 +20,7 @@ import { fetchThreadMedia, threadMediaUrl } from "./threadMedia";
 import { readNavigation, saveNavigation, urlNavigation, type WorkspaceView, type SettingsView } from "./workspaceNavigation";
 import { forgetChatRetryPayloads, mergeChatRunMessages, newChatRequestId, useDurableChat } from "./useDurableChat";
 import {
+  ApiReadError,
   archiveProject,
   archiveChatThread,
   assignChatToProject,
@@ -65,6 +67,8 @@ import {
   resetChatModelSettings,
   fetchProjectInvitations,
   fetchProjectMembers,
+  fetchMemberAvatar,
+  fetchUnreadNotifications,
   fetchSharedProjectItems,
   installExtension,
   login as authLogin,
@@ -140,6 +144,13 @@ const SETTINGS_NAV: { id: SettingsView; label: string }[] = [
 
 type ThemeMode = "auto" | "light" | "dark";
 type ResolvedTheme = "light" | "dark";
+
+function BasicMarkdown(props: MarkdownOptions) {
+  return <ReactMarkdown {...props} remarkPlugins={[remarkGfm]} />;
+}
+
+const MathMarkdown = lazy(() => import("./MathMarkdown").catch(() => ({ default: BasicMarkdown })));
+const MATH_DELIMITER = /\\\(|\\\[|\$\$|(?:\x60{3,}|~{3,})[ \t]*math\b/i;
 
 const EMPTY_BOOTSTRAP: BootstrapPayload = {
   agent_name: "Avelin",
@@ -277,19 +288,20 @@ function defaultAutomationRunAt(): string {
   return local.toISOString().slice(0, 16);
 }
 
-function TypewriterText({ text }: { text: string }) {
-  const [visibleText, setVisibleText] = useState(text);
+function TypewriterText({ text, children }: { text: string; children: ReactNode }) {
+  const [visibleText, setVisibleText] = useState("");
 
   useEffect(() => {
-    setVisibleText("");
-
-    if (!text) {
+    if (!text || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setVisibleText(text);
       return;
     }
 
+    setVisibleText("");
     let index = 0;
+    const step = Math.max(1, Math.ceil(text.length / 40));
     const timer = window.setInterval(() => {
-      index += 1;
+      index += step;
       setVisibleText(text.slice(0, index));
 
       if (index >= text.length) {
@@ -300,6 +312,7 @@ function TypewriterText({ text }: { text: string }) {
     return () => window.clearInterval(timer);
   }, [text]);
 
+  if (visibleText === text) return <>{children}</>;
   return (
     <>
       {visibleText}
@@ -339,6 +352,8 @@ export default function App() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [sessionAttempt, setSessionAttempt] = useState(0);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(null);
   const [isExecutingStep, setIsExecutingStep] = useState(false);
   const [isSavingAutomation, setIsSavingAutomation] = useState(false);
   const [automationRuns, setAutomationRuns] = useState<Record<string, AutomationRunItem[]>>({});
@@ -372,6 +387,7 @@ export default function App() {
   const [projectWorkspaceId, setProjectWorkspaceId] = useState(() => new URLSearchParams(location.search).get("project")?.slice(0, 128) || "");
   const [projectDialog, setProjectDialog] = useState<ProjectDialogMode>(null);
   const [projectMembers, setProjectMembers] = useState<ProjectMemberItem[]>([]);
+  const [groupAvatars, setGroupAvatars] = useState<{ projectId: string; urls: Record<string, string> } | null>(null);
   const [projectInvitations, setProjectInvitations] = useState<ProjectInvitationItem[]>([]);
   const [sharedProjectItems, setSharedProjectItems] = useState<SharedProjectItem[]>([]);
   const [sharedGroupId, setSharedGroupId] = useState("");
@@ -408,6 +424,7 @@ export default function App() {
     return () => { active = false; };
   }, [authToken]);
   const [modelProviders, setModelProviders] = useState<ModelProviderOption[]>([]);
+  const [modelCatalogError, setModelCatalogError] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState(EMPTY_BOOTSTRAP.provider);
   const [selectedModel, setSelectedModel] = useState(EMPTY_BOOTSTRAP.model);
   const [isModelSaving, setIsModelSaving] = useState(false);
@@ -469,9 +486,9 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!currentUser?.id || navigationAccountRef.current !== currentUser.id || isLoading) return;
+    if (!currentUser?.id || bootstrap.user.id !== currentUser.id || navigationAccountRef.current !== currentUser.id || isLoading) return;
     saveNavigation(currentUser.id, { view, settingsView, projectId: projectWorkspaceId, groupId: sharedGroupId, threadId: activeThreadId });
-  }, [currentUser?.id, view, settingsView, projectWorkspaceId, sharedGroupId, activeThreadId, isLoading]);
+  }, [currentUser?.id, bootstrap.user.id, view, settingsView, projectWorkspaceId, sharedGroupId, activeThreadId, isLoading]);
 
   useEffect(() => {
     const desktop = window.matchMedia("(min-width: 901px)");
@@ -515,9 +532,15 @@ export default function App() {
   const authTokenRef = useRef(authToken); authTokenRef.current = authToken;
   const activeThreadRef = useRef(activeThreadId); activeThreadRef.current = activeThreadId;
   const bootstrapRequestRef = useRef(0);
+  const bootstrapTargetRef = useRef<{ token: string; threadId: string | null } | null>(null);
   const currentRunRef = useRef<ChatRunSnapshot | null>(null);
+  const workspaceReady = Boolean(currentUser && bootstrap.user.id === currentUser.id);
   useEffect(() => {
-    if (!authToken || !activeThreadId) { setChatModel(null); return; }
+    if (!authToken || !workspaceReady || !activeThreadId) {
+      setChatModel(null);
+      setIsChatModelLoading(false);
+      return;
+    }
     let cancelled = false;
     setIsChatModelLoading(true);
     void fetchChatModelSettings(activeThreadId, authToken).then((settings) => {
@@ -526,17 +549,18 @@ export default function App() {
       if (!cancelled) { setChatModel(null); setError(err instanceof Error ? err.message : "Не удалось загрузить модель диалога."); }
     }).finally(() => { if (!cancelled) setIsChatModelLoading(false); });
     return () => { cancelled = true; };
-  }, [authToken, activeThreadId, bootstrap.provider, bootstrap.model]);
-  const durable = useDurableChat({ userId: currentUser?.id || "", token: authToken, threadId: activeThreadId,
+  }, [authToken, workspaceReady, activeThreadId, bootstrap.provider, bootstrap.model]);
+  const durable = useDurableChat({ userId: workspaceReady ? (currentUser?.id || "") : "", token: authToken, threadId: activeThreadId,
     onAccepted: (run) => setAttachments((current) => current.filter((file) => !(run.attachments || []).includes(file.path))),
     onTerminal: async (run) => {
       if (run.thread_id !== activeThreadRef.current) return;
       const token = authTokenRef.current;
       setMessages((current) => mergeChatRunMessages(current, run));
+      const loading = bootstrapTargetRef.current;
+      if (loading?.token === token && loading.threadId !== run.thread_id) return;
       // Pending actions in bootstrap are authoritative. A recovered older run
       // can have no approvals while the thread already awaits a newer one.
       await refreshBootstrap(false, false, token, run.thread_id);
-      if (token === authTokenRef.current && run.thread_id === activeThreadRef.current && ["failed", "partial", "interrupted"].includes(run.state)) setError(run.error || "Ответ завершён не полностью. Частичный результат сохранён.");
     } });
   currentRunRef.current = durable.run;
   const isSending = durable.busy;
@@ -560,6 +584,30 @@ export default function App() {
     setAuthTokenState(value);
   }
   useEffect(() => { setGenerationActivity(durable.activities); }, [durable.activities]);
+  useEffect(() => {
+    if (!authToken || !currentUser) return;
+    const controller = new AbortController();
+    let pending = false;
+    const refresh = async () => {
+      if (document.hidden || pending) return;
+      pending = true;
+      try {
+        const notifications = await fetchUnreadNotifications(authToken, controller.signal);
+        if (!controller.signal.aborted) setBootstrap((current) => ({ ...current, notifications }));
+      } catch {
+        // The next poll can recover a temporary connection failure.
+      } finally {
+        pending = false;
+      }
+    };
+    const timer = window.setInterval(() => void refresh(), 25_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [authToken, currentUser?.id]);
 
   const messageCountLabel = useMemo(() => {
     if (isLoading) return "Загрузка истории...";
@@ -658,6 +706,9 @@ export default function App() {
       return;
     }
 
+    setIsLoading(true);
+    setAuthError(null);
+    setWorkspaceLoadError(null);
     window.localStorage.setItem(AUTH_TOKEN_KEY, authToken);
     let cancelled = false;
     void fetchMe(authToken)
@@ -672,20 +723,33 @@ export default function App() {
         setSettingsView(savedNavigation?.settingsView || "general");
         setProjectWorkspaceId(destination?.projectId || "");
         setSharedGroupId(savedNavigation?.groupId || "");
-        void fetchModelProviders(authToken)
-          .then(setModelProviders)
-          .catch(() => setModelProviders([]));
         return refreshBootstrap(true, false, authToken, destination?.threadId || activeThreadId);
       })
-      .catch(() => {
+      .catch((err) => {
         if (cancelled || authTokenRef.current !== authToken) return;
-        window.localStorage.removeItem(AUTH_TOKEN_KEY);
-        setAuthToken("");
+        if (err instanceof ApiReadError && [401, 403].includes(err.status)) {
+          window.localStorage.removeItem(AUTH_TOKEN_KEY);
+          setAuthToken("");
+        }
         setCurrentUser(null);
+        setAuthError(err instanceof Error ? err.message : "Не удалось проверить сессию.");
         setIsLoading(false);
       });
     return () => { cancelled = true; };
-  }, [authToken]);
+  }, [authToken, sessionAttempt]);
+
+  function refreshModelProviders(token: string) {
+    setModelCatalogError(false);
+    return fetchModelProviders(token).then((providers) => {
+      if (authTokenRef.current === token) setModelProviders(providers);
+    }).catch(() => {
+      if (authTokenRef.current === token) setModelCatalogError(true);
+    });
+  }
+
+  useEffect(() => {
+    if (authToken && currentUser) void refreshModelProviders(authToken);
+  }, [authToken, currentUser?.id]);
 
   useEffect(() => {
     function applyTheme() {
@@ -718,34 +782,28 @@ export default function App() {
       return;
     }
     const requestId = ++bootstrapRequestRef.current;
+    const isCurrent = () => requestId === bootstrapRequestRef.current && token === authTokenRef.current;
+    const notificationThread = initial ? new URLSearchParams(window.location.search).get("thread")?.slice(0, 128) : null;
+    const requestedThread = notificationThread || threadId || null;
+    bootstrapTargetRef.current = { token, threadId: requestedThread };
 
     if (initial) {
       setIsLoading(true);
+      setWorkspaceLoadError(null);
     } else {
       setIsRefreshing(true);
     }
 
     try {
-      const notificationThread = initial ? new URLSearchParams(window.location.search).get("thread")?.slice(0, 128) : null;
       let unavailableNotificationThread = false;
-      const [data, memoryData, personalMemoryData, autonomousSettingsData, memorySummaryData] = await Promise.all([
-        fetchBootstrap(token, notificationThread || threadId || null).catch((err) => {
-          if (!notificationThread) throw err;
-          unavailableNotificationThread = true;
-          return fetchBootstrap(token, null);
-        }),
-        fetchMemoryOverview(token),
-        fetchPersonalMemory(token, showHealthMemory),
-        fetchAutonomousMemorySettings(token),
-        fetchMemorySummary(token)
-      ]);
-      if (requestId !== bootstrapRequestRef.current || token !== authTokenRef.current) return;
+      const data = await fetchBootstrap(token, requestedThread).catch((err) => {
+        if (!initial || !requestedThread || !(err instanceof ApiReadError) || ![403, 404].includes(err.status)) throw err;
+        unavailableNotificationThread = Boolean(notificationThread);
+        return fetchBootstrap(token, null);
+      });
+      if (!isCurrent()) return;
       setBootstrap(data);
       setChatApprovals(data.chat_approvals ?? []);
-      setMemoryOverview(memoryData);
-      setPersonalMemory(personalMemoryData);
-      setAutonomousMemorySettings(autonomousSettingsData);
-      setMemorySummary(memorySummaryData);
       setMessages(mergeChatRunMessages(data.history, currentRunRef.current?.thread_id === data.active_thread.id ? currentRunRef.current : null));
       setActiveThreadId(data.active_thread.id);
       setChatQuestions(data.chat_questions ?? []);
@@ -754,15 +812,30 @@ export default function App() {
       setCurrentUser(data.user);
       setSelectedProvider(data.provider);
       setSelectedModel(data.model);
-      const contextSnapshots = await fetchContextCompactions(token, data.active_thread.id).catch(() => []);
-      if (requestId !== bootstrapRequestRef.current || token !== authTokenRef.current || data.active_thread.id !== activeThreadRef.current) return;
-      setCompactions(contextSnapshots);
+      if (bootstrap.active_thread.id !== data.active_thread.id) setCompactions([]);
       setCompactionReview(null);
+      setWorkspaceLoadError(null);
       setError(unavailableNotificationThread ? "Диалог из уведомления недоступен этому аккаунту или был удалён." : null);
+      // Slow or unavailable optional data must not hold the composer or navigation.
+      const update = <T,>(request: Promise<T>, apply: (value: T) => void) => {
+        void request.then((value) => { if (isCurrent()) apply(value); }).catch(() => {});
+      };
+      update(fetchMemoryOverview(token), setMemoryOverview);
+      update(fetchPersonalMemory(token, showHealthMemory), setPersonalMemory);
+      update(fetchAutonomousMemorySettings(token), setAutonomousMemorySettings);
+      update(fetchMemorySummary(token), setMemorySummary);
+      update(fetchContextCompactions(token, data.active_thread.id), (snapshots) => {
+        if (data.active_thread.id === activeThreadRef.current) setCompactions(snapshots);
+      });
       if (notificationThread) {
         const destination = new URL(window.location.href);
         destination.searchParams.delete("thread");
         window.history.replaceState(null, "", destination.pathname + destination.search + destination.hash);
+        const notificationGroup = data.projects.find((project) => project.shared && project.id === data.active_thread.project_id);
+        if (notificationGroup && !unavailableNotificationThread) {
+          setSharedGroupId(notificationGroup.id);
+          navigate("shared", true);
+        }
       }
 
       if (animateLatestAssistant) {
@@ -773,14 +846,14 @@ export default function App() {
         }
       }
     } catch (err) {
-      if (requestId !== bootstrapRequestRef.current || token !== authTokenRef.current) return;
+      if (!isCurrent()) return;
       const fallback = err instanceof Error ? err.message : "Неизвестная ошибка.";
-      setError(fallback);
+      if (initial || !workspaceReady) setWorkspaceLoadError(fallback);
+      else setError(fallback);
     } finally {
-      if (requestId !== bootstrapRequestRef.current || token !== authTokenRef.current) return;
-      if (initial) {
+      if (requestId === bootstrapRequestRef.current) bootstrapTargetRef.current = null;
+      if (isCurrent()) {
         setIsLoading(false);
-      } else {
         setIsRefreshing(false);
       }
     }
@@ -791,7 +864,7 @@ export default function App() {
     if (chatQuestions.length && targetThreadId === activeThreadRef.current) return;
     const normalized = message.trim() || (attachments.length ? "Проанализируй прикреплённые файлы." : "");
     const busyTarget = currentRunRef.current?.thread_id === targetThreadId && ["queued", "running"].includes(currentRunRef.current.state);
-    if (!normalized || !targetThreadId || isUploading || isModelSaving || !authToken || isLoading || busyTarget || (targetThreadId === activeThreadId && (durable.checking || durable.starting || durable.unconfirmed))) return;
+    if (!normalized || !targetThreadId || isUploading || isModelSaving || !authToken || !workspaceReady || isLoading || busyTarget || (targetThreadId === activeThreadId && (durable.checking || durable.starting || durable.unconfirmed))) return;
     const requestId = newChatRequestId();
     const token = authToken;
     const sentAttachments = [...attachments];
@@ -820,7 +893,7 @@ export default function App() {
   async function handleHomeSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const message = input.trim() || (attachments.length ? "Проанализируй прикреплённые файлы." : "");
-    if (!message || isStartingChat || isUploading || isModelSaving || !authToken) return;
+    if (!message || isStartingChat || isUploading || isModelSaving || !authToken || !workspaceReady || isLoading) return;
     setIsStartingChat(true);
     try {
       const payload = await createChatThread(authToken, undefined, null, true);
@@ -1635,11 +1708,13 @@ export default function App() {
     }
   }
 
-  async function handleReadNotification(notificationId: string) {
+  async function handleReadNotification(notificationId: string, threadId?: string) {
     if (!authToken) return;
     try {
       await markNotificationRead(notificationId, authToken);
-      await refreshBootstrap(false, false);
+      if (authToken !== authTokenRef.current) return;
+      setBootstrap((current) => ({ ...current, notifications: current.notifications.filter((item) => item.id !== notificationId) }));
+      if (threadId) await handleSelectChat(threadId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось отметить уведомление.");
     }
@@ -1815,9 +1890,6 @@ export default function App() {
       window.localStorage.setItem(AUTH_TOKEN_KEY, payload.token);
       setAuthToken(payload.token);
       setCurrentUser(payload.user);
-      void fetchModelProviders(payload.token)
-        .then(setModelProviders)
-        .catch(() => setModelProviders([]));
       setAuthPassword("");
       setRegistrationAccessCode("");
       setRegistrationGateOpen(false);
@@ -1927,7 +1999,7 @@ export default function App() {
       aria-label="Модель для диалога"
       title={isModelSaving ? "Переключаем модель…" : threadScope ? `Только этот диалог · ${modelName}` : `По умолчанию для новых диалогов · ${modelName}`}
       value={JSON.stringify([providerName, modelName])}
-      disabled={isModelSaving || (threadScope && (isSending || isChatModelLoading || isSharedViewer)) || isLoading || modelProviders.length === 0}
+      disabled={isModelSaving || (threadScope && (isSending || isChatModelLoading || isSharedViewer)) || isLoading || !workspaceReady || modelProviders.length === 0}
       onChange={(event) => { const [provider, model] = JSON.parse(event.target.value) as [string, string]; void handleChangeModel(provider, model, threadScope); }}
     >{!currentIsListed ? <option value={JSON.stringify([providerName, modelName])}>{modelName}</option> : null}
       {modelProviders.map((provider) => <optgroup label={provider.label} key={provider.provider}>{provider.models.map((model) => <option key={model} value={JSON.stringify([provider.provider, model])}>{model}</option>)}</optgroup>)}
@@ -1935,12 +2007,31 @@ export default function App() {
       const token = authToken, threadId = activeThreadId;
       setIsModelSaving(true);
       void resetChatModelSettings(threadId, token).then((settings) => { if (token === authTokenRef.current && threadId === activeThreadRef.current) setChatModel({ ...settings, threadId }); }).catch((err) => { if (token === authTokenRef.current && threadId === activeThreadRef.current) setError(err.message); }).finally(() => { if (token === authTokenRef.current) setIsModelSaving(false); });
-    }}>По умолчанию</button> : null}</label>;
+    }}>По умолчанию</button> : null}{modelCatalogError ? <button className="text-button" type="button" aria-label="Повторить загрузку списка моделей" onClick={() => void refreshModelProviders(authToken)}>Обновить модели</button> : null}</label>;
   }
   const activeProject = bootstrap.projects.find((project) => project.id === activeProjectId) ?? bootstrap.active_project;
   const selectedThread = bootstrap.chat_threads.find((thread) => thread.id === activeThreadId) || bootstrap.active_thread;
   const chatProject = bootstrap.projects.find((project) => project.id === selectedThread.project_id) ?? (bootstrap.active_project?.id === selectedThread.project_id ? bootstrap.active_project : null);
   const isGroupChat = Boolean(chatProject?.shared);
+  const avatarProjectId = isGroupChat ? chatProject?.id : undefined;
+  const avatarAuthors = [...new Set(renderedMessages.slice(-100).filter((item) => item.role === "user").map((item) => item.author_user_id).filter(Boolean))].slice(-30).join(",");
+  useEffect(() => {
+    if (!authToken || !avatarProjectId || !avatarAuthors) return;
+    const controller = new AbortController();
+    const urls: Record<string, string> = {};
+    setGroupAvatars(null);
+    for (const userId of avatarAuthors.split(",")) {
+      void fetchMemberAvatar(authToken, avatarProjectId, userId, controller.signal).then((blob) => {
+        if (!blob || controller.signal.aborted) return;
+        urls[userId] = URL.createObjectURL(blob);
+        setGroupAvatars({ projectId: avatarProjectId, urls: { ...urls } });
+      }).catch(() => undefined);
+    }
+    return () => {
+      controller.abort();
+      Object.values(urls).forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [authToken, avatarProjectId, avatarAuthors]);
   const isProjectChat = view === "chat" && Boolean(chatProject && !chatProject.shared);
   const isSharedViewer = Boolean(isGroupChat && chatProject?.role === "viewer");
   const sharedGroups = bootstrap.projects.filter((project) => project.shared);
@@ -2054,6 +2145,7 @@ export default function App() {
               {isAuthSubmitting ? "Подключаем..." : authMode === "login" ? "Войти" : "Создать аккаунт"}
             </button>
             {authError ? <p className="muted muted-error" role="alert">{authError}</p> : null}
+            {authToken && authError ? <button className="text-button" type="button" onClick={() => setSessionAttempt((attempt) => attempt + 1)}>Повторить проверку сессии</button> : null}
           </form>
 
         </section>
@@ -2813,6 +2905,7 @@ export default function App() {
                     <button className="mini-button" onClick={() => void handleReadNotification(item.id)} type="button">Прочитано</button>
                   </div>
                   <p className="muted">{item.body}</p>
+                  {item.entity_type === "chat" && item.entity_id ? <button type="button" className="text-button" onClick={() => void handleReadNotification(item.id, item.entity_id!)}>Открыть диалог</button> : null}
                   <small>{formatFileTime(item.created_at)}</small>
                 </article>
               ))}
@@ -2917,13 +3010,14 @@ export default function App() {
         {runtimeNotice ? <aside className="runtime-notice" role="status" aria-label="Обновление сервера">{runtimeNotice}</aside> : null}
         {error ? <div className="workspace-error" role="alert">{error}<button className="icon-button" aria-label="Закрыть сообщение об ошибке" onClick={() => setError(null)} type="button"><WorkspaceIcon name="close" /></button></div> : null}
         {isLoading ? <p className="workspace-loading" role="status">Загружаем твоё пространство…</p> : null}
+        {workspaceLoadError && !isLoading ? <div className="workspace-error" role="alert"><span>{workspaceLoadError}</span><button className="text-button" type="button" onClick={() => void refreshBootstrap(true)}>Повторить загрузку</button></div> : null}
         {view === "home" ? (
           <div className="workspace-home">
             <header className="home-heading"><p>{new Date().getHours() < 12 ? "Доброе утро" : new Date().getHours() < 18 ? "Добрый день" : "Добрый вечер"}, {currentUser.display_name.split(" ")[0] || currentUser.username}</p><h2>На чём продолжим?</h2></header>
             <form className="home-composer" onSubmit={handleHomeSubmit}>
               <textarea ref={textareaRef} aria-label="Новая задача" value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && window.matchMedia("(pointer: fine)").matches) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="Попроси Avelin сделать что-нибудь…" rows={3} disabled={isStartingChat} />
               {attachmentChips()}
-              <div className="home-composer-bottom"><div className="composer-tools">{attachmentControls()}{modelPicker()}</div><button className="send-icon" aria-label="Начать диалог" type="submit" disabled={(!input.trim() && !attachments.length) || isStartingChat || isLoading || isUploading || isModelSaving}><WorkspaceIcon name="arrow" /></button></div>
+              <div className="home-composer-bottom"><div className="composer-tools">{attachmentControls()}{modelPicker()}</div><button className="send-icon" aria-label="Начать диалог" type="submit" disabled={(!input.trim() && !attachments.length) || isStartingChat || isLoading || !workspaceReady || isUploading || isModelSaving}><WorkspaceIcon name="arrow" /></button></div>
             </form>
             <HomeSuggestions token={authToken} onSelect={(prompt) => void handleQuickAction(prompt)} disabled={isStartingChat} />
             <section className="home-recent" aria-labelledby="recent-heading">
@@ -2985,41 +3079,50 @@ export default function App() {
 
             {renderedMessages.map((message, index) => {
               const messageKey = `${message.role}-${index}`;
+              let content: ReactNode = message.content;
+              if (message.role === "assistant") {
+                const options: MarkdownOptions = {
+                  children: message.content,
+                  urlTransform: (url) => url.startsWith("sandbox:/mnt/data/") ? url : defaultUrlTransform(url),
+                  components: {
+                    pre: RichResponseBlock,
+                    a: ({ node: _node, href, children, ...props }) => {
+                      const artifact = artifactForLink(href, message.artifacts);
+                      if (artifact) return <button className="markdown-file-link" type="button" disabled={downloadingArtifactPath === artifact.path} onClick={() => void handleDownloadArtifact(artifact, message.id)}>{children}</button>;
+                      if (!href || (!/^https?:\/\//i.test(href) && !href.startsWith("#") && !href.startsWith("mailto:"))) return <span title="Файл не подтверждён среди результатов">{children}</span>;
+                      return <a {...props} href={href} target="_blank" rel="noreferrer">{children}</a>;
+                    },
+                    table: ({ node: _node, ...props }) => (
+                      <div className="markdown-table" role="region" aria-label="Таблица в ответе" tabIndex={0}>
+                        <table {...props} />
+                      </div>
+                    )
+                  },
+                };
+                const markdown = <BasicMarkdown {...options} />;
+                content = MATH_DELIMITER.test(message.content)
+                  ? <Suspense fallback={markdown}><MathMarkdown {...options} /></Suspense>
+                  : markdown;
+              }
 
               return (
                 <article className={`message message-${message.role} message-${message.status ?? "complete"}`} key={messageKey}>
-                  {isGroupChat ? <span className="message-role">{formatRoleLabel(message, bootstrap.agent_name, true)}</span> : null}
+                  {isGroupChat ? <span className="message-role group-message-author">
+                    {message.role === "assistant" ? <img className="group-message-avatar" src="/brand/icon-192.png" alt="" /> :
+                      groupAvatars && groupAvatars.projectId === avatarProjectId && groupAvatars.urls[message.author_user_id ?? ""] ?
+                        <img className="group-message-avatar" src={groupAvatars.urls[message.author_user_id ?? ""]} alt="" /> :
+                        <span className="group-message-avatar group-message-initial" aria-hidden="true">{(message.name || "У").slice(0, 1).toUpperCase()}</span>}
+                    {formatRoleLabel(message, bootstrap.agent_name, true)}
+                  </span> : null}
                   <div className="message-content">
                     {message.role === "assistant" && index === renderedMessages.length - 1 && generationActivity.length > 0 ? <details className="generation-activity"><summary>Подробности{isSending ? ` · ${generationActivity[generationActivity.length - 1]}` : ""}</summary><ol aria-label="Действия Avelin" aria-live="polite">{generationActivity.map((activity, activityIndex) => <li key={activityIndex}>{activity}</li>)}</ol></details> : null}
                     {message.status === "pending" && !message.content ? (
                       <div className="typing-dots" role="status" aria-label="Avelin печатает"><span /><span /><span /></div>
                     ) : animatedMessageKey === messageKey ? (
-                      <TypewriterText text={message.content} />
-                    ) : message.role === "assistant" ? (
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        urlTransform={(url) => url.startsWith("sandbox:/mnt/data/") ? url : defaultUrlTransform(url)}
-                        components={{
-                          pre: ({ node: _node, children }) => <CopyableCode>{children}</CopyableCode>,
-                          a: ({ node: _node, href, children, ...props }) => {
-                            const artifact = artifactForLink(href, message.artifacts);
-                            if (artifact) return <button className="markdown-file-link" type="button" disabled={downloadingArtifactPath === artifact.path} onClick={() => void handleDownloadArtifact(artifact, message.id)}>{children}</button>;
-                            if (!href || (!/^https?:\/\//i.test(href) && !href.startsWith("#") && !href.startsWith("mailto:"))) return <span title="Файл не подтверждён среди результатов">{children}</span>;
-                            return <a {...props} href={href} target="_blank" rel="noreferrer">{children}</a>;
-                          },
-                          table: ({ node: _node, ...props }) => (
-                            <div className="markdown-table" role="region" aria-label="Таблица в ответе" tabIndex={0}>
-                              <table {...props} />
-                            </div>
-                          )
-                        }}
-                      >
-                        {message.content}
-                      </ReactMarkdown>
-                    ) : (
-                      message.content
-                    )}
+                      <TypewriterText text={message.content}>{content}</TypewriterText>
+                    ) : content}
                     {message.error ? <p className="message-error">{message.error}</p> : null}
+                    {message.role === "assistant" && message.products?.length ? <ChatProducts products={message.products} /> : null}
                     {message.artifacts?.length ? (
                       <div className="message-artifacts" aria-label={message.role === "user" ? "Вложения" : "Созданные файлы"}>
                         {message.artifacts.map((artifact) => /\.(png|jpe?g|webp|heic|heif|avif|gif|tiff?|bmp)$/i.test(artifact.path) ? <SentImage key={artifact.path} artifact={artifact} token={authToken} previewUrl={isGroupChat && message.id ? threadMediaUrl(activeThreadId, message.id, artifact.path, true) : undefined} onOpen={(url, file) => setOpenedImage({ url, artifact: file, messageId: message.id })} onDownload={() => void handleDownloadArtifact(artifact, message.id)} /> : (
@@ -3078,7 +3181,7 @@ export default function App() {
                 {isSending ? (
                   <button className="stop-button" disabled={durable.stopping} onClick={handleStopGeneration} type="button">{durable.stopping ? "Ждём подтверждение…" : "Остановить"}</button>
                 ) : (
-                  <button className="send-icon" aria-label="Отправить" title="Отправить" disabled={(!input.trim() && !attachments.length) || isSharedViewer || isUploading || isModelSaving || isLoading || durable.checking || durable.unconfirmed || chatApprovals.length > 0 || chatQuestions.length > 0} type="submit"><WorkspaceIcon name="arrow" /></button>
+                  <button className="send-icon" aria-label="Отправить" title="Отправить" disabled={(!input.trim() && !attachments.length) || isSharedViewer || isUploading || isModelSaving || isLoading || !workspaceReady || durable.checking || durable.unconfirmed || chatApprovals.length > 0 || chatQuestions.length > 0} type="submit"><WorkspaceIcon name="arrow" /></button>
                 )}
               </div>
             </div>

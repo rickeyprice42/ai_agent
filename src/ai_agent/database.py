@@ -2231,6 +2231,23 @@ class AvelinDatabase:
                 """,
                 (thread_id,),
             )
+            if role == "user" and author_user_id and status == "complete":
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO in_app_notifications
+                        (id, user_id, deduplication_key, kind, title, body, entity_type, entity_id)
+                    SELECT lower(hex(randomblob(16))), recipient.user_id, ?, 'shared_chat_message',
+                           'Новое сообщение в «Совместно»', 'Откройте общий чат в Avelin.', 'chat', t.id
+                    FROM chat_threads t
+                    JOIN projects p ON p.id=t.project_id AND p.shared=1 AND p.status='active'
+                    JOIN project_members sender ON sender.project_id=p.id AND sender.user_id=?
+                        AND sender.status='active' AND sender.role IN ('owner', 'editor')
+                    JOIN project_members recipient ON recipient.project_id=p.id
+                        AND recipient.status='active' AND recipient.user_id<>sender.user_id
+                    WHERE t.id=? AND t.status='active' AND t.deleted_at IS NULL
+                    """,
+                    (f"shared-chat-message:{message_id}", author_user_id, thread_id),
+                )
         return message_id
 
     def update_message(
@@ -2267,6 +2284,35 @@ class AvelinDatabase:
                 f"UPDATE messages SET {', '.join(assignments)} WHERE id = ?",
                 values,
             )
+
+    def past_chat_messages(self, user_id: str, thread_id: str, terms: list[str]) -> list[dict]:
+        if not terms:
+            return []
+        # Keep project scope exact and require active opt-in on both chats.
+        match = " OR ".join("(instr(casefold(t.title), ?) OR instr(casefold(substr(m.content,1,6000)), ?))" for _ in terms)
+        params = [term for term in terms for _ in range(2)]
+        with self.connect() as connection:
+            connection.create_function("casefold", 1, lambda value: (value or "").casefold(), deterministic=True)
+            rows = connection.execute(
+                f"""
+                SELECT t.id AS thread_id, t.title, m.role, substr(m.content,1,6000) AS content,
+                       m.created_at, m.artifacts_json
+                FROM chat_threads current
+                JOIN chat_threads t ON t.user_id=current.user_id AND t.project_id IS current.project_id
+                JOIN messages m ON m.thread_id=t.id
+                LEFT JOIN projects p ON p.id=t.project_id
+                WHERE current.id=? AND current.user_id=? AND current.memory_enabled=1
+                  AND current.status='active' AND current.deleted_at IS NULL AND current.archived_at IS NULL
+                  AND t.id<>current.id AND t.memory_enabled=1 AND t.status='active'
+                  AND t.deleted_at IS NULL AND t.archived_at IS NULL
+                  AND (t.project_id IS NULL OR (p.user_id=current.user_id AND p.shared=0 AND p.status='active'))
+                  AND m.role IN ('user','assistant') AND m.status='complete' AND m.error IS NULL
+                  AND ({match})
+                ORDER BY m.created_at DESC, m.rowid DESC LIMIT 80
+                """,
+                (thread_id, user_id, *params),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_messages(self, thread_id: str = DEFAULT_THREAD_ID) -> list[dict]:
         with self.connect() as connection:
@@ -3149,8 +3195,14 @@ class AvelinDatabase:
         with self.connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT * FROM in_app_notifications
+                SELECT * FROM in_app_notifications AS n
                 WHERE user_id = ?{unread_clause}
+                  AND (kind<>'shared_chat_message' OR EXISTS (
+                    SELECT 1 FROM chat_threads t
+                    JOIN projects p ON p.id=t.project_id AND p.status='active'
+                    JOIN project_members pm ON pm.project_id=p.id AND pm.user_id=n.user_id AND pm.status='active'
+                    WHERE t.id=n.entity_id AND t.status='active' AND t.deleted_at IS NULL
+                  ))
                 ORDER BY created_at DESC LIMIT ?
                 """,
                 (user_id, safe_limit),

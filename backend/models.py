@@ -502,6 +502,14 @@ class FileArtifactItem(BaseModel):
     size_bytes: int = 0
 
 
+class ProductCardItem(BaseModel):
+    title: str
+    price: str
+    currency: str
+    url: str
+    checked_at: str
+
+
 class HistoryItem(BaseModel):
     id: str | None = None
     role: str
@@ -513,6 +521,7 @@ class HistoryItem(BaseModel):
     provider: str | None = None
     model: str | None = None
     artifacts: list[FileArtifactItem] = Field(default_factory=list)
+    products: list[ProductCardItem] = Field(default_factory=list)
 
 
 class TaskStepItem(BaseModel):

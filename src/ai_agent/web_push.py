@@ -337,11 +337,13 @@ def _notification_payload(notification: dict, *, approval: dict | None = None) -
         body = "Автоматизация запущена."
     elif kind == "chat_completed":
         body = "Ответ готов. Откройте диалог в Avelin."
+    elif kind == "shared_chat_message":
+        body = "В общем чате появилось новое сообщение."
     else:
         body = "В Avelin появилось новое уведомление."
     # Lockscreen receives no prompt, source text, tool arguments or raw errors.
     url = "/?view=automations" if notification["entity_type"] in {"automation","task_run","task","task_report"} else "/?view=settings"
-    if kind in {"chat_completed", "approval_required"} and notification["entity_type"] == "chat":
+    if kind in {"chat_completed", "approval_required", "shared_chat_message"} and notification["entity_type"] == "chat":
         url = "/?view=chat&thread=" + quote(str(notification.get("entity_id") or ""), safe="")
     return {"title":"Avelin","body":body,"tag":f"avelin:{notification['id']}", "data":{"url":url}}
 

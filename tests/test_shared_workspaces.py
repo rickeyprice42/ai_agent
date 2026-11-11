@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,8 @@ if str(SRC) not in sys.path:
 
 from ai_agent.database import AvelinDatabase
 from ai_agent.memory import MemoryStore
+from ai_agent.past_chats import search_past_chats
+from ai_agent.web_push import _notification_payload
 from backend.service import AgentService
 from backend.main import app
 
@@ -20,7 +23,7 @@ from backend.main import app
 def temporary_service(database_file: Path) -> AgentService:
     service = AgentService.__new__(AgentService)
     service.root_dir = ROOT
-    service.settings = None
+    service.settings = SimpleNamespace(registration_access_code_hash="", tool_workspace_dir=database_file.parent / "workspace")
     service.database = AvelinDatabase(database_file)
     service._agents = {}
     service._connector_factories = []
@@ -77,6 +80,41 @@ class SharedWorkspaceTests(unittest.TestCase):
             self.database.create_project_invitation(
                 self.editor, project["id"], "new@example.com", "viewer", "2999-01-01T00:00:00+00:00"
             )
+
+    def test_shared_notification_delivered_only_to_current_members(self) -> None:
+        project = self.database.create_project(self.owner, "Group notifications", shared=True)
+        self._invite_and_accept(project["id"], self.editor, "editor@example.com", "editor")
+        self._invite_and_accept(project["id"], self.viewer, "viewer@example.com", "viewer")
+        thread = self.database.create_chat_thread(self.owner, "Group chat", project["id"])
+        self.database.add_message("user", "Secret message body", thread_id=thread["id"], author_user_id=self.editor)
+        self.assertEqual(self.database.list_in_app_notifications(self.editor), [])
+        self.assertEqual(self.database.list_in_app_notifications(self.outsider), [])
+        for recipient in (self.owner, self.viewer):
+            [notice] = self.database.list_in_app_notifications(recipient, unread_only=True)
+            self.assertEqual(notice["kind"], "shared_chat_message")
+            self.assertEqual(notice["entity_id"], thread["id"])
+            push = _notification_payload(notice)
+            self.assertNotIn("Secret", str(push))
+            self.assertIn(thread["id"], push["data"]["url"])
+        self.database.remove_project_member(self.owner, project["id"], self.viewer)
+        self.assertEqual(self.database.list_in_app_notifications(self.viewer), [])
+
+    def test_history_search_limits_sources_to_same_user_and_scope(self) -> None:
+        source = self.database.create_chat_thread(self.owner, "Обсуждение игры")
+        current = self.database.create_chat_thread(self.owner, "Новый чат")
+        foreign = self.database.create_chat_thread(self.outsider, "Чужой чат")
+        group = self.database.create_project(self.owner, "Group history", shared=True)
+        shared = self.database.create_chat_thread(self.owner, "Shared", group["id"])
+        for thread, content in ((source, "ЗВЁЗДНЫЙ СБОРЩИК — три жизни"), (foreign, "Звёздный — чужое"), (shared, "Звёздный — групповое")):
+            self.database.add_message("user", content, thread_id=thread["id"])
+        self.database.add_message("assistant", "Звёздный — неудачный ответ", thread_id=source["id"], status="failed")
+        memory = MemoryStore(self.path, user_id=self.owner, thread_id=current["id"])
+        [match] = search_past_chats(memory, "помнишь, звёздный сборщик?")["matches"]
+        self.assertEqual(match["thread_id"], source["id"])
+        self.assertIn("три жизни", match["excerpt"])
+        with self.database.connect() as connection:
+            connection.execute("UPDATE chat_threads SET memory_enabled=0 WHERE id=?", (source["id"],))
+        self.assertEqual(search_past_chats(memory, "звёздный")["matches"], [])
 
     def test_invitation_lifecycle_removal_and_personal_data_survival(self) -> None:
         project = self.database.create_project(self.owner, "Workspace")
@@ -189,6 +227,13 @@ class SharedWorkspaceApiTests(unittest.TestCase):
 
                 invite(editor, "editor-api@example.com", "editor")
                 invite(viewer, "viewer-api@example.com", "viewer")
+                member = service.database.get_user_for_login("editor-api")
+                avatar = service.user_workspace(member["id"]) / ".profile" / "avatar.png"
+                avatar.parent.mkdir(parents=True)
+                avatar.write_bytes((ROOT / "frontend" / "public" / "brand" / "icon-192.png").read_bytes())
+                avatar_url = f"/api/projects/{project['id']}/members/{member['id']}/avatar"
+                self.assertEqual(client.get(avatar_url, headers=viewer).content, avatar.read_bytes())
+                self.assertEqual(client.get(avatar_url, headers=outsider).status_code, 404)
                 self.assertEqual(
                     client.post(f"/api/projects/{project['id']}/archive", headers=editor).status_code,
                     403,

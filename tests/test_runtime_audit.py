@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from zipfile import ZipFile
@@ -13,10 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from ai_agent.agent import Agent, MAX_TOOL_ROUNDS
+from ai_agent.chat_output import history_for_ui
 from ai_agent.config import Settings
 from ai_agent.llm.base import ProviderError
-from ai_agent.types import ModelResponse, ModelStreamChunk, ToolCall
-from ai_agent.tools.base import Tool
+from ai_agent.types import Message, ModelResponse, ModelStreamChunk, ToolCall
+from ai_agent.tools.base import Tool, ToolResult
 
 
 class ScriptedProvider:
@@ -47,6 +49,66 @@ def isolated_agent(responses):
 
 
 class RuntimeAuditTests(unittest.TestCase):
+    def test_shared_chat_exposes_public_tools_and_rejects_forged_private_call(self):
+        responses = [
+            ModelResponse(tool_calls=[ToolCall("read_file", {"path": "private.txt"}, "forged")]),
+            ModelResponse(tool_calls=[ToolCall("get_time", {}, "allowed")]),
+            ModelResponse(text="Проверено"),
+        ]
+        with isolated_agent(responses) as agent:
+            project = agent.memory.database.create_project(agent.memory.user_id, "Общий чат", shared=True)
+            thread = agent.memory.database.create_chat_thread(agent.memory.user_id, "Команда", project["id"])
+            agent.memory.thread_id = thread["id"]
+            exposed = {tool["name"] for tool in agent._turn_tools("normal", True)}
+            self.assertEqual(exposed, {"get_time", "web_search", "research_read"})
+            with patch.object(agent.tools, "invoke", wraps=agent.tools.invoke) as invoke:
+                events = list(agent.respond_stream("@Avelin выполни проверку"))
+            self.assertEqual([call.args[0] for call in invoke.call_args_list], ["get_time"])
+            self.assertIn("validation_error", [event.get("phase") for event in events])
+            self.assertEqual(events[-1]["type"], "done")
+
+    def test_product_metadata_comes_from_reader_and_survives_chat_reload(self):
+        url = "https://shop.example/product"
+        offer = {"title": "Куртка", "price": "1050.99", "currency": "RUB", "url": url, "checked_at": "2026-11-11T10:00:00Z"}
+        responses = [ModelResponse(tool_calls=[ToolCall("research_read", {"url": url})]), ModelResponse(text="Нашёл товар.")]
+        with isolated_agent(responses) as agent:
+            result = ToolResult(status="completed", output={"fields": {"merchant_offer": offer}})
+            with patch.object(agent.tools, "invoke", return_value=result):
+                events = list(agent.respond_stream("Проверь цену товара " + url))
+            self.assertEqual(events[-1]["type"], "done")
+            history = history_for_ui(agent.memory.snapshot().history, agent.files)
+            self.assertEqual(history[-1]["products"], [offer])
+            self.assertEqual(history[-1]["artifacts"], [])
+
+    def test_large_finished_code_write_replay_keeps_evidence_and_next_native_pair(self):
+        request = Message("user", "Собери игру и проверь два файла.")
+        old_write = Message("assistant", "", tool_calls=[
+            ToolCall("write_file", {"path": "game.js", "content": "abcdef " * 6000}, "big"),
+        ])
+        old_result = Message("tool", "Файл game.js создан.", name="write_file", tool_call_id="big")
+        latest_call = Message("assistant", "", tool_calls=[
+            ToolCall("file_metadata", {"paths": ["game.js"]}, "recent"),
+        ])
+        latest_result = Message("tool", "Размер game.js проверен.", name="file_metadata", tool_call_id="recent")
+        context = SimpleNamespace(messages=[request], system_prompt="Test", trace=SimpleNamespace(input_budget_tokens=640, tool_schema_tokens=0))
+        with isolated_agent([]) as agent:
+            replay = agent._provider_messages(context, [old_write, old_result, latest_call, latest_result])
+        self.assertEqual(replay[0], request)
+        self.assertIn("game.js создан", replay[1].content)
+        self.assertNotIn("abcdef", replay[1].content)
+        self.assertEqual(replay[2:], [latest_call, latest_result])
+
+    def test_large_completed_non_native_exchange_compacts_by_tool_name(self):
+        request = Message("user", "Проверь файл.")
+        old_write = Message("assistant", "", tool_calls=[ToolCall("write_file", {"path": "game.js", "content": "abcdef " * 6000})])
+        old_result = Message("tool", "Файл game.js создан.", name="write_file")
+        context = SimpleNamespace(messages=[request], system_prompt="Test", trace=SimpleNamespace(input_budget_tokens=640, tool_schema_tokens=0))
+        with isolated_agent([]) as agent:
+            replay = agent._provider_messages(context, [old_write, old_result])
+        self.assertEqual(replay[0], request)
+        self.assertIn("game.js создан", replay[1].content)
+        self.assertNotIn("abcdef", replay[1].content)
+
     def test_native_tool_call_and_result_ids_survive_followup_without_duplicates(self):
         responses = [ModelResponse(tool_calls=[ToolCall("get_time", {}, "call-audit-1")]), ModelResponse(text="Проверено")]
         with isolated_agent(responses) as agent:

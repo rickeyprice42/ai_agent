@@ -4,6 +4,18 @@ from __future__ import annotations
 FILE_TOOLS = {"write_file", "create_docx", "append_docx", "create_presentation"}
 
 
+def split_message_artifacts(artifacts: list[dict]) -> tuple[list[dict], list[dict]]:
+    files, products = [], []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        if isinstance(artifact.get("_verified_product"), dict):
+            products.append(artifact["_verified_product"])
+        else:
+            files.append(artifact)
+    return files, products
+
+
 def history_for_ui(history: list[dict], files, *, attachment_display=None) -> list[dict]:
     visible: list[dict] = []
     pending_artifacts: list[dict] = []
@@ -23,9 +35,9 @@ def history_for_ui(history: list[dict], files, *, attachment_display=None) -> li
             continue
 
         if item.get("role") == "assistant":
-            stored_artifacts = [
-                artifact for artifact in item.get("artifacts", []) if isinstance(artifact, dict)
-            ]
+            stored_artifacts, products = split_message_artifacts(item.get("artifacts", []))
+            if products:
+                item["products"] = products
             merged = {
                 artifact.get("path"): artifact
                 for artifact in pending_artifacts + stored_artifacts

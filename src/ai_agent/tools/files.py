@@ -26,29 +26,34 @@ class FileSandbox:
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
     def read_file(self, relative_path: str) -> str:
-        target = self._resolve_safe_path(relative_path)
-        if not target.exists():
-            raise ValueError(f"Файл не найден в рабочей папке: {relative_path}")
-        if not target.is_file():
-            raise ValueError(f"Путь не является файлом: {relative_path}")
-
-        content = self._readable_content(target, bounded=True)
-        truncated = len(content) > self.max_read_chars
-        if truncated:
-            content = content[: self.max_read_chars]
+        target = self._require_file(relative_path)
+        if target.suffix.lower() == '.pdf':
+            result = self.read_pdf_pages(relative_path)
+            content = result['text']
+            truncated = result['truncated']
+            continuation = (
+                'Продолжи через read_pdf_pages с '
+                f"start_page={result['next_start_page']}, start_character={result['next_start_character']}."
+            )
+        else:
+            content = self._readable_content(target, bounded=True)
+            truncated = len(content) > self.max_read_chars
+            content = content[:self.max_read_chars]
+            continuation = 'Для чтения следующих строк используй read_file_lines.'
 
         header = [
             f"Файл: {self._relative_display_path(target)}",
             f"Размер текста: {len(content)} символов" + (" (обрезано)" if truncated else ""),
             "Содержимое:",
         ]
-        return "\n".join(header + [content])
+        return "\n".join(header + [content] + ([continuation] if truncated else []))
 
     def read_lines(
         self,
         relative_path: str,
         start_line: int = 1,
         end_line: int | None = None,
+        start_column: int = 1,
     ) -> dict:
         target = self._require_file(relative_path)
         start = max(1, int(start_line))
@@ -56,20 +61,49 @@ class FileSandbox:
         end = max(start, min(requested_end, start + 499))
         raw = self._readable_content(target, bounded=False)
         lines = raw.splitlines()
-        selected = lines[start - 1 : end]
-        content = "\n".join(f"{number}: {line}" for number, line in enumerate(selected, start=start))
-        truncated = len(content) > self.max_read_chars
-        if truncated:
-            content = content[: self.max_read_chars]
+        chunks = []
+        remaining = self.max_read_chars
+        last = min(start - 1, len(lines))
+        next_line, next_column = None, None
+        for number, line in enumerate(lines[start - 1:end], start=start):
+            offset = max(0, int(start_column) - 1) if number == start else 0
+            prefix = ('\n' if chunks else '') + f'{number}: '
+            if len(prefix) >= remaining:
+                next_line, next_column = number, offset + 1
+                break
+            text = line[offset:]
+            available = remaining - len(prefix)
+            chunks.append(prefix + text[:available])
+            remaining -= len(chunks[-1])
+            last = number
+            if len(text) > available:
+                next_line, next_column = number, offset + available + 1
+                break
+        if next_line is None and last < len(lines):
+            next_line, next_column = last + 1, 1
         return {
             "path": self._relative_display_path(target),
             "sha256": _file_sha256(target),
             "start_line": start,
-            "end_line": min(end, len(lines)),
+            "end_line": last,
             "total_lines": len(lines),
-            "content": content,
-            "truncated": truncated or end < len(lines),
+            "content": ''.join(chunks),
+            "truncated": next_line is not None,
+            "next_start_line": next_line,
+            "next_start_column": next_column,
         }
+
+    def read_pdf_pages(
+        self, relative_path: str, start_page: int = 1, end_page: int | None = None, start_character: int = 1
+    ) -> dict:
+        from ai_agent.pdf_text import read_pdf_text
+
+        target = self._require_file(relative_path)
+        if target.suffix.lower() != '.pdf':
+            raise ValueError('Для постраничного чтения нужен PDF.')
+        start = max(1, start_page)
+        end = max(start, end_page if end_page is not None else start + 4)
+        return read_pdf_text(target, start, end, self.max_read_chars, max(1, start_character))
 
     def metadata(self, relative_path: str) -> dict:
         target = self._require_file(relative_path)
@@ -86,8 +120,12 @@ class FileSandbox:
     def _readable_content(self, target: Path, *, bounded: bool) -> str:
         if target.suffix.lower() in {'.docx', '.docm', '.dotm', '.xlsx', '.xlsm', '.xltm', '.pptx', '.pptm', '.potm'}:
             # Local import avoids office_files -> FileSandbox import cycles.
-            from ai_agent.tools.office_files import OfficeSandbox
-            inspection = OfficeSandbox(self).inspect(self._relative_display_path(target))
+            from ai_agent.tools.office_files import OfficeSandbox, WORD
+            office = OfficeSandbox(self)
+            path = self._relative_display_path(target)
+            if target.suffix.lower() in WORD:
+                return office.word_text(path)
+            inspection = office.inspect(path)
             parts = [f"[{part['part']}]\n{part['text']}" for part in inspection['text_parts']]
             for sheet in inspection['sheets']:
                 parts.append(f"[Лист: {sheet['sheet']}]\n" + '\n'.join(
@@ -97,7 +135,9 @@ class FileSandbox:
             return '\n\n'.join(parts)
         with target.open('rb') as handle:
             prefix = handle.read(512)
-        if (b'\x00' in prefix or prefix.startswith((b'PK\x03\x04', b'%PDF-', b'\x89PNG', b'\xff\xd8', b'\xd0\xcf\x11\xe0'))):
+        if prefix.startswith(b'%PDF-'):
+            raise ValueError('Для чтения PDF по страницам используй read_pdf_pages.')
+        if (b'\x00' in prefix or prefix.startswith((b'PK\x03\x04', b'\x89PNG', b'\xff\xd8', b'\xd0\xcf\x11\xe0'))):
             raise ValueError('Это бинарный файл. Для Office используй inspect_office_document, для изображений inspect_image/analyze_image; его нельзя читать как UTF-8 текст.')
         with target.open('r', encoding='utf-8', errors='replace') as handle:
             return handle.read(self.max_read_chars + 1) if bounded else handle.read()

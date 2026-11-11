@@ -12,9 +12,11 @@ from ai_agent.tools.files import FileSandbox
 
 SUFFIXES = {'.docx', '.docm', '.dotm', '.xlsx', '.xlsm', '.xltm', '.pptx', '.pptm', '.potm'}
 SPREADSHEETS = {'.xlsx', '.xlsm', '.xltm'}
+WORD = {'.docx', '.docm', '.dotm'}
 S = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 P = 'http://schemas.openxmlformats.org/package/2006/relationships'
+W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 
 
 def _xml(data):
@@ -28,6 +30,20 @@ def _xml(data):
 class OfficeSandbox:
     def __init__(self, files: FileSandbox):
         self.files = files
+
+    def word_text(self, path: str) -> str:
+        _, _, _, entries = self._package(path)
+        main = entries.get('word/document.xml')
+        if main is None:
+            raise ValueError('Основная часть Word-документа отсутствует.')
+        paragraphs = []
+        for paragraph in _xml(main).iter(f'{{{W}}}p'):
+            text = ''.join(
+                node.text or '' if node.tag == f'{{{W}}}t' else '\t' if node.tag == f'{{{W}}}tab' else '\n'
+                for node in paragraph.iter(f'{{{W}}}t', f'{{{W}}}tab', f'{{{W}}}br', f'{{{W}}}cr')
+            )
+            paragraphs.append(text)
+        return '\n'.join(paragraphs)
 
     def _package(self, path):
         source = self.files.resolve_download_path(path)

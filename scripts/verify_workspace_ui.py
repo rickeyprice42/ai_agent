@@ -161,6 +161,8 @@ def run():
             body = {"status":"ok"} if legacy_runtime else {"status":"ok","runtime":{"contract":2},"restart_required":False}
         elif path == "/api/auth/me":
             body = data["user"]
+        elif path == "/api/auth/registration-policy":
+            body = {"access_code_required": False, "message": ""}
         elif path == "/api/profile/avatar":
             if route.request.method == "GET":
                 route.fulfill(status=200 if avatar_state["bytes"] else 404, content_type="image/png", body=avatar_state["bytes"] or b"")
@@ -181,6 +183,8 @@ def run():
             preview_authorizations.append(route.request.headers.get("authorization"))
             route.fulfill(status=200,content_type="image/png",body=png_bytes)
             return
+        elif path == "/api/notifications":
+            body = [item for item in data.get("notifications", []) if not item.get("read_at")]
         elif path == "/api/notifications/push/config":
             body = {"enabled":push_enabled,"public_key":"BC" + "A" * 85 if push_enabled else None,"reason":"Тестовый сервер не отправляет push."}
         elif path.startswith("/api/notifications/push/"):
@@ -704,6 +708,7 @@ def run():
                     assert len(stream_requests) == original_requests, "approval must resume through decision endpoint, not replay prompt"
                 results.append("chat approval popup survives reload and approves/denies through continuation endpoint without replaying user request")
                 stream_mode = "complete"
+                expect(page.get_by_role("button", name="Прикрепить файлы", exact=True)).to_be_enabled()
                 page.locator('input[aria-label="Выбрать файлы"]').set_input_files({"name":"photo.png","mimeType":"image/png","buffer":png_bytes})
                 expect(page.locator(".attachment-chip")).to_contain_text("photo.png")
                 stream_mode = "error"

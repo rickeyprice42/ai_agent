@@ -354,6 +354,12 @@ svg { flex-shrink: 0; }
 .messages:focus-visible { outline: 2px solid var(--muted); outline-offset: -3px; }
 .message { flex-shrink: 0; min-width: 0; max-width: min(90%, 780px); font-size: 15px; line-height: 1.65; border-radius: 16px; animation: none; }
 .message-content { min-width: 0; overflow-wrap: anywhere; }
+.group-message-author { display: flex; align-items: center; gap: 8px; }
+.message-user .group-message-author { justify-content: flex-end; }
+.group-message-avatar { width: 26px; height: 26px; border-radius: 50%; object-fit: cover; }
+.group-message-initial { display: inline-grid; place-items: center; background: var(--surface); font-size: 12px; }
+.message-content .katex { overflow-wrap: normal; }
+.message-content .katex-display { max-width: 100%; overflow-x: auto; padding-block: 0.2em; }
 .message-content img { display: block; max-width: 100%; height: auto; border-radius: 10px; }
 .message-content pre { font-size: 13px; white-space: pre; overflow-wrap: normal; }
 .markdown-table { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; border-radius: 8px; }

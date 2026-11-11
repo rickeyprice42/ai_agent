@@ -17,11 +17,16 @@ OUT = ROOT / '.local' / 'workspace-state-ui'
 class StateServer(Server):
     def __init__(self):
         super().__init__(); self.deleted=[]; self.chat_models={}; self.model_changes=[]; self.answers=[]; self.media_requests=[]
+        self.bootstrap_unavailable = False
+        self.memory_unavailable = False
 
     def route(self, route):
         request=route.request; path=urlparse(request.url).path
         token=request.headers.get('authorization','').removeprefix('Bearer ')
         data=self.accounts.get(token)
+        if (self.bootstrap_unavailable and path == '/api/bootstrap') or (self.memory_unavailable and path.startswith('/api/memory')):
+            route.fulfill(status=503, json={'detail': 'Проверочный сбой загрузки'})
+            return
         if data and '/media/' in path:
             self.media_requests.append({'path':request.url,'authorization':request.headers.get('authorization')})
             if path.endswith('/preview'):route.fulfill(content_type='image/png',body=(FRONTEND/'public/brand/icon-192.png').read_bytes())
@@ -99,6 +104,137 @@ def main():
                 expect(expired.get_by_role('button')).to_have_count(0)
                 old['approval_history']=[]
                 checks.append('expired permission is explained inline after reload, never replaces live pending or exposes approval/replay controls')
+                old.update(state='partial', outcome='partial', error='Ответ из прошлого запуска прервался.')
+                failed = next(item for item in server.histories['fixture-token', 'test-user-a'] if item['id'] == old['message_id'])
+                failed.update(status='failed')
+                server.memory_unavailable = True
+                page.set_viewport_size({'width':390,'height':844})
+                page.evaluate("localStorage.setItem('avelin-active-thread','test-user-a')")
+                page.goto(URL+'/?view=home')
+                expect(page.get_by_role('combobox', name='Модель для диалога')).to_be_enabled()
+                expect(page.locator('.workspace-loading, .workspace-error')).to_have_count(0)
+                page.goto(URL+'/?view=chat&thread=test-user-a')
+                expect(page.locator('.message-error')).to_contain_text(old['error'])
+                expect(page.locator('.workspace-loading, .workspace-error')).to_have_count(0)
+                server.memory_unavailable = False
+                page.set_viewport_size({'width':1440,'height':900})
+                checks.append('failed old answer stays in its chat, while optional memory errors do not block startup or model choice')
+
+                server.bootstrap_unavailable = True
+                page.goto(URL+'/?view=home')
+                expect(page.locator('.workspace-loading')).to_have_count(0)
+                retry = page.get_by_role('button', name='Повторить загрузку', exact=True)
+                expect(retry).to_be_visible()
+                server.bootstrap_unavailable = False
+                retry.click()
+                expect(page.get_by_role('combobox', name='Модель для диалога')).to_be_enabled()
+                expect(retry).to_have_count(0)
+                checks.append('workspace bootstrap failure exits loading and is recoverable without reauthentication')
+
+                page.evaluate("localStorage.setItem('avelin-active-thread','deleted-chat');localStorage.removeItem('avelin-navigation:test-user')")
+                page.goto(URL+'/?view=home')
+                expect(page.get_by_role('combobox', name='Модель для диалога')).to_be_enabled()
+                expect(page.locator('.workspace-error')).to_have_count(0)
+                assert page.evaluate("localStorage.getItem('avelin-active-thread')") == 'test-user-a'
+                checks.append('stored deleted chat falls back to an available workspace without a global chat error')
+
+                math_message = (
+                    'В строке \\(x_1 + x_2\\).\n\n'
+                    '\\[ y = f(w_1x_1 + w_2x_2 + b) \\]\n\n'
+                    'Цены $100 и $200. Код `\\(literal\\)`.\n\n'
+                    '\\(\\href{https://example.test}{Внешняя ссылка}\\)'
+                )
+                server.histories['fixture-token', 'test-user-a'].append({
+                    'id':'math-personal','role':'assistant','content':math_message,'status':'complete',
+                })
+                page.goto(URL+'/?view=chat&thread=test-user-a')
+                def expect_math():
+                    message = page.locator('.message-assistant').filter(has_text='Цены $100 и $200')
+                    expect(message.locator('.katex-display')).to_have_count(1)
+                    expect(message.locator('math annotation').first).to_have_text('x_1 + x_2')
+                    expect(message.locator('.katex-html').first).to_be_visible()
+                    expect(message.locator('code')).to_have_text('\\(literal\\)')
+                    expect(message.locator('a')).to_have_count(0)
+                expect_math()
+                checks.append('assistant TeX in personal chat has visual formulas and MathML while prices, code and unsafe commands retain safe behavior')
+
+                no_math_assets = browser.new_context()
+                no_math_assets.add_init_script("localStorage.setItem('avelin-auth-token','fixture-token')")
+                no_math_assets.route('**/api/**', server.route)
+                no_math_assets.route('**/assets/MathMarkdown-*.js', lambda route: route.abort())
+                fallback = no_math_assets.new_page()
+                fallback.on('pageerror', lambda error: errors.append(str(error)))
+                fallback.goto(URL+'/?view=chat&thread=test-user-a')
+                expect(fallback.locator('.message-assistant').filter(has_text='Цены $100 и $200')).to_be_visible()
+                expect(fallback.get_by_role('combobox', name='Модель для диалога')).to_be_enabled()
+                no_math_assets.close()
+                checks.append('a missing optional formula bundle falls back to text and the workspace stays usable')
+
+                rich_text = "Проверочный текст\nВторая строка <img src='/unsafe-model-url'>"
+                offer = {"title": "Тестовый товар", "price": "1957.00", "currency": "RUB",
+                         "url": "https://shop.example.test/item", "checked_at": "2026-11-11T12:30:00Z"}
+                products = [
+                    offer,
+                    {**offer, "title": "Опасная схема", "url": "javascript:alert(1)"},
+                    {**offer, "title": "Встроенный пароль", "url": "https://u:p@shop.example.test/item"},
+                    {**offer, "title": "Некорректная цена", "price": "NaN"},
+                ]
+                def rich_fence(kind, payload):
+                    return f"{chr(96) * 3}avelin-{kind}\n{json.dumps(payload, ensure_ascii=False)}\n{chr(96) * 3}"
+                rich_message = "\n\n".join([
+                    r"Формула \(x_2\)",
+                    rich_fence("chart", {"title": "Динамика", "labels": ["Январь", "Февраль", "Март"],
+                        "series": [{"name": "Значение", "values": [-2, 3.5, 12]}], "unit": "км"}),
+                    rich_fence("flowchart", {"title": "Проверка результата",
+                        "nodes": [{"id": "input", "label": "Данные"}, {"id": "verify", "label": "Проверка"},
+                                  {"id": "done", "label": "Готово"}],
+                        "edges": [{"from": "input", "to": "verify"}, {"from": "verify", "to": "done"},
+                                  {"from": "verify", "to": "input"}]}),
+                    rich_fence("text", {"title": "Черновик", "text": rich_text}),
+                    rich_fence("flowchart", {"title": "Неверная схема", "nodes": [{"id": "a", "label": "А"}],
+                        "edges": [{"from": "a", "to": "missing"}]}),
+                    rich_fence("product", {**offer, "title": "Модельная карточка"}),
+                ])
+                server.histories['fixture-token', 'test-user-a'].append({
+                    'id':'rich-personal','role':'assistant','content':rich_message,'status':'complete','products':products,
+                })
+                def expect_rich():
+                    chart = page.get_by_role('region', name='Динамика')
+                    expect(chart.get_by_role('img')).to_be_visible()
+                    slider = chart.get_by_role('slider', name='Точка графика')
+                    slider.focus()
+                    slider.press('ArrowRight')
+                    expect(slider).to_have_attribute('aria-valuetext', 'Февраль')
+                    expect(chart.locator('output')).to_contain_text('3,5 км')
+                    chart.get_by_text('Данные графика', exact=True).click()
+                    expect(chart.get_by_role('table')).to_contain_text('12 км')
+                    flow = page.get_by_role('region', name='Проверка результата')
+                    expect(flow.locator('.rich-flowchart-edge')).to_have_count(3)
+                    flow.get_by_text('Узлы и связи', exact=True).click()
+                    expect(flow).to_contain_text('Проверка → Данные')
+                    button = page.get_by_role('button', name='Открыть текст', exact=True)
+                    button.click()
+                    text_dialog = page.get_by_role('dialog', name='Черновик')
+                    expect(text_dialog.get_by_role('textbox', name='Сгенерированный текст')).to_have_value(rich_text)
+                    expect(text_dialog.locator("img")).to_have_count(0)
+                    page.keyboard.press('Escape')
+                    expect(text_dialog).to_have_count(0)
+                    expect(button).to_be_focused()
+                    expect(page.locator('.code-block').filter(has_text='Неверная схема')).to_be_visible()
+                    expect(page.locator('.code-block').filter(has_text='Модельная карточка')).to_be_visible()
+                    offers = page.get_by_role('region', name='Найденные товары')
+                    expect(offers.get_by_role('article')).to_have_count(1)
+                    expect(offers).to_contain_text('Тестовый товар')
+                    expect(offers).to_contain_text('₽')
+                    expect(offers.get_by_role('link')).to_have_attribute('href', offer['url'])
+                    expect(offers.locator('time')).to_have_attribute('datetime', '2026-11-11T12:30:00.000Z')
+                    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                page.set_viewport_size({'width':390,'height':844})
+                page.goto(URL+'/?view=chat&thread=test-user-a')
+                expect_rich()
+                page.set_viewport_size({'width':1440,'height':900})
+                checks.append('chart, flowchart and text window work in mobile-width personal chat with keyboard controls; only valid server product metadata creates cards')
+
                 page.locator('.sidebar').get_by_role('button',name='Память',exact=True).click()
                 page.reload();expect(page.locator('.sidebar').get_by_role('button',name='Память',exact=True)).to_have_attribute('aria-current','page')
                 page.goto(URL);expect(page.locator('.sidebar').get_by_role('button',name='Память',exact=True)).to_have_attribute('aria-current','page')
@@ -162,9 +298,15 @@ def main():
                 shared={**data['chat_threads'][0],'id':'shared-thread','project_id':group['id'],'title':'Общий чат','message_count':2};data['chat_threads'].append(shared)
                 server.histories['fixture-token',shared['id']]=[
                     {'id':'peer-image-message','role':'user','author_user_id':'peer-user','name':'Друг','content':'Вложение участника','status':'complete','artifacts':[{'path':'uploads/peer.png','name':'peer.png','extension':'.png','size_bytes':32}]},
-                    {'id':'peer-result-message','role':'assistant','author_user_id':'peer-user','content':'[Скачать документ](results/shared.docx)','status':'complete','artifacts':[{'path':'results/shared.docx','name':'shared.docx','extension':'.docx','size_bytes':18}]}]
+                    {'id':'peer-result-message','role':'assistant','author_user_id':'peer-user','content':'[Скачать документ](results/shared.docx)','status':'complete','artifacts':[{'path':'results/shared.docx','name':'shared.docx','extension':'.docx','size_bytes':18}]},
+                    {'id':'math-shared','role':'assistant','content':math_message,'status':'complete'},
+                    {'id':'rich-shared','role':'assistant','content':rich_message,'status':'complete','products':products}]
                 page.set_viewport_size({'width':1440,'height':900});page.goto(URL+'/?view=shared')
                 page.locator('.shared-messenger-group').filter(has_text=group['title']).click()
+                expect_math()
+                checks.append('shared chat uses the same safe TeX renderer')
+                expect_rich()
+                checks.append('shared chat uses the same chart, diagram, separate text window and product cards')
                 expect(page.locator('.sent-image img')).to_be_visible()
                 page.get_by_role('button',name='Открыть изображение peer.png',exact=True).click()
                 lightbox=page.get_by_role('dialog',name='peer.png',exact=True)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -10,7 +10,7 @@ import re
 from ai_agent.action_log import ActionLogStore
 from ai_agent.compaction import CompactionManager, GOAL_PATTERN
 from ai_agent.llm.base import ProviderError
-from ai_agent.memory import MemoryStore, user_authored_text
+from ai_agent.memory import ATTACHMENT_BLOCK_MARKER, MemoryStore, user_authored_text
 from ai_agent.security import mark_untrusted_tool_output
 from ai_agent.tasks import TaskManager
 from ai_agent.types import Message, Task
@@ -31,6 +31,26 @@ CONSTRAINT_PATTERN = re.compile(
     r"do\s+not|don't|never|must\s+not|without\s+(?:my|explicit))",
     flags=re.IGNORECASE,
 )
+
+
+def _limit_attachment_preview(message: Message) -> Message:
+    prompt = user_authored_text(message)
+    header = prompt + ATTACHMENT_BLOCK_MARKER
+    footer = "\n[Конец вложений]"
+    if not prompt or prompt == message.content or not message.content.startswith(header):
+        return message
+    preview = message.content[len(header):-len(footer)]
+    if len(preview) <= 8000:
+        return message
+    paths = [item["path"] for item in message.artifacts
+             if isinstance(item, dict) and item.get("_user_attachment") is True]
+    if not paths:
+        return message
+    inventory = "\n".join(json.dumps(path, ensure_ascii=False) for path in paths)
+    details = ("Пути всех приложенных файлов:\n" + inventory
+               + "\nПредпросмотр сокращён. Для полного текста используй read_file_lines, для PDF — read_pdf_pages, "
+                 "для анализа изображений — analyze_image.\n\n")
+    return replace(message, content=header + details + preview[:8000] + footer)
 
 
 class ContextBudgetError(ProviderError):
@@ -184,7 +204,8 @@ class ContextBuilder:
             raise ContextBudgetError("Output reserve leaves no room for model input.")
         tool_payload = json.dumps(tools or [], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         tool_tokens = estimator.count_text(tool_payload)
-        content_budget = input_budget - tool_tokens - 64 - max(0,int(getattr(self,'turn_reserve_tokens',0)))
+        turn_reserve = max(0, int(getattr(self, 'turn_reserve_tokens', 0)))
+        content_budget = input_budget - tool_tokens - 64 - turn_reserve
         if content_budget <= 0:
             raise ContextBudgetError("Tool schemas exceed the available context budget.")
 
@@ -265,6 +286,8 @@ class ContextBuilder:
             raise ContextBudgetError(
                 "The latest conversation item and pinned context exceed the available input budget."
             )
+        if tools and not turn_reserve:
+            remaining = max(latest_tokens, remaining - min(2048, remaining // 4))
         recent_budget = max(math.floor(remaining * 0.65), latest_tokens)
         recent_messages, recent_tokens = self._select_recent_messages(context_messages, estimator, recent_budget)
         recent_ids = {id(item) for item in recent_messages}
@@ -406,12 +429,13 @@ class ContextBuilder:
         content = str(item["content"])
         if role == "tool":
             content = mark_untrusted_tool_output(str(name or ""), content)
-        return Message(
+        message = Message(
             role=role,
             content=content,
             name=name,
             artifacts=item.get("artifacts") or [],
         )
+        return _limit_attachment_preview(message) if role == "user" else message
 
     def _select_recent_messages(
         self,
@@ -556,7 +580,7 @@ class ContextBuilder:
         return _section("Older conversation continuity", "\n".join([header, *excerpts]))
 
     def _action_context(self, *, include_task_queue: bool = True) -> str:
-        if self.memory.shared_project() is not None:
+        if self.memory.is_shared_thread():
             return ""
         if not include_task_queue:
             rows = [row for row in self.memory.database.list_messages(self.memory.thread_id) if row['role'] == 'tool'][-self.action_limit:]

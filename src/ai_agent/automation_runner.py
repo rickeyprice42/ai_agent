@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import logging
 import re
 from pathlib import PurePosixPath
 import time
@@ -16,7 +17,8 @@ from uuid import uuid4
 
 from ai_agent.context import ModelTokenEstimator
 from ai_agent.executor import decide_step_action
-from ai_agent.llm.base import ProviderError
+from ai_agent.llm.base import ProviderError, ProviderRuntime
+from ai_agent.llm.registry import build_provider
 from ai_agent.security import arguments_digest, redact_for_audit, tool_risk
 from ai_agent.tasks import TaskManager
 from ai_agent.task_reports import TaskReportService
@@ -33,6 +35,7 @@ SCHEMA="""CREATE TABLE IF NOT EXISTS automation_llm_runs(
 ALLOWED_TOOLS={"get_time","web_search","research_read","browser_read","http_request",
     "read_file","write_file","create_docx","append_docx","create_presentation",
     "list_workspace_files","file_metadata"}
+logger = logging.getLogger(__name__)
 
 
 class BudgetProvider:
@@ -65,6 +68,7 @@ class BudgetProvider:
 
 class LLMAutomationRunner:
     allowed_tools = ALLOWED_TOOLS
+    max_provider_timeout = 30
 
     def output_prefix(self, user_id, run):
         with self.database.connect() as connection:
@@ -102,7 +106,7 @@ class LLMAutomationRunner:
         factory=getattr(self.service,'_automation_agent_factory',None)
         agent=self.service._agents.get(key)
         if agent is None:
-            settings=replace(self.service.settings_for_user(user_id,link['thread_id']),llm_timeout_seconds=min(30,max(1,int(run['budget'].get('max_seconds',300)))),llm_max_retries=0)
+            settings=self._runtime_settings(user_id,link,run)
             agent=factory(settings,user_id,link['thread_id']) if factory else Agent(settings,user_id=user_id,thread_id=link['thread_id'],task_queue_context=False)
             self.service._agents[key]=agent
         agent.task_queue_context=False
@@ -115,8 +119,19 @@ class LLMAutomationRunner:
                 if agent.tools.has(name):registry.register(agent.tools.get(name))
             agent.tools=registry;agent._automation_tools_scoped=True
         base=agent.provider.base if isinstance(agent.provider,BudgetProvider) else agent.provider
+        if isinstance(base, ProviderRuntime):
+            settings = self._runtime_settings(user_id, link, run)
+            if getattr(agent, '_automation_runtime_settings', None) != settings:
+                base = build_provider(settings)
+                agent._automation_runtime_settings = settings
         agent.provider=BudgetProvider(base,self.database,user_id,run['id'],agent.settings.model_name)
         return agent
+
+    def _runtime_settings(self, user_id, link, run):
+        settings = self.service.settings_for_user(user_id, link['thread_id'])
+        remaining = int(run['budget'].get('max_seconds', 300) - link.get('active_seconds', 0))
+        timeout = max(1, min(settings.llm_timeout_seconds, self.max_provider_timeout, remaining))
+        return replace(settings, llm_timeout_seconds=timeout, llm_max_retries=0)
 
     def run(self,user_id,run_id):
         manager=TaskManager(self.database,user_id)
@@ -129,24 +144,38 @@ class LLMAutomationRunner:
             else:
                 self._finish(user_id,run,None,'interrupted','Выполнение было прервано. Неизвестные действия не повторяются. Запустите новый отдельный запуск вручную.')
             return
-        task=manager.ensure_task_running(run['task_id'])
-        step=manager.running_step(task)
-        if link is None:
-            thread=self.database.create_chat_thread(user_id,title='Автоматизация: '+task.description[:45])
-            with self.database.connect() as connection:
-                connection.execute('INSERT INTO automation_llm_runs(run_id,user_id,thread_id,outcome) VALUES(?,?,?,?)',(run_id,user_id,thread['id'],'running'))
-        else:
-            thread={'id':link['thread_id']}
-            with self.database.connect() as connection:connection.execute("UPDATE automation_llm_runs SET outcome='running' WHERE run_id=?",(run_id,))
-        link=self.get(user_id,run_id=run_id)
-        if run['budget'].get('max_cost_micros',0):
-            self._finish(user_id,run,None,'failed','Для этого провайдера нет проверяемого учёта стоимости. Денежный лимит нельзя гарантировать.');return
-        agent=self._agent(user_id,link,run)
-        lock=self.service._chat_lock(user_id,thread['id'])
+        task=manager.get_task(run['task_id'])
+        thread_id = link['thread_id'] if link else self.database.create_chat_thread(
+            user_id, title='Автоматизация: '+task.description[:45])['id']
+        lock=self.service._chat_lock(user_id,thread_id)
         if not lock.acquire(blocking=False):
-            self._finish(user_id,run,agent,'failed','Диалог автоматизации занят.');return
-        prompt=self.step_prompt(task,step)
+            manager.set_run_state(run_id,'queued',worker_id=self.worker_id)
+            return
         try:
+            current = self.database.get_task_run(user_id, run_id)
+            if current['state'] != 'running' or current['worker_id'] != self.worker_id:
+                return
+            with self.database.connect() as connection:
+                if link is None:
+                    connection.execute('INSERT INTO automation_llm_runs(run_id,user_id,thread_id,outcome) VALUES(?,?,?,?)',(run_id,user_id,thread_id,'running'))
+                else:
+                    connection.execute("UPDATE automation_llm_runs SET outcome='running' WHERE run_id=?",(run_id,))
+            task=manager.ensure_task_running(run['task_id'])
+            step=manager.running_step(task)
+            link=self.get(user_id,run_id=run_id)
+            if run['budget'].get('max_cost_micros',0):
+                self._finish(user_id,run,None,'failed','Для этого провайдера нет проверяемого учёта стоимости. Денежный лимит нельзя гарантировать.')
+                return
+            try:
+                agent=self._agent(user_id,link,run)
+                prompt=self.step_prompt(task,step)
+            except Exception as exc:
+                logger.error('automation initialization failed run_id=%s step=%s type=%s',run_id,step.position if step else None,type(exc).__name__)
+                reason = f'Не удалось запустить этап {step.position} автоматизации.' if step else 'Не удалось запустить автоматизацию.'
+                if isinstance(exc, ProviderError):
+                    reason += ' ' + exc.user_message
+                self._finish(user_id,run,None,'failed',reason)
+                return
             for _ in self.monitor(user_id,run,agent,agent.respond_stream(prompt)):pass
         finally:lock.release()
 
@@ -217,7 +246,9 @@ class LLMAutomationRunner:
                         evidence={'verified':phase=='completed','tool_status':phase,'thread_id':agent.memory.thread_id},next_action='continue_agent' if phase=='completed' else 'inspect_result')
                     checkpoint=None
                     if phase in {'failed','not_found','validation_error'}:self.database.update_task_run_usage(user_id,run['id'],failures=1)
-                if event.get('type')=='done':done=True
+                if event.get('type')=='done':
+                    done=True
+                    reason=event.get('error') or reason
                 if event.get('type')=='error':reason=event.get('text') or 'Ошибка провайдера автоматизации.'
                 yield event
         except GeneratorExit:

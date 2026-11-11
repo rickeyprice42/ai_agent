@@ -6,6 +6,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'src'))
 from ai_agent.long_tasks import LongTaskPlans, LongTaskRunner, PlanConflict, daily_long_task_reports
+from ai_agent.llm.base import ProviderError
 from ai_agent.types import ModelResponse, ToolCall
 from tests import test_llm_automations as fixtures
 from backend.auth import issue_session_token
@@ -168,6 +169,38 @@ class LongTaskTests(unittest.TestCase):
         current = LongTaskPlans(self.service.database,self.user).get(plan['id'])
         self.assertEqual(current['run']['state'],'failed')
         self.assertIn('не подтверждён',current['run']['failure_reason'])
+
+    def test_long_task_provider_timeout_follows_configuration_and_remaining_budget(self):
+        plan = self.approve(self.draft())
+        runner = LongTaskRunner(self.service)
+        link = runner.get(self.user, run_id=plan['run_id'])
+        settings = runner._runtime_settings(self.user, link, plan['run'])
+        self.assertEqual(settings.llm_timeout_seconds, min(120, self.service.settings.llm_timeout_seconds))
+        link['active_seconds'] = plan['run']['budget']['max_seconds'] - 11
+        settings = runner._runtime_settings(self.user, link, plan['run'])
+        self.assertEqual(settings.llm_timeout_seconds, min(11, self.service.settings.llm_timeout_seconds))
+
+    def test_provider_failure_after_saved_file_preserves_file_and_specific_failure_reason(self):
+        plan = self.approve(self.draft())
+        self.provider = Provider([
+            ModelResponse(tool_calls=[ToolCall('write_file', {'path':'concept.md','content':'# Concept'})]),
+            ProviderError('Провайдер превысил время ожидания.', 'timeout'),
+        ])
+        self.service.process_long_task_queue()
+        result = LongTaskPlans(self.service.database, self.user).get(plan['id'])
+        self.assertEqual(result['run']['state'], 'failed')
+        self.assertIn('Провайдер превысил время ожидания.', result['run']['failure_reason'])
+        self.assertTrue(self.service.workspace_file_path(self.user, result['artifacts'][0]['path']).is_file())
+
+    def test_initialization_failure_finalizes_the_current_phase_without_waiting_for_lease(self):
+        plan = self.approve(self.draft())
+        with patch.object(LongTaskRunner, '_agent', side_effect=ValueError('invalid setup')):
+            self.service.process_long_task_queue()
+        result = LongTaskPlans(self.service.database, self.user).get(plan['id'])
+        self.assertEqual(result['run']['state'], 'failed')
+        self.assertIn('этап 1', result['run']['failure_reason'])
+        self.assertEqual(result['task']['steps'][0]['status'], 'failed')
+        self.assertEqual(self.provider.inputs, [])
 
     def test_crash_does_not_replay_unknown_action(self):
         plan = self.approve(self.draft())

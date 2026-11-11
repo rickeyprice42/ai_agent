@@ -85,7 +85,7 @@ def compact_tool_output(content: str, max_chars: int, *, query: str = '') -> str
         main = str(fields.get('main_text',''))
         # Title, dates, item-specific offers and URL survive even a small budget.
         packed = {key:payload[key] for key in ['url','retrieved_at','locale','region','status','adapter','extraction_method','confidence','safety'] if key in payload}
-        fixed = {key:_bounded(fields[key],strings=400,items=8) for key in ['title','metadata','catalog_item','json_ld'] if key in fields}
+        fixed = {key:_bounded(fields[key],strings=400,items=8) for key in ['title','metadata','catalog_item','merchant_offer','json_ld'] if key in fields}
         packed['fields'] = fixed
         for size in [max(200,available*2//3), max(180,available//2), max(150,available//4), 0]:
             excerpt,spans = text_excerpt(main,size,query) if size else ('',[])
@@ -98,7 +98,8 @@ def compact_tool_output(content: str, max_chars: int, *, query: str = '') -> str
             packed['fields']['json_ld'] = _bounded(fixed.get('json_ld',[]),strings=120,items=4)
         packed = {'url':str(payload.get('url',''))[:600], 'status':payload.get('status'),
                   'fields':{'title':str(fields.get('title',''))[:250],
-                            'catalog_item':_bounded(fields.get('catalog_item',{}),strings=180,items=12)},
+                            'catalog_item':_bounded(fields.get('catalog_item',{}),strings=180,items=12),
+                            'merchant_offer':_bounded(fields.get('merchant_offer',{}),strings=180,items=8)},
                   'excerpt':{'omitted':True,'note':'Body omitted due to context budget; read source again before using missing facts.'}}
     else:
         packed = {'tool_result_excerpt':_bounded(payload,strings=250,items=8),'omitted':True}

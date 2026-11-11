@@ -13,7 +13,8 @@ export function mergeChatRunMessages(history: ChatMessage[], run: ChatRunSnapsho
   const pending = result.findIndex((item) => item.role === "assistant" && (item.run_id === run.run_id || item.client_request_id === run.request_id));
   const saved = run.message_id ? result.findIndex((item) => item.id === run.message_id) : -1;
   const status = active(run) ? "pending" : run.state === "cancelled" ? "cancelled" : ["failed", "partial", "interrupted"].includes(run.state) ? "failed" : "complete";
-  const assistant: ChatMessage = { role: "assistant", content: run.text || "", status, run_id: run.run_id, client_request_id: run.request_id, artifacts: run.artifacts || [], ...(status === "failed" && run.error ? { error: run.error } : {}) };
+  const failure = status === "failed" ? run.error || (run.text ? "Ответ завершён не полностью. Частичный результат сохранён." : "Не удалось завершить ответ.") : null;
+  const assistant: ChatMessage = { role: "assistant", content: run.text || "", status, run_id: run.run_id, client_request_id: run.request_id, artifacts: run.artifacts || [], ...(run.products ? { products: run.products } : {}), ...(failure ? { error: failure } : {}) };
   if (saved >= 0) {
     const canonical = result[saved];
     // A persisted final row is newer than a still-running snapshot. Pending
@@ -21,6 +22,14 @@ export function mergeChatRunMessages(history: ChatMessage[], run: ChatRunSnapsho
     if (!canonical.status || canonical.status === "pending") {
       const text = canonical.content.length > assistant.content.length && canonical.content.startsWith(assistant.content) ? canonical.content : assistant.content;
       result[saved] = { ...canonical, ...assistant, id: canonical.id, content: text };
+    } else {
+      const terminalError = canonical.status === "failed" && !canonical.error && failure;
+      const terminalProducts = !canonical.products?.length && run.products?.length && run.products;
+      if (terminalError || terminalProducts) result[saved] = {
+        ...canonical,
+        ...(terminalError ? { error: terminalError } : {}),
+        ...(terminalProducts ? { products: terminalProducts } : {}),
+      };
     }
     return result.filter((item, index) => index === saved || !(item.role === "assistant" && item.client_request_id === run.request_id));
   }
@@ -31,7 +40,7 @@ export function mergeChatRunMessages(history: ChatMessage[], run: ChatRunSnapsho
   if (active(run)) {
     if (!hasUser && run.user_text) result.push({ role: "user", content: run.user_text, status: "complete", id: run.user_message_id || undefined, client_request_id: run.request_id });
     result.push(assistant);
-  } else if (hasUser && !result.slice(userIndex + 1).some((item) => item.role === "assistant") && run.text) result.push(assistant);
+  } else if (hasUser && !result.slice(userIndex + 1).some((item) => item.role === "assistant") && (run.text || failure || run.products?.length)) result.push(assistant);
   return result;
 }
 const key = (userId: string, threadId: string) => `avelin-chat-run:${encodeURIComponent(userId)}:${encodeURIComponent(threadId)}`;
@@ -89,7 +98,8 @@ export function useDurableChat(options: Options) {
 
   async function install(value: Scope, snapshot: ChatRunSnapshot) {
     if (!current(value) || snapshot.thread_id !== value.threadId) return;
-    if (latest.current?.run_id === snapshot.run_id && latest.current.latest_seq > snapshot.latest_seq) return;
+    const priorSnapshot = latest.current;
+    if (priorSnapshot?.run_id === snapshot.run_id && priorSnapshot.latest_seq > snapshot.latest_seq) return;
     const previous = read(value);
     const ownUnaccepted = previous?.requestId === snapshot.request_id && !previous.accepted;
     const cancelIntent = previous?.requestId === snapshot.request_id && previous.cancelRequested;
@@ -101,7 +111,9 @@ export function useDurableChat(options: Options) {
     if (ownUnaccepted) callbacks.current.onAccepted(snapshot);
     if (!active(snapshot)) {
       detach();
-      await callbacks.current.onTerminal(snapshot);
+      const alreadySeen = priorSnapshot?.run_id === snapshot.run_id &&
+        priorSnapshot.latest_seq === snapshot.latest_seq && priorSnapshot.state === snapshot.state;
+      if (!alreadySeen) await callbacks.current.onTerminal(snapshot);
       return;
     }
     if (cancelIntent && !snapshot.cancel_requested) {
@@ -153,16 +165,18 @@ export function useDurableChat(options: Options) {
     if (!current(value) || document.hidden || syncing.current === operation) return;
     syncing.current = operation;
     stream.current?.abort();
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 12_000);
     try {
       const saved = read(value);
       let snapshot: ChatRunSnapshot | null = null;
       try {
-        snapshot = saved?.runId ? await fetchChatRun(saved.runId, value.token) : saved?.requestId ? await fetchChatRunByRequest(saved.requestId, value.token) : await fetchActiveChatRun(value.threadId, value.token);
+        snapshot = saved?.runId ? await fetchChatRun(saved.runId, value.token, controller.signal) : saved?.requestId ? await fetchChatRunByRequest(saved.requestId, value.token, controller.signal) : await fetchActiveChatRun(value.threadId, value.token, controller.signal);
       } catch (error) { if (!(error instanceof ChatRunHttpError && error.status === 404)) throw error; }
       if (!current(value) || requestVersion.current !== version) return;
-      if (!snapshot && saved?.accepted) snapshot = await fetchActiveChatRun(value.threadId, value.token);
+      if (!snapshot && saved?.accepted) snapshot = await fetchActiveChatRun(value.threadId, value.token, controller.signal);
       if (snapshot && !active(snapshot) && saved?.accepted) {
-        const newest = await fetchActiveChatRun(value.threadId, value.token);
+        const newest = await fetchActiveChatRun(value.threadId, value.token, controller.signal);
         if (newest && newest.run_id !== snapshot.run_id) snapshot = newest;
       }
       if (!current(value) || requestVersion.current !== version) return;
@@ -186,7 +200,10 @@ export function useDurableChat(options: Options) {
         change(value, { checking: false, notice: "Нет связи с сервером. Восстановим ответ после подключения." });
         retry(value);
       }
-    } finally { if (syncing.current === operation) syncing.current = null; }
+    } finally {
+      window.clearTimeout(timeout);
+      if (syncing.current === operation) syncing.current = null;
+    }
   }
 
   useEffect(() => {

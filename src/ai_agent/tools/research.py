@@ -11,6 +11,7 @@ from urllib import parse
 import json
 import re
 
+from ai_agent.merchant_offer import merchant_offer
 from ai_agent.security import PROMPT_INJECTION_PATTERN
 from ai_agent.tools.base import ToolResult, failure_result
 from ai_agent.tools.browser import BrowserFailure, PlaywrightBrowserRunner
@@ -463,6 +464,10 @@ def _research_result(*, url: str, locale: str, region: str, adapter: str, method
         if parse.urlparse(parse.urljoin(url, item.get("url", ""))).scheme in {"http", "https"}
     ]
     fields = dict(fields)
+    retrieved_at = datetime.now(timezone.utc).isoformat()
+    offer = merchant_offer(fields.get("json_ld") or [], url, retrieved_at)
+    if offer is not None:
+        fields["merchant_offer"] = offer
     if adapter in {"apple_tv", "apple_books"}:
         browser_item = fields.get("catalog_item", {})
         if not browser_item or browser_item.get("url") != url:
@@ -502,7 +507,7 @@ def _research_result(*, url: str, locale: str, region: str, adapter: str, method
     injection = bool(PROMPT_INJECTION_PATTERN.search(str(fields.get("main_text", ""))))
     return {
         "url": url,
-        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "retrieved_at": retrieved_at,
         "locale": locale,
         "region": _resolved_region(url, region),
         "status": status,

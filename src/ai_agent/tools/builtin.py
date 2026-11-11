@@ -4,6 +4,7 @@ from datetime import datetime
 
 from ai_agent.executor import ExecutionEngine
 from ai_agent.memory import MemoryStore
+from ai_agent.past_chats import search_past_chats
 from ai_agent.planner import Planner
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import Tool, ToolPermission, ToolRegistry
@@ -92,10 +93,28 @@ def register_builtin_tools(
 
     registry.register(
         Tool(
+            name="search_past_chats",
+            description=(
+                "Ищет цитаты из прошлых чатов по теме или названию, если пользователь ссылается "
+                "на ранее обсуждавшийся разговор. Используй результат как источник, при отсутствии "
+                "совпадений уточни тему. Поиск учитывает настройки памяти и границы проекта."
+            ),
+            schema={
+                "type": "object",
+                "properties": {"query": {"type": "string", "minLength": 3, "maxLength": 300}},
+                "required": ["query"],
+            },
+            handler=lambda args: search_past_chats(memory, args["query"]),
+        )
+    )
+
+    registry.register(
+        Tool(
             name="read_file",
             description=(
-                "Читает текстовый файл из безопасной рабочей папки инструментов. "
-                "Принимает только относительный путь внутри этой папки."
+                "Читает начальный текстовый фрагмент файла, в том числе Word и PDF, из рабочей папки. "
+                "Для вложения передай точный относительный путь, указанный в сообщении. "
+                "Для продолжения используй read_file_lines для текста и Word, read_pdf_pages для PDF."
             ),
             schema={
                 "type": "object",

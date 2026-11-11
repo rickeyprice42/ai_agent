@@ -13,6 +13,7 @@ from threading import Event, Lock, Thread, local
 from uuid import uuid4
 
 from backend.service import ChatBusyError
+from ai_agent.chat_output import split_message_artifacts
 
 ACTIVE = {"queued", "running"}
 TERMINAL = {"completed", "waiting_approval", "waiting_clarification", "failed", "partial", "cancelled", "interrupted"}
@@ -67,11 +68,12 @@ class ChatRunService:
         actions=PendingChatActions(self.database)
         pending=actions.list(data['user_id'],data['thread_id'])
         history=actions.history(data['user_id'],data['thread_id'])
+        artifacts, products = split_message_artifacts(json.loads(data['artifacts_json']))
         return {key: data[key] for key in ('request_id','thread_id','kind','state','outcome','text','latest_seq',
             'message_id','user_message_id','error','created_at','updated_at')} | {
             'run_id':data['id'], 'cancel_requested':bool(data['cancel_requested']),
             'user_text':payload.get('message',''), 'attachments':payload.get('attachments',[]),
-            'artifacts':json.loads(data['artifacts_json']), 'approvals':pending,'approval_history':history,
+            'artifacts':artifacts, 'products':products, 'approvals':pending,'approval_history':history,
             'questions':PendingQuestions(self.database).list(data['user_id'],data['thread_id'])}
 
     def _accessible(self, user_id, row):
@@ -206,7 +208,7 @@ class ChatRunService:
     def _produce(self,run_id,user_id,events,agent,payload,kind,accepted_user=None):
         self._context.run_id = run_id
         done = None
-        failed = False
+        provider_error = None
         state,outcome,error = 'interrupted','interrupted','Ответ прерван. Неизвестные действия не повторяются.'
         with self.database.connect() as connection:
             connection.execute("UPDATE chat_generation_runs SET state='running' WHERE id=? AND state='queued' AND owner_id=?",(run_id,self.owner_id))
@@ -231,17 +233,23 @@ class ChatRunService:
                 if event.get('type')=='done':
                     done=event
                     break
-                if event.get('type')=='error':failed=True
+                if event.get('type') == 'error':
+                    provider_error = str(event.get('text') or 'Провайдер не завершил ответ.')[:800]
                 if not self._event(run_id,event):break
             if done:
                 outcome = done.get('outcome')
                 if kind=='approval' and payload.get('decision')=='denied':outcome='cancelled'
                 if not outcome:
-                    outcome = 'failed' if failed else 'not_invoked' if done.get('text')=='' else 'failed'
+                    outcome = 'failed' if provider_error else 'not_invoked' if done.get('text')=='' else 'failed'
                 state = outcome if outcome in TERMINAL else 'completed' if outcome=='not_invoked' else 'failed'
-                error = None if state in {'completed','waiting_approval','waiting_clarification'} else 'Генерация остановлена пользователем.' if state=='cancelled' else 'Ответ не завершён полностью. Частичный результат сохранён.'
-            elif failed and state!='cancelled':
-                state,outcome,error='failed','failed','Провайдер не завершил ответ. Частичный результат сохранён.'
+                if state in {'completed', 'waiting_approval', 'waiting_clarification'}:
+                    error = None
+                elif state == 'cancelled':
+                    error = 'Генерация остановлена пользователем.'
+                else:
+                    error = str(done.get('error') or provider_error or 'Ответ не завершён полностью. Частичный результат сохранён.')[:800]
+            elif provider_error and state != 'cancelled':
+                state, outcome, error = 'failed', 'failed', provider_error
         except Exception:
             state,outcome,error='failed','failed','Не удалось завершить ответ. Частичный результат сохранён.'
         finally:

@@ -84,6 +84,7 @@ class Server:
         elif path == '/api/memory/settings': body = {'autonomous_enabled':False,'health_autonomous_enabled':False,'updated_at':''}
         elif path == '/api/memory/summary': body = {'generated_at':'','sections':{'profile':[],'preference':[],'fact':[],'episode':[]},'record_count':0,'settings':{'autonomous_enabled':False,'health_autonomous_enabled':False}}
         elif path == '/api/memory/records' or path.endswith(('/compactions','/plans')): body = []
+        elif path == '/api/notifications': body = [item for item in data.get('notifications', []) if not item.get('read_at')]
         elif path == '/api/notifications/push/config': body = {'enabled':False,'reason':'Fixture'}
         elif path == '/api/chat/runs' and request.method == 'POST':
             incoming = request.post_data_json; self.posts.append(deepcopy(incoming))

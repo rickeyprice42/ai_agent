@@ -28,13 +28,14 @@ def register_coding_tool_pack(registry: ToolRegistry, files: FileSandbox) -> Non
     registry.register(
         Tool(
             name="read_file_lines",
-            description="Читает ограниченный диапазон строк UTF-8 файла и возвращает SHA-256 для безопасного edit.",
+            description="Читает диапазон строк текста или Word и возвращает SHA-256. Чтобы дочитать файл, передай next_start_line и next_start_column как start_line и start_column.",
             schema={
                 "type": "object",
                 "properties": {
                     "path": STRING,
                     "start_line": {"type": "integer", "minimum": 1},
                     "end_line": {"type": "integer", "minimum": 1},
+                    "start_column": {"type": "integer", "minimum": 1},
                 },
                 "required": ["path"],
             },
@@ -47,6 +48,8 @@ def register_coding_tool_pack(registry: ToolRegistry, files: FileSandbox) -> Non
                     "total_lines": {"type": "integer"},
                     "content": STRING,
                     "truncated": {"type": "boolean"},
+                    "next_start_line": {"type": ["integer", "null"]},
+                    "next_start_column": {"type": ["integer", "null"]},
                 }
             ),
             capabilities=("files.read.lines",),
@@ -55,6 +58,40 @@ def register_coding_tool_pack(registry: ToolRegistry, files: FileSandbox) -> Non
                 str(args["path"]),
                 int(args.get("start_line", 1)),
                 int(args["end_line"]) if "end_line" in args else None,
+                int(args.get("start_column", 1)),
+            ),
+        )
+    )
+    registry.register(
+        Tool(
+            name="read_pdf_pages",
+            description="Читает текстовый слой PDF. Для продолжения передай next_start_page и next_start_character как start_page и start_character. Для сканов без текста нужен OCR.",
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": STRING,
+                    "start_page": {"type": "integer", "minimum": 1},
+                    "end_page": {"type": "integer", "minimum": 1},
+                    "start_character": {"type": "integer", "minimum": 1},
+                },
+                "required": ["path"],
+            },
+            output_schema=_object_schema({
+                "start_page": {"type": "integer"},
+                "end_page": {"type": "integer"},
+                "total_pages": {"type": "integer"},
+                "text": STRING,
+                "last_page_truncated": {"type": "boolean"},
+                "truncated": {"type": "boolean"},
+                "next_start_page": {"type": ["integer", "null"]},
+                "next_start_character": {"type": ["integer", "null"]},
+            }),
+            capabilities=("files.read.pdf",),
+            permissions=(ToolPermission("workspace.read", "read"),),
+            handler=lambda args: files.read_pdf_pages(
+                str(args["path"]), int(args.get("start_page", 1)),
+                int(args["end_page"]) if "end_page" in args else None,
+                int(args.get("start_character", 1)),
             ),
         )
     )

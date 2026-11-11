@@ -7,6 +7,14 @@ export type FileArtifact = {
   size_bytes: number;
 };
 
+export type ChatProduct = {
+  title: string;
+  price: string;
+  currency: string;
+  url: string;
+  checked_at: string;
+};
+
 export type ChatMessage = {
   id?: string | null;
   client_request_id?: string;
@@ -20,6 +28,7 @@ export type ChatMessage = {
   provider?: string | null;
   model?: string | null;
   artifacts?: FileArtifact[];
+  products?: ChatProduct[];
 };
 
 export type ChatRunState = "queued" | "running" | "completed" | "waiting_approval" | "waiting_clarification" | "failed" | "cancelled" | "interrupted" | "partial";
@@ -32,6 +41,7 @@ export type ChatRunSnapshot = {
   text: string; latest_seq: number; outcome?: string | null; error?: string | null;
   message_id?: string | null; user_message_id?: string | null; user_text?: string;
   attachments?: string[]; artifacts?: FileArtifact[]; approvals?: ChatApprovalItem[];
+  products?: ChatProduct[];
   questions?: ChatQuestionItem[]; approval_history?: ChatApprovalItem[];
   cancel_requested?: boolean;
 };

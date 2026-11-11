@@ -102,6 +102,22 @@ PUBLIC_FIXTURES = [
 
 
 class BrowserResearchTests(unittest.TestCase):
+    def test_product_card_requires_exact_price_from_the_read_page(self):
+        url = "https://shop.example/item"
+        product = {"@type": "Product", "name": "Куртка", "url": "/item",
+                   "offers": {"@type": "Offer", "price": "1050.99", "priceCurrency": "RUB"}}
+
+        def read_product(value):
+            body = '<script type="application/ld+json">' + json.dumps(value, ensure_ascii=False) + '</script><main>Куртка</main>'
+            return BrowserResearchReader(FakeHttp(response(body, url=url)), FakeBrowser()).read(url=url)
+
+        data = read_product(product)
+        self.assertEqual(data["fields"]["merchant_offer"], {
+            "title": "Куртка", "price": "1050.99", "currency": "RUB", "url": url, "checked_at": data["retrieved_at"],
+        })
+        self.assertNotIn("merchant_offer", read_product({**product, "url": "https://other.example/item"})["fields"])
+        self.assertNotIn("merchant_offer", read_product({**product, "offers": {"@type": "AggregateOffer", "lowPrice": "1"}})["fields"])
+
     def test_title_only_shell_is_not_successful_evidence_or_guessed_region(self):
         result=research_read_result(BrowserResearchReader(FakeHttp(response('<title>Loading</title>')),FakeBrowser(available=False)),{'url':'https://example.com/vi'})
         self.assertEqual(result.status,'failed')

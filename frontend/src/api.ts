@@ -24,6 +24,7 @@ import type { AutomationRunItem } from "./types";
 import type { ConnectorItem } from "./types";
 import type { ChatRunSnapshot, ChatRunState } from "./types";
 import type { ChatQuestionItem } from "./types";
+import type { InAppNotificationItem } from "./types";
 
 function authHeaders(token: string): HeadersInit {
   return {
@@ -44,6 +45,29 @@ export async function parseError(response: Response, fallback: string): Promise<
   }
 }
 
+export class ApiReadError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+const API_READ_TIMEOUT_MS = 12_000;
+
+async function readWorkspaceJson<T>(path: string, token: string, fallback: string): Promise<T> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), API_READ_TIMEOUT_MS);
+  try {
+    const response = await fetch(path, { headers: authHeaders(token), cache: "no-store", signal: controller.signal });
+    if (!response.ok) throw new ApiReadError(response.status, (await parseError(response, fallback)).message);
+    return await response.json() as T;
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error(`${fallback} Сервер не ответил вовремя.`);
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 export async function fetchRuntimeNotice(): Promise<string | null> {
   try {
     const response = await fetch("/api/health", { cache: "no-store" });
@@ -56,13 +80,7 @@ export async function fetchRuntimeNotice(): Promise<string | null> {
 
 export async function fetchBootstrap(token: string, threadId?: string | null): Promise<BootstrapPayload> {
   const query = threadId ? `?thread_id=${encodeURIComponent(threadId)}` : "";
-  const response = await fetch(`/api/bootstrap${query}`, {
-    headers: authHeaders(token)
-  });
-  if (!response.ok) {
-    throw await parseError(response, "Не удалось загрузить данные агента.");
-  }
-  return response.json();
+  return readWorkspaceJson(`/api/bootstrap${query}`, token, "Не удалось загрузить данные агента.");
 }
 
 export async function sendMessage(
@@ -126,9 +144,7 @@ export async function startChatQuestionRun(threadId: string, questionId: string,
   return (await runRequest(`chats/${encodeURIComponent(threadId)}/questions/${encodeURIComponent(questionId)}/runs`, token, "POST", { request_id: requestId, ...answer }))!;
 }
 export async function fetchChatModelSettings(threadId: string, token: string): Promise<ModelSettings> {
-  const response=await fetch(`/api/chats/${encodeURIComponent(threadId)}/model-settings`,{cache:"no-store",headers:authHeaders(token)});
-  if(!response.ok)throw await parseError(response,"Не удалось загрузить модель чата.");
-  return response.json();
+  return readWorkspaceJson(`/api/chats/${encodeURIComponent(threadId)}/model-settings`, token, "Не удалось загрузить модель чата.");
 }
 export async function updateChatModelSettings(threadId: string, token: string, settings: ModelSettings): Promise<ModelSettings> {
   const response=await fetch(`/api/chats/${encodeURIComponent(threadId)}/model-settings`,{method:"PUT",headers:{...authHeaders(token),"Content-Type":"application/json"},body:JSON.stringify(settings)});
@@ -193,6 +209,12 @@ export async function fetchAvatar(token: string): Promise<Blob | null> {
   if (response.status === 404) return null;
   if (!response.ok) throw await parseError(response, "Не удалось загрузить аватар.");
   return response.blob();
+}
+
+export async function fetchMemberAvatar(token: string, projectId: string, userId: string, signal: AbortSignal): Promise<Blob | null> {
+  const path = `/api/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}/avatar`;
+  const response = await fetch(path, { headers: authHeaders(token), cache: "no-store", signal });
+  return response.ok && response.headers.get("content-type")?.startsWith("image/png") ? response.blob() : null;
 }
 
 export async function fetchImagePreview(path: string, token: string): Promise<Blob> {
@@ -786,6 +808,12 @@ export async function createDailyTaskReport(token: string): Promise<void> {
   if (!response.ok) throw await parseError(response, "Не удалось сформировать ежедневный отчёт.");
 }
 
+export async function fetchUnreadNotifications(token: string, signal: AbortSignal): Promise<InAppNotificationItem[]> {
+  const response = await fetch("/api/notifications?unread_only=true", { headers: authHeaders(token), cache: "no-store", signal });
+  if (!response.ok) throw await parseError(response, "Не удалось загрузить уведомления.");
+  return response.json();
+}
+
 export async function markNotificationRead(notificationId: string, token: string): Promise<void> {
   const response = await fetch(`/api/notifications/${encodeURIComponent(notificationId)}/read`, {
     method: "POST",
@@ -944,13 +972,7 @@ export async function register(
 }
 
 export async function fetchMe(token: string): Promise<UserProfile> {
-  const response = await fetch("/api/auth/me", {
-    headers: authHeaders(token)
-  });
-  if (!response.ok) {
-    throw await parseError(response, "Сессия недействительна.");
-  }
-  return response.json();
+  return readWorkspaceJson("/api/auth/me", token, "Не удалось проверить сессию.");
 }
 
 export async function logout(token: string): Promise<void> {
@@ -961,13 +983,7 @@ export async function logout(token: string): Promise<void> {
 }
 
 export async function fetchModelProviders(token: string): Promise<ModelProviderOption[]> {
-  const response = await fetch("/api/models", {
-    headers: authHeaders(token)
-  });
-  if (!response.ok) {
-    throw await parseError(response, "Не удалось загрузить список моделей.");
-  }
-  return response.json();
+  return readWorkspaceJson("/api/models", token, "Не удалось загрузить список моделей.");
 }
 
 export async function updateModelSettings(

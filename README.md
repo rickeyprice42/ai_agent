@@ -608,6 +608,32 @@ Launcher не перезаписывает чужую конфигурацию T
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
+## Окно Avelin для Windows
+
+Из корня проекта запусти:
+
+```powershell
+.\scripts\launch_desktop.ps1
+```
+
+Откроется отдельное окно Microsoft Edge для `https://app.avelin.tech/`. Войди в
+свой аккаунт Avelin в этом окне. Диалоги, модели и файлы доступны из того же
+серверного аккаунта. Для постоянного ярлыка можно установить сайт как приложение
+через меню Microsoft Edge.
+
+Для запуска интерфейса в отдельном окне с локальным backend сначала запусти
+`scripts/launch_local.py` и дождись готовности, затем выполни:
+
+```powershell
+.\scripts\launch_desktop.ps1 -LocalPreview
+```
+
+Управление окнами Windows через `desktop_snapshot` и `desktop_interact` доступно
+локальному Windows-backend с заданным списком окон и подтверждениями. Окно
+`app.avelin.tech` подключается к серверному аккаунту. Для запуска этих инструментов
+на компьютере из серверного чата потребуется отдельное подключение локального
+исполнителя.
+
 ## Desktop environment
 
 Окружение для следующего Tauri-этапа подготовлено:

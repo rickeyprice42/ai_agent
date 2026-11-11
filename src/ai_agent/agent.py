@@ -54,6 +54,10 @@ class ToolOutcome:
     preliminary_research: bool = False
     approvals: list[dict] = field(default_factory=list)
     questions: list[dict] = field(default_factory=list)
+    products: dict[str, dict] = field(default_factory=dict)
+
+    def message_artifacts(self) -> list[dict]:
+        return self.artifacts + [{"_verified_product": product} for product in list(self.products.values())[:6]]
 
     def merge(self, other: "ToolOutcome") -> None:
         self.results.extend(other.results)
@@ -65,6 +69,7 @@ class ToolOutcome:
         self.preliminary_research = self.preliminary_research or other.preliminary_research
         self.approvals.extend(other.approvals)
         self.questions.extend(other.questions)
+        self.products.update(other.products)
 
 
 MIN_RESEARCH_RESULTS = 2
@@ -72,6 +77,16 @@ MAX_TOOL_ROUNDS = 12
 MAX_TOOL_CALLS = 24
 MAX_SEARCHES_BEFORE_READ = 3
 TASK_MUTATION_TOOLS = {"create_task", "plan_task", "start_next_task", "execute_next_step", "add_task_step", "update_task", "update_task_step"}
+SHARED_CHAT_TOOLS = frozenset({"get_time", "web_search", "research_read"})
+CHAT_DISPLAY_GUIDANCE = r"""
+Математика в чате: используй \(...\) для формул в строке и \[...\] для формул отдельным блоком.
+Если пользователь просит интерактивный результат в чате, отправь отдельный Markdown-блок с одним JSON-объектом:
+- `avelin-chart`: {"title":"…","labels":["…"],"series":[{"name":"…","values":[12]}],"unit":"…"}.
+- `avelin-flowchart`: {"title":"…","nodes":[{"id":"a","label":"…"}],"edges":[{"from":"a","to":"b"}]}.
+- `avelin-text`: {"title":"…","text":"…"} для текста в отдельном окне.
+Показывай известные значения с их единицами, отмечай оценочные данные. В блоки передавай данные, без HTML и скриптов.
+Если пользователь ссылается на другой чат и доступен search_past_chats, найди цитаты по теме или названию перед ответом.
+"""
 logger = logging.getLogger("avelin.agent")
 
 
@@ -229,14 +244,14 @@ class Agent:
         file_repair_requested = False
         for attempt in range(MAX_TOOL_ROUNDS):
             try:
-                shared_workspace = self.memory.shared_project() is not None
+                shared_workspace = self.memory.is_shared_thread()
                 phase = _turn_phase(completed_tools, attempt)
-                task_queue = self._uses_task_queue(user_text)
-                tool_definitions = _tools_for_phase(self.tools.list_for_model(), phase) if not shared_workspace else []
+                task_queue = not shared_workspace and self._uses_task_queue(user_text)
+                tool_definitions = self._turn_tools(phase, shared_workspace)
                 if not task_queue:
                     tool_definitions = [tool for tool in tool_definitions if tool['name'] not in TASK_MUTATION_TOOLS]
                 context = context or self.context.build(
-                    self.settings.system_prompt if shared_workspace else self.tool_factory.system_prompt(self.settings.system_prompt),
+                    (self.settings.system_prompt if shared_workspace else self.tool_factory.system_prompt(self.settings.system_prompt)) + CHAT_DISPLAY_GUIDANCE,
                     model=self.settings.model_name,
                     tools=tool_definitions,
                     include_task_queue=task_queue,
@@ -310,7 +325,7 @@ class Agent:
             if completed_tools.preliminary_research and _PRELIMINARY_RESEARCH not in assistant_text:
                 assistant_text = _PRELIMINARY_RESEARCH + "\n\n" + assistant_text
             self.last_turn_message_id = self.memory.append_message(
-                Message(role="assistant", content=assistant_text, artifacts=completed_tools.artifacts)
+                Message(role="assistant", content=assistant_text, artifacts=completed_tools.message_artifacts())
             )
             self._extract_autonomous_memory(user_message_id, user_text)
             self.last_turn_outcome = _completed_turn_outcome(completed_tools)
@@ -372,14 +387,14 @@ class Agent:
         buffer_file_reply = wants_docx_creation(self._authored_request(contract_text)) or wants_resend(self._authored_request(contract_text))
         try:
             for attempt in range(MAX_TOOL_ROUNDS):
-                shared_workspace = self.memory.shared_project() is not None
+                shared_workspace = self.memory.is_shared_thread()
                 phase = _turn_phase(completed_tools, attempt)
-                task_queue = self._uses_task_queue(user_text)
-                tool_definitions = _tools_for_phase(self.tools.list_for_model(), phase) if not shared_workspace else []
+                task_queue = not shared_workspace and self._uses_task_queue(user_text)
+                tool_definitions = self._turn_tools(phase, shared_workspace)
                 if not task_queue:
                     tool_definitions = [tool for tool in tool_definitions if tool['name'] not in TASK_MUTATION_TOOLS]
                 context = context or self.context.build(
-                    base_system_prompt if shared_workspace else self.tool_factory.system_prompt(base_system_prompt),
+                    (base_system_prompt if shared_workspace else self.tool_factory.system_prompt(base_system_prompt)) + CHAT_DISPLAY_GUIDANCE,
                     model=self.settings.model_name,
                     tools=tool_definitions,
                     include_task_queue=task_queue,
@@ -487,7 +502,7 @@ class Agent:
                         error=None,
                         provider=self.settings.model_provider,
                         model=self.settings.model_name,
-                        artifacts=completed_tools.artifacts,
+                        artifacts=completed_tools.message_artifacts(),
                     )
                     if not partial or buffer_file_reply:
                         yield {"type": "delta", "text": assistant_text}
@@ -496,7 +511,7 @@ class Agent:
                         message_id,
                         content=assistant_text,
                         status="complete",
-                        artifacts=completed_tools.artifacts,
+                        artifacts=completed_tools.message_artifacts(),
                     )
                 self.last_turn_message_id = message_id
                 self.last_turn_outcome = _completed_turn_outcome(completed_tools)
@@ -579,6 +594,7 @@ class Agent:
                 yield {
                     "type": "done",
                     "outcome": self.last_turn_outcome,
+                    "error": exc.user_message,
                     "provider": self.settings.model_provider,
                     "model": self.settings.model_name,
                 }
@@ -610,7 +626,7 @@ class Agent:
     def _extract_autonomous_memory(self, source_message_id: str, user_text: str) -> None:
         if getattr(self, "suppress_autonomous_memory", False):
             return
-        if self.memory.shared_project() is not None:
+        if self.memory.is_shared_thread():
             return
         try:
             source = next((row for row in self.memory.database.list_messages(self.memory.thread_id)
@@ -645,6 +661,7 @@ class Agent:
         if token_count() > budget:
             from dataclasses import replace
             from ai_agent.tool_payloads import compact_tool_output
+            from ai_agent.turn_replay import compact_finished_exchanges
             query = next((message.content for message in reversed(messages) if message.role == 'user' and message.name != 'agent_runtime'), '')
             indices = [index for index,message in enumerate(messages) if message.role == 'tool']
             # First shorten older observations, preserving the newest source and
@@ -661,9 +678,21 @@ class Agent:
                     messages[index] = replace(message,content=compact_tool_output(message.content,limit*3,query=query))
                     if token_count() <= budget:
                         return messages
+            # Large code-write arguments remain in the provider's native call
+            # history after compacting results. Drop only fully paired exchanges.
+            for replay in compact_finished_exchanges(messages, query=query):
+                messages = replay
+                if token_count() <= budget:
+                    return messages
         if token_count() > budget:
             raise ProviderError("Результаты инструментов превысили доступный контекст. Сократи запрос или продолжи отдельным сообщением.", "context_overflow")
         return messages
+
+    def _turn_tools(self, phase: str, shared_workspace: bool) -> list[dict]:
+        tools = self.tools.list_for_model()
+        if shared_workspace:
+            tools = [tool for tool in tools if tool["name"] in SHARED_CHAT_TOOLS]
+        return _tools_for_phase(tools, phase)
 
     def _execute_tool_calls(self, tool_calls, user_text: str, *, previous: ToolOutcome | None = None, allowed_tools: set[str] | None = None) -> ToolOutcome:
         stream = self._execute_tool_calls_stream(tool_calls, user_text, previous=previous, allowed_tools=allowed_tools)
@@ -675,12 +704,8 @@ class Agent:
 
     def _execute_tool_calls_stream(self, tool_calls, user_text: str, *, previous: ToolOutcome | None = None, round_number: int = 1, outcome: ToolOutcome | None = None, allowed_tools: set[str] | None = None):
         outcome = outcome if outcome is not None else ToolOutcome()
-        if self.memory.shared_project() is not None:
-            outcome.results.append(
-                "Tool calls are disabled in Shared Workspace MVP; share board items explicitly through the workspace UI."
-            )
-            outcome.statuses.append("blocked")
-            return outcome
+        if self.memory.is_shared_thread():
+            allowed_tools = SHARED_CHAT_TOOLS if allowed_tools is None else allowed_tools & SHARED_CHAT_TOOLS
         for tool_call in tool_calls:
             if tool_call.name == "analyze_image" and not tool_call.arguments.get("detail") and needs_precise_image(user_text):
                 tool_call.arguments = {**tool_call.arguments, "detail": "precise"}
@@ -758,6 +783,10 @@ class Agent:
             )
             if artifact is not None:
                 outcome.artifacts.append(artifact)
+            if tool_call.name == "research_read" and status == "completed" and isinstance(invocation_output, dict):
+                offer = invocation_output.get("fields", {}).get("merchant_offer")
+                if isinstance(offer, dict):
+                    outcome.products[offer["url"]] = offer
             yield {"type": "status", "text": _tool_activity_text(tool_call.name, status), "tool": tool_call.name, "phase": status, "round": round_number}
             if tool_call.name=='ask_user' and status=='completed' and isinstance(invocation_output,dict):
                 outcome.questions.append(invocation_output)
@@ -805,6 +834,8 @@ class Agent:
             TaskStep(id="direct-chat", task_id="direct-chat", description=user_text)
         )
         if decision.tool_name is None:
+            return None
+        if self.memory.is_shared_thread() and decision.tool_name not in SHARED_CHAT_TOOLS:
             return None
         if decision.tool_name in {"run_shell", "http_request", "execute_next_step", "browser_read", "research_read", "create_presentation"}:
             return None
@@ -873,7 +904,7 @@ class Agent:
         return arguments
 
     def _ensure_requested_research_docx(self, user_text: str, outcome: ToolOutcome) -> None:
-        if getattr(self, "automation_disable_fallback_files", False):
+        if getattr(self, "automation_disable_fallback_files", False) or self.memory.is_shared_thread():
             return
         if outcome.artifacts or "web_search" not in outcome.tool_names:
             return
@@ -998,7 +1029,7 @@ class Agent:
         }
 
     def _missing_requested_docx(self, user_text: str, outcome: ToolOutcome) -> bool:
-        return (wants_docx_creation(self._authored_request(user_text)) and not outcome.approvals
+        return (not self.memory.is_shared_thread() and wants_docx_creation(self._authored_request(user_text)) and not outcome.approvals
                 and not any(item.get('extension', '').lower() == '.docx' for item in outcome.artifacts))
 
     def _authored_request(self, user_text: str) -> str:
@@ -1035,6 +1066,8 @@ class Agent:
         return []
 
     def _verified_file_reply(self, user_text: str, text: str, outcome: ToolOutcome) -> str:
+        if self.memory.is_shared_thread():
+            return normalize_artifact_links(text, outcome.artifacts)
         user_text = self._authored_request(user_text)
         if wants_resend(user_text) and not outcome.artifacts:
             outcome.artifacts.extend(self._previous_thread_artifacts(user_text))

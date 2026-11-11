@@ -49,7 +49,26 @@ def _avatar_path(user_id):
 
 @router.get('/profile/avatar')
 def avatar(user=Depends(current_user)):
-    path = _avatar_path(user['id'])
+    return _avatar_response(user['id'])
+
+
+@router.get('/projects/{project_id}/members/{member_id}/avatar')
+def member_avatar(project_id: str, member_id: str, user=Depends(current_user)):
+    service = routes.agent_service
+    project = service.database.get_project(user['id'], project_id)
+    if not project or not project['shared'] or project['status'] != 'active':
+        raise HTTPException(404, 'Аватар недоступен.')
+    try:
+        members = service.database.list_project_members(user['id'], project_id)
+    except ValueError as exc:
+        raise HTTPException(404, 'Аватар недоступен.') from exc
+    if not any(member['user_id'] == member_id for member in members):
+        raise HTTPException(404, 'Аватар недоступен.')
+    return _avatar_response(member_id)
+
+
+def _avatar_response(user_id: str):
+    path = _avatar_path(user_id)
     if not path.is_file() or path.resolve() != path:
         raise HTTPException(404, 'Аватар пока не установлен.')
     return Response(path.read_bytes(), media_type='image/png', headers={'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})

@@ -161,6 +161,9 @@ class HttpSandbox:
         provider = SEARCH_PROVIDER
         failures: list[str] = []
         candidates: list[dict[str, str]] = []
+        results: list[dict[str, str]] = []
+        rejected: Counter[str] = Counter()
+        candidate_count = 0
         if plan.intent == "apple_books":
             try:
                 candidates = self._search_apple_books(
@@ -172,9 +175,12 @@ class HttpSandbox:
                 candidates = []
             if candidates:
                 provider = "apple_search_api"
+                results, apple_rejected = _rank_search_results(plan, candidates, normalized_limit)
+                rejected.update(apple_rejected)
+                candidate_count += len(candidates)
 
         search_url = f"{SEARCH_ENDPOINT}?{parse.urlencode({'q': plan.provider_query, 'format': 'rss'})}"
-        if not candidates:
+        if not results:
             lite_url = f"{SEARCH_LITE_ENDPOINT}?{parse.urlencode({'q': plan.provider_query})}"
             sources = [('duckduckgo_lite', lite_url), ('bing_rss', search_url)]
             for source, source_url in sources:
@@ -193,17 +199,22 @@ class HttpSandbox:
                     candidates = _parse_search_results(body,max(normalized_limit*4,10))
                     if candidates:
                         provider = source
-                        break
-                    failures.append(f'{source}: no readable search results')
+                        candidate_count += len(candidates)
+                        results, source_rejected = _rank_search_results(plan, candidates, normalized_limit)
+                        rejected.update(source_rejected)
+                        if results:
+                            break
+                        failures.append(f'{source}: no relevant results')
+                    else:
+                        failures.append(f'{source}: no readable search results')
                 except error.HTTPError as exc:
                     failures.append(f'{source}: HTTP {exc.code}')
                 except (error.URLError,TimeoutError) as exc:
                     failures.append(f'{source}: transport unavailable')
-            if not candidates and failures:
+            if not candidate_count and failures:
                 raise ValueError('Web search unavailable: '+ '; '.join(failures))
-        if not candidates:
+        if not candidate_count:
             raise ValueError("Web search returned no readable results.")
-        results, rejected = _rank_search_results(plan, candidates, normalized_limit)
         if not results:
             reasons = ", ".join(f"{key}={value}" for key, value in sorted(rejected.items()))
             suffix = f" ({reasons})" if reasons else ""
@@ -211,7 +222,7 @@ class HttpSandbox:
                 "research rejected all candidates intent=%s storefront=%s candidates=%s reasons=%s",
                 plan.intent,
                 plan.storefront,
-                len(candidates),
+                candidate_count,
                 reasons or "none",
             )
             provider_notes = '; '.join(failures)

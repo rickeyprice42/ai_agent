@@ -180,7 +180,10 @@ class LongTaskPlans:
 
 
 class LongTaskRunner(LLMAutomationRunner):
-    allowed_tools = ALLOWED_TOOLS | {'read_file_lines','search_workspace','edit_file_exact','run_code_check'}
+    allowed_tools = ALLOWED_TOOLS | {'read_file_lines','read_pdf_pages','search_workspace','edit_file_exact','run_code_check'}
+    # Reasoning models can take longer than one automation's 30-second window.
+    # Keep each request under the worker's 180-second lease window.
+    max_provider_timeout = 120
 
     def run(self,user_id,run_id):
         link = self.get(user_id,run_id=run_id)
@@ -224,7 +227,7 @@ class LongTaskRunner(LLMAutomationRunner):
             return invoke
         for definition in agent.tools.list_for_model():
             tool = agent.tools.get(definition['name'])
-            if tool.name in {'read_file','read_file_lines','edit_file_exact','file_metadata','write_file','create_docx','append_docx','create_presentation'}:
+            if tool.name in {'read_file','read_file_lines','read_pdf_pages','edit_file_exact','file_metadata','write_file','create_docx','append_docx','create_presentation'}:
                 tool = replace(tool,handler=guarded(tool.handler))
             elif tool.name=='list_workspace_files':
                 tool = replace(tool,handler=lambda args:scoped_files.format_file_list(int(args.get('limit',30))))
