@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from ai_agent.tools.shell import _sandbox_environment
+from ai_agent.tools.process_isolation import isolated_command
 
 
 IGNORED_DIRECTORIES = {".git", ".venv", "venv", "node_modules", "dist", "build", "__pycache__"}
@@ -42,11 +43,12 @@ class BoundedProcessRunner:
         if not arguments or any("\x00" in value for value in arguments):
             raise ValueError("Некорректная команда процесса.")
         timeout = self.timeout_seconds if timeout_seconds is None else max(1, min(int(timeout_seconds), 300))
+        isolated_arguments = isolated_command(self.workspace_dir, arguments)
         started = perf_counter()
         timed_out = False
         try:
             completed = subprocess.run(
-                arguments,
+                isolated_arguments,
                 cwd=self.workspace_dir,
                 capture_output=True,
                 text=True,

@@ -85,7 +85,8 @@ class CodingToolPackTests(unittest.TestCase):
                 files.exact_edit("large.txt", original_hash, "начало", "start")
             self.assertEqual(target.read_text(encoding="utf-8"), "изменено пользователем")
 
-    def test_process_timeout_preserves_partial_output_and_bounds_normal_output(self):
+    @patch('ai_agent.tools.code_tools.isolated_command', side_effect=lambda workspace, arguments: ['isolated-fixture', *arguments])
+    def test_process_timeout_preserves_partial_output_and_bounds_normal_output(self, isolation):
         with tempfile.TemporaryDirectory() as directory:
             runner = BoundedProcessRunner(Path(directory), max_output_chars=1000)
             timeout = subprocess.TimeoutExpired(["demo"], 1, output="partial stdout", stderr="partial stderr")
@@ -99,7 +100,7 @@ class CodingToolPackTests(unittest.TestCase):
             self.assertTrue(bounded["truncated"])
             self.assertLessEqual(len(bounded["stdout"]), 1000)
 
-    @unittest.skipUnless(shutil.which("git"), "Git executable is required")
+    @unittest.skipUnless(shutil.which("git") and sys.platform == 'linux' and Path('/usr/bin/bwrap').exists(), "Linux bubblewrap and Git required for isolated execution")
     def test_end_to_end_inspect_edit_test_diff_and_git_write_permissions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

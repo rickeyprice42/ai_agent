@@ -11,7 +11,7 @@ STATE_ROOT=/var/lib/avelin
 VENV_ROOT=/opt/avelin/venv
 
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip nginx certbot ca-certificates curl rsync
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip nginx certbot ca-certificates curl rsync bubblewrap
 
 if ! id avelin >/dev/null 2>&1; then
   useradd --system --home-dir "$STATE_ROOT" --create-home --shell /usr/sbin/nologin avelin

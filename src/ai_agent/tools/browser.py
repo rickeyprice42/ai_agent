@@ -13,6 +13,7 @@ import shutil
 import socket
 
 from ai_agent.tools.base import ToolError, ToolResult, failure_result
+from ai_agent.tools.egress_proxy import BrowserEgressProxy
 
 
 EDGE_PATHS = (
@@ -145,10 +146,16 @@ class PlaywrightBrowserRunner:
 
         stage = "startup"
         try:
-            with sync_playwright() as playwright:
+            with BrowserEgressProxy(
+                lambda host: _host_allowed(host, operation_hosts) or _catalog_resource_allowed(initial_host, host, 'GET', False),
+                allow_private=self.allow_private_networks,
+                timeout_seconds=max(1, self.timeout_ms // 1000),
+            ) as proxy, sync_playwright() as playwright:
                 launch_options: dict[str, Any] = {
                     "headless": True,
-                    "args": ["--disable-background-networking", "--disable-sync"],
+                    "proxy": proxy,
+                    "args": ["--disable-background-networking", "--disable-sync", "--disable-quic",
+                             "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
                 }
                 if os.name == "nt":
                     launch_options["channel"] = "msedge"

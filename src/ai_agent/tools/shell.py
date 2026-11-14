@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import subprocess
+from ai_agent.tools.process_isolation import isolated_command
 
 
 ALLOWED_PREFIXES = (
@@ -32,9 +33,10 @@ class ShellSandbox:
         if args[0].lower() in PSEUDO_LIST_COMMANDS:
             return self._list_workspace()
 
+        isolated_args = isolated_command(self.workspace_dir, args)
         try:
             completed = subprocess.run(
-                args,
+                isolated_args,
                 cwd=self.workspace_dir,
                 capture_output=True,
                 text=True,

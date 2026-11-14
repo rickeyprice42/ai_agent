@@ -13,6 +13,7 @@ import socket
 import ssl
 from time import monotonic
 import zlib
+from ai_agent.tools.public_transport import AddressBlocked, PinnedHTTPHandler, PinnedHTTPSHandler
 
 
 ALLOWED_METHODS = {"GET", "HEAD"}
@@ -50,8 +51,7 @@ class HttpTransportError(ValueError):
         super().__init__(message)
 
 
-class HttpAddressBlocked(ValueError):
-    pass
+HttpAddressBlocked = AddressBlocked
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +116,9 @@ class HttpSandbox:
             method=normalized_method,
         )
 
-        opener = request.build_opener(_SafeRedirectHandler(self._validate_url))
+        opener = request.build_opener(request.ProxyHandler({}),
+            PinnedHTTPHandler(self.allow_private_networks), PinnedHTTPSHandler(self.allow_private_networks),
+            _SafeRedirectHandler(self._validate_url))
         try:
             with opener.open(http_request, timeout=self.timeout_seconds) as response:
                 final_url = getattr(response, "geturl", lambda: parsed.geturl())()
