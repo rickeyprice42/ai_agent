@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 from ai_agent.tools.process_isolation import isolated_command
+from ai_agent.tools.process_execution import run_process
 
 
 ALLOWED_PREFIXES = (
@@ -35,15 +36,10 @@ class ShellSandbox:
 
         isolated_args = isolated_command(self.workspace_dir, args)
         try:
-            completed = subprocess.run(
+            completed = run_process(
                 isolated_args,
                 cwd=self.workspace_dir,
-                capture_output=True,
-                text=True,
                 timeout=self.timeout_seconds,
-                shell=False,
-                encoding="utf-8",
-                errors="replace",
                 env=_sandbox_environment(),
             )
         except FileNotFoundError as exc:

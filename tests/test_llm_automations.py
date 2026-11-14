@@ -88,6 +88,29 @@ class LLMAutomationTests(unittest.TestCase):
         self.assertEqual(self.result(automation,occurrence)['state'],'failed')
         self.assertEqual(self.provider.inputs,[])
 
+    def test_office_2007_lesson_is_not_a_docx_delivery_request(self):
+        self.provider=Provider([ModelResponse(text='Практический урок VBA: массивы Excel и таблицы Word 2007. Пример и упражнение.')])
+        automation,occurrence=self.occurrence(prompt='Раз в неделю проводи для меня короткое практическое занятие по VBA для Excel и Word 2007. Используй реальные типы задач: извлечение таблиц из больших документов Word в Excel, обработка отчётных данных, ускорение макросов и сохранение форматирования. Давай небольшой пример кода, практическое задание и разбор решения. Учитывай ограничения Office 2007 и слабого рабочего ПК.')
+        self.service.process_automation_queue()
+        self.assertEqual(self.result(automation,occurrence)['state'],'completed')
+
+    def test_large_site_write_can_be_read_by_its_relative_path_without_replaying_code(self):
+        content='<html>'+('synthetic-site-code '*3200)+'</html>'
+        self.provider=Provider([
+            ModelResponse(tool_calls=[ToolCall('write_file',{'path':'outputs/site/index.html','content':content})]),
+            ModelResponse(tool_calls=[ToolCall('read_file_lines',{'path':'outputs/site/index.html','start_line':1,'end_line':1})]),
+            ModelResponse(text='HTML создан, прочитан. Браузерная проверка не выполнялась.')])
+        automation,occurrence=self.occurrence(prompt='Создай локальный HTML сайт и проверь, что сохранённый файл читается.')
+        self.service.process_automation_queue()
+        result=self.result(automation,occurrence)
+        self.assertEqual(result['state'],'completed',result)
+        artifact=next(a for a in result['artifacts'] if a['path'].endswith('index.html'))
+        self.assertEqual(self.service.workspace_file_path(self.user,artifact['path']).read_text('utf-8'),content)
+        second=self.provider.inputs[1]['messages']
+        self.assertFalse(any('synthetic-site-code '*10 in str(call.arguments) for m in second for call in m.tool_calls))
+        checkpoints=self.service.database.list_task_checkpoints(self.user,occurrence['task_run_id'])
+        self.assertTrue(any(cp['tool_name']=='read_file_lines' and cp['status']=='completed' for cp in checkpoints))
+
     def test_step_budget_stops_before_next_tool_effect(self):
         self.provider=Provider([ModelResponse(tool_calls=[ToolCall('web_search',{'query':'fixture'})]),
             ModelResponse(tool_calls=[ToolCall('research_read',{'url':'https://example.org/study'})])])
@@ -96,6 +119,27 @@ class LLMAutomationTests(unittest.TestCase):
         self.service.process_automation_queue();result=self.result(automation,occurrence)
         self.assertEqual(result['state'],'failed');self.assertEqual(reads,[])
         self.assertIn('бюджет действий',result['failure_reason'])
+
+    def test_step_budget_allows_a_final_synthesis_without_more_tools(self):
+        self.provider=Provider([
+            ModelResponse(tool_calls=[ToolCall('research_read',{'url':'https://example.org/study'})]),
+            ModelResponse(text='Проверенный результат: https://example.org/study')])
+        automation,occurrence=self.occurrence({'max_steps':1})
+        self.service.process_automation_queue()
+        self.assertEqual(self.result(automation,occurrence)['state'],'completed')
+        self.assertEqual(self.provider.inputs[-1]['tools'],[])
+        self.assertIn('без инструментов',self.provider.inputs[-1]['system_prompt'])
+
+    def test_previous_material_is_scoped_to_the_same_automation(self):
+        self.provider=Provider([ModelResponse(text='Занятие номер один: массивы VBA.')])
+        auto,first=self.occurrence(prompt='Проводи занятие по VBA, не повторяй старые темы.')
+        self.service.process_automation_queue()
+        self.provider=Provider([ModelResponse(text='Занятие номер два: обработка ошибок.')])
+        second=self.service.run_automation_now(self.user,auto['id'])
+        self.service.process_automation_queue()
+        prompt=' '.join(m.content for m in self.provider.inputs[0]['messages'])
+        self.assertIn('массивы VBA',prompt)
+        self.assertIn('Расписание сохранено сервером',prompt)
 
     def test_provider_failure_after_file_is_failed_with_preserved_artifact(self):
         self.provider=Provider([ModelResponse(tool_calls=[ToolCall('create_docx',{'path':'partial.docx','paragraphs':['Draft']})]),ProviderError('Safe failure','upstream_unavailable')])

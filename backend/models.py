@@ -600,7 +600,7 @@ class LongTaskControlRequest(BaseModel):
 
 
 class AutomationCreateRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=120)
+    name: str = Field(default="", max_length=120)
     prompt: str = Field(..., min_length=1, max_length=4000)
     schedule_type: str = Field(..., pattern="^(once|weekly)$")
     timezone: str = Field(default="UTC", min_length=1, max_length=80)

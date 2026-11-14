@@ -263,6 +263,7 @@ def register_coding_tool_pack(registry: ToolRegistry, files: FileSandbox) -> Non
     registry.register(
         Tool(
             name="run_code_check",
+            timeout_seconds=305,
             description="Запускает только предопределённый test/lint/typecheck/build runner с timeout и bounded output.",
             schema={
                 "type": "object",

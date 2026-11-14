@@ -130,6 +130,7 @@ class SearchConvergenceTests(unittest.TestCase):
             stub_search(agent, calls)
             agent.policy.image_attachment_consent = {"attachments/watch.png"}
             vision = agent.tools.get("analyze_image")
+            vision.availability = lambda: (True, None)  # The synthetic handler needs no provider credential.
             vision.handler = lambda _: ToolResult("completed", output={"text": "Видно TISSOT и SWISSMATIC. Точный референс не виден.", "provider": "fixture", "model": "fixture"})
             events = list(agent.respond_stream("Определи часы на фото и их цену"))
             final = "".join(event.get("text", "") for event in events if event["type"] == "delta")

@@ -11,7 +11,7 @@ from ai_agent.types import Message
 _REPLAY_ARGUMENTS = {"path", "url", "query", "start_line", "end_line", "start_column", "start_page", "end_page", "start_character"}
 
 
-def compact_finished_exchanges(messages: list[Message], *, query: str) -> Iterator[list[Message]]:
+def compact_finished_exchanges(messages: list[Message], *, query: str, only_tools: set[str] | None = None) -> Iterator[list[Message]]:
     """Yield progressively smaller replays, oldest complete exchange first.
 
     Persisted history and on-disk outputs retain the full values. Each replay
@@ -28,6 +28,9 @@ def compact_finished_exchanges(messages: list[Message], *, query: str) -> Iterat
         while end < len(working) and working[end].role == "tool":
             end += 1
         calls = request.tool_calls
+        if only_tools is not None and not all(call.name in only_tools for call in calls):
+            index = end
+            continue
         outputs = working[index + 1:end]
         call_ids = [call.call_id for call in calls]
         output_ids = [result.tool_call_id for result in outputs]

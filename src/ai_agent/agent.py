@@ -144,6 +144,10 @@ class Agent:
             max_response_chars=settings.max_http_response_chars,
             allow_private_networks=settings.allow_private_http,
         )
+        if settings.openai_api_key:
+            from ai_agent.tools.hosted_search import HostedSearch
+            self.http.search_fallback = HostedSearch(settings.openai_api_key,model=settings.openai_model,
+                                                    base_url=settings.openai_base_url)
         self.browser = PlaywrightBrowserRunner(
             workspace_dir=settings.tool_workspace_dir,
             timeout_seconds=settings.browser_timeout_seconds,
@@ -646,6 +650,17 @@ class Agent:
 
     def _provider_messages(self, context, turn_messages: list[Message]) -> list[Message]:
         messages = [*context.messages, *turn_messages]
+        if getattr(self, 'automation_output_prefix', ''):
+            from dataclasses import replace
+            from ai_agent.tool_payloads import compact_tool_output
+            from ai_agent.turn_replay import compact_finished_exchanges
+            query = next((m.content for m in reversed(messages) if m.role=='user' and m.name!='agent_runtime'), '')
+            # Full writes remain on disk and in history. Do not resend entire
+            # generated sites on every subsequent research/model round.
+            messages = [replace(m,content=compact_tool_output(m.content,5000,query=query))
+                        if m.role=='tool' else m for m in messages]
+            for replay in compact_finished_exchanges(messages,query=query,only_tools={'write_file','create_docx','create_presentation','append_docx','edit_file_exact'}):
+                messages = replay
         original_messages = list(messages)
         estimator = ModelTokenEstimator(self.settings.model_name)
         def token_count() -> int:
@@ -761,7 +776,8 @@ class Agent:
                             outcome.approvals.append(approval)
                             yield {"type": "approval", "approval": approval}
                     else:
-                        invocation = self.tools.invoke(tool_call.name, arguments)
+                        invocation = self.tools.invoke(tool_call.name, arguments,
+                                                       cancellation=getattr(self, 'tool_cancellation', None))
                         tool_result = invocation.text()
                         status = invocation.status
                         invocation_output = invocation.output
@@ -881,6 +897,16 @@ class Agent:
         return self._execute_tool_calls([ToolCall(decision.tool_name, decision.arguments)], user_text)
 
     def _normalize_new_file_overwrite(self, tool_name: str, arguments: dict) -> dict:
+        prefix = getattr(self, "automation_output_prefix", "")
+        if prefix and tool_name in {'read_file','read_file_lines','read_pdf_pages','file_metadata','edit_file_exact'}:
+            from pathlib import PurePosixPath, PureWindowsPath
+            path = str(arguments.get('path') or '').replace('\\','/')
+            if (path and not path.startswith(prefix+'/') and not PurePosixPath(path).is_absolute()
+                    and not PureWindowsPath(path).drive and '..' not in PurePosixPath(path).parts):
+                candidate = prefix+'/'+path
+                try:self.files.resolve_download_path(candidate)
+                except ValueError:pass
+                else:arguments={**arguments,'path':candidate}
         if tool_name not in {"write_file", "create_docx", "create_presentation", "append_docx"}:
             return arguments
         prefix = getattr(self, "automation_output_prefix", "")

@@ -10,6 +10,9 @@ import inspect
 import json
 import logging
 import re
+from contextvars import ContextVar
+
+CURRENT_EXECUTION = ContextVar('tool_execution', default=None)
 
 
 ToolStatus = Literal["completed", "failed", "blocked", "cancelled", "not_found", "validation_error"]
@@ -339,25 +342,37 @@ class ToolRegistry:
         idempotency_key: str | None,
         attempt: int,
     ) -> ToolResult:
-        context = ToolExecutionContext(cancellation, idempotency_key, attempt)
+        local_cancel = Event()
+        context = ToolExecutionContext(local_cancel, idempotency_key, attempt)
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"tool-{tool.name}")
         try:
             parameters = inspect.signature(tool.handler).parameters
-            future = executor.submit(
-                tool.handler,
-                arguments,
-                context,
-            ) if len(parameters) >= 2 else executor.submit(tool.handler, arguments)
-            try:
-                raw = future.result(timeout=max(0.001, tool.timeout_seconds))
-            except FutureTimeoutError:
-                cancellation.set()
-                future.cancel()
-                return _failure(
-                    "timeout",
-                    f"Инструмент '{tool.name}' превысил таймаут {tool.timeout_seconds:g} сек.",
-                    retryable=True,
-                )
+            def invoke_handler():
+                token = CURRENT_EXECUTION.set(context)
+                try:
+                    return tool.handler(arguments, context) if len(parameters) >= 2 else tool.handler(arguments)
+                finally:
+                    CURRENT_EXECUTION.reset(token)
+            future = executor.submit(invoke_handler)
+            deadline = perf_counter() + max(.001, tool.timeout_seconds)
+            while True:
+                if cancellation.is_set():
+                    local_cancel.set()
+                    # Keep the caller/locks alive until the handler really exits.
+                    executor.shutdown(wait=True)
+                    return _failure('cancelled', 'Выполнение инструмента отменено.', status='cancelled')
+                remaining = deadline - perf_counter()
+                if remaining <= 0:
+                    local_cancel.set()
+                    executor.shutdown(wait=True)
+                    return _failure('timeout', f"Инструмент '{tool.name}' превысил таймаут {tool.timeout_seconds:g} сек.", retryable=tool.idempotent)
+                try:
+                    raw = future.result(timeout=min(.05, remaining))
+                    break
+                except FutureTimeoutError:
+                    if future.done():
+                        raise
+                    continue
         except ValueError as exc:
             return _failure("invalid_operation", str(exc))
         except Exception as exc:
@@ -368,7 +383,7 @@ class ToolRegistry:
             )
             return _failure("internal_error", "Инструмент завершился внутренней ошибкой.")
         finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            executor.shutdown(wait=True, cancel_futures=True)
 
         if cancellation.is_set():
             return _failure("cancelled", "Выполнение инструмента отменено.", status="cancelled")
@@ -500,9 +515,13 @@ def _adapt_legacy_builtin(tool: Tool) -> None:
         tool.capabilities = (_capability_for_name(tool.name),)
     if not tool.permissions:
         tool.permissions = (_permission_for_name(tool.name),)
-    if tool.name in {"http_request", "web_search"}:
+    if tool.name == "http_request":
         tool.retry_policy = RetryPolicy(max_attempts=2)
         tool.timeout_seconds = min(tool.timeout_seconds, 20.0)
+    elif tool.name == 'web_search':
+        # Search owns its provider fallback. Do not cut it off at 20 seconds
+        # or replay a hosted, potentially billable call after an unknown timeout.
+        tool.retry_policy = RetryPolicy(max_attempts=1)
     elif tool.name == "run_shell":
         tool.retry_policy = RetryPolicy(max_attempts=2)
     if tool.result_adapter is None:

@@ -11,12 +11,24 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from ai_agent.tools.public_transport import connect_public, AddressBlocked
 from ai_agent.tools.http import HttpSandbox
-from ai_agent.tools.egress_proxy import BrowserEgressProxy
+from ai_agent.tools.egress_proxy import BrowserEgressProxy, _ProxyHandler
 from ai_agent.tools.browser import PlaywrightBrowserRunner, BrowserFailure
 from tempfile import TemporaryDirectory
 
 
 class PublicTransportTests(unittest.TestCase):
+    def test_upstream_timeout_after_browser_disconnect_is_a_quiet_gateway_error(self):
+        handler=object.__new__(_ProxyHandler)
+        handler.server=MagicMock()
+        handler.server.authorization='test-auth'
+        handler.server.allowed_host.return_value=True
+        handler.headers={'Proxy-Authorization':'test-auth'}
+        handler.path='example.org:443'
+        handler.send_error=MagicMock(side_effect=BrokenPipeError())
+        with patch('ai_agent.tools.egress_proxy.connect_public',side_effect=TimeoutError()):
+            handler._forward(tunnel=True)
+        self.assertEqual(handler.send_error.call_args.args[0],502)
+
     def test_browser_proxy_rechecks_dns_before_connect(self):
         with TemporaryDirectory() as folder:
             browser = PlaywrightBrowserRunner(Path(folder), timeout_seconds=5)

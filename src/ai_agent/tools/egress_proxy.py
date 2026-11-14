@@ -72,8 +72,14 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 raise AddressBlocked('Host outside browser allowlist')
             upstream = connect_public((host, parsed.port or (443 if tunnel else 80)),
                 timeout=self.server.timeout_seconds, allow_private=self.server.allow_private)
-        except (ValueError, OSError):
-            self.send_error(403, 'Destination blocked or unavailable')
+        except (ValueError, OSError) as exc:
+            try:
+                self.send_error(403 if isinstance(exc,ValueError) else 502,
+                                'Destination blocked' if isinstance(exc,ValueError) else 'Upstream unavailable')
+            except OSError:
+                # A navigation timeout can close the browser socket while the
+                # upstream connect is still returning its own timeout.
+                pass
             return
         with upstream:
             with self.server.lock:

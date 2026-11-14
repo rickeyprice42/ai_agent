@@ -90,12 +90,12 @@ class CodingToolPackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runner = BoundedProcessRunner(Path(directory), max_output_chars=1000)
             timeout = subprocess.TimeoutExpired(["demo"], 1, output="partial stdout", stderr="partial stderr")
-            with patch("ai_agent.tools.code_tools.subprocess.run", side_effect=timeout):
+            with patch("ai_agent.tools.code_tools.run_process", side_effect=timeout):
                 result = runner.run(["demo"], timeout_seconds=1)
             self.assertTrue(result["timed_out"])
             self.assertIn("partial stdout", result["stdout"])
             completed = subprocess.CompletedProcess(["demo"], 0, stdout="x" * 1200, stderr="")
-            with patch("ai_agent.tools.code_tools.subprocess.run", return_value=completed):
+            with patch("ai_agent.tools.code_tools.run_process", return_value=completed):
                 bounded = runner.run(["demo"])
             self.assertTrue(bounded["truncated"])
             self.assertLessEqual(len(bounded["stdout"]), 1000)

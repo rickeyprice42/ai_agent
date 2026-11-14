@@ -79,6 +79,7 @@ class HttpSandbox:
         self.max_response_chars = max_response_chars
         self.allow_private_networks = allow_private_networks
         self._search_cooldowns: dict[str, float] = {}
+        self.search_fallback = None
 
     def request(
         self,
@@ -213,6 +214,15 @@ class HttpSandbox:
                     failures.append(f'{source}: HTTP {exc.code}')
                 except (error.URLError,TimeoutError) as exc:
                     failures.append(f'{source}: transport unavailable')
+            if not results and self.search_fallback is not None:
+                try:
+                    candidates = self.search_fallback(normalized_query, normalized_limit, country)
+                    candidate_count += len(candidates)
+                    results, source_rejected = _rank_search_results(plan,candidates,normalized_limit)
+                    rejected.update(source_rejected)
+                    provider='openai_web_search'
+                except ValueError as exc:
+                    failures.append(str(exc))
             if not candidate_count and failures:
                 raise ValueError('Web search unavailable: '+ '; '.join(failures))
         if not candidate_count:

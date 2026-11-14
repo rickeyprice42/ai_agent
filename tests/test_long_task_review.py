@@ -1,5 +1,7 @@
 """Independent control/scope regressions for the durable long-task runner."""
 from datetime import datetime, timezone
+from pathlib import Path
+import sys
 import unittest
 
 from tests import test_llm_automations as automation_fixture
@@ -64,6 +66,7 @@ class LongTaskIndependentReview(unittest.TestCase):
         self.assertLessEqual(len(reports),1)
         self.assertEqual(daily_long_task_reports(self.service.database,now=datetime(2026,11,6,tzinfo=timezone.utc)),[])
 
+    @unittest.skipUnless(sys.platform=='linux' and Path('/usr/bin/bwrap').exists(),'real execution requires Linux bubblewrap')
     def test_concept_code_and_real_checks_require_separate_approval_then_finish_first_version(self):
         # A deliberately tiny playable CLI prototype, not a claim of a full game.
         self.fixture.provider=automation_fixture.Provider([

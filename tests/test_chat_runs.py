@@ -8,6 +8,7 @@ from uuid import uuid4
 from tests import test_llm_automations as fixture
 from ai_agent.llm.base import ProviderError
 from ai_agent.types import ModelResponse,ModelStreamChunk,ToolCall
+from ai_agent.tools.base import Tool
 from backend.chat_runs import ACTIVE,chat_runs_for
 from backend.service import ChatBusyError
 
@@ -56,6 +57,30 @@ class ChatRunsTests(unittest.TestCase):
     def notices(self):
         with self.service.database.connect() as db:
             return db.execute("SELECT COUNT(*) FROM in_app_notifications WHERE user_id=? AND kind='chat_completed'",(self.user,)).fetchone()[0]
+
+    def test_cancel_stops_active_tool_before_terminal_state_and_releases_chat(self):
+        started, stopped = Event(), Event()
+        def handler(args, context):
+            started.set()
+            if not context.cancellation.wait(3):
+                raise RuntimeError('Cancellation did not reach the tool')
+            stopped.set()
+            return 'stopped'
+        self.agent.tools.register(Tool('cancel_fixture', 'Synthetic cancellable tool',
+                                       {'type': 'object'}, handler))
+        self.agent.provider=fixture.Provider([
+            ModelResponse(tool_calls=[ToolCall('cancel_fixture', {})]),
+            ModelResponse(text='Should not complete')])
+        run=self.store.start(self.user,uuid4().hex,'Run the cancel fixture.',self.thread)
+        self.assertTrue(started.wait(2))
+        self.store.cancel(self.user,run['run_id'])
+        final=self.wait(run['run_id'])
+        self.assertEqual(final['state'],'cancelled')
+        self.assertTrue(stopped.is_set())
+        self.assertEqual(self.notices(),0)
+        self.agent.provider=fixture.Provider([ModelResponse(text='Next task works.')])
+        next_run=self.store.start(self.user,uuid4().hex,'Continue with a new task.',self.thread)
+        self.assertEqual(self.wait(next_run['run_id'])['state'],'completed')
 
     def test_request_retry_is_idempotent_and_thread_stays_owned_without_subscribers(self):
         provider=self.gate();request=uuid4().hex

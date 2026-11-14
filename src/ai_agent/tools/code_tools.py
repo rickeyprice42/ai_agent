@@ -10,6 +10,7 @@ import sys
 
 from ai_agent.tools.shell import _sandbox_environment
 from ai_agent.tools.process_isolation import isolated_command
+from ai_agent.tools.process_execution import run_process
 
 
 IGNORED_DIRECTORIES = {".git", ".venv", "venv", "node_modules", "dist", "build", "__pycache__"}
@@ -47,15 +48,10 @@ class BoundedProcessRunner:
         started = perf_counter()
         timed_out = False
         try:
-            completed = subprocess.run(
+            completed = run_process(
                 isolated_arguments,
                 cwd=self.workspace_dir,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 timeout=timeout,
-                shell=False,
                 env=_sandbox_environment(),
             )
             return_code: int | None = completed.returncode

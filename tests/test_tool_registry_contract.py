@@ -87,7 +87,7 @@ class ToolRegistryContractTests(unittest.TestCase):
 
             self.assertGreaterEqual(len(manifests), 20)
             self.assertEqual(
-                {item["name"] for item in manifests},
+                {item["name"] for item in manifests if item['available']},
                 {item["name"] for item in model_tools},
             )
             for manifest in manifests:
@@ -97,7 +97,9 @@ class ToolRegistryContractTests(unittest.TestCase):
                     self.assertFalse(manifest["input_schema"]["additionalProperties"])
                     self.assertTrue(manifest["capabilities"])
                     self.assertTrue(manifest["permissions"])
-                    self.assertTrue(manifest["available"])
+                    self.assertEqual(manifest['available'],agent.tools.has(manifest['name']))
+                    if not manifest['available']:
+                        self.assertTrue(manifest['unavailable_reason'])
 
     def test_nested_json_schema_rejects_unknown_type_enum_and_bounds_before_handler(self):
         calls = []

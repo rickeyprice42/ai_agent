@@ -65,6 +65,7 @@ class LongTaskTests(unittest.TestCase):
         self.assertIsNone(plans[0]['run'])
         self.assertEqual(self.service.process_long_task_queue(),[])
 
+    @unittest.skipUnless(sys.platform=='linux' and Path('/usr/bin/bwrap').exists(),'real execution requires Linux bubblewrap')
     def test_real_code_check_requires_approval_and_continues_after_agent_restart(self):
         plan = self.approve(self.draft())
         prefix = f"outputs/tasks/{plan['id']}"

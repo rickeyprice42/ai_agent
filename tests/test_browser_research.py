@@ -88,7 +88,7 @@ PUBLIC_FIXTURES = [
     ("json_ld", '<script type="application/ld+json">{"@type":"Book","name":"Avelin"}</script><main>' + "Book details and price. " * 10 + "</main>"),
     ("table", "<main><table><tr><th>Name</th><th>Price</th></tr><tr><td>Item</td><td>$4</td></tr></table>" + "Catalog evidence. " * 15 + "</main>"),
     ("list", "<main><ul><li>First result</li><li>Second result</li></ul>" + "Recommendation context. " * 12 + "</main>"),
-    ("malformed", "<html><title>Broken<title><main><p>" + "Still readable malformed content. " * 10),
+    ("malformed", "<html><title>Broken</title><main><p>" + "Still readable malformed content. " * 10),
     ("boilerplate", "<nav>Login Cookie Settings</nav><main>" + "Clean article body remains available. " * 12 + "</main><footer>Privacy Policy</footer>"),
     ("unicode", "<main>" + "Публичная русская статья с подтверждаемыми сведениями. " * 9 + "</main>"),
     ("link", '<main><a href="https://example.com/source">Source</a>' + "Linked research evidence. " * 12 + "</main>"),

@@ -401,7 +401,7 @@ def register_builtin_tools(
                 limit=int(args.get("limit", 5)),
                 country=str(args.get("country", "")).strip() or None,
             ),
-            timeout_seconds=float(http.timeout_seconds * 4 + 5),
+            timeout_seconds=float(http.timeout_seconds * 4 + (80 if http.search_fallback else 5)),
         )
     )
 

@@ -358,8 +358,8 @@ export default function App() {
   const [isSavingAutomation, setIsSavingAutomation] = useState(false);
   const [automationRuns, setAutomationRuns] = useState<Record<string, AutomationRunItem[]>>({});
   const [automationBusy, setAutomationBusy] = useState<string | null>(null);
-  const [automationName, setAutomationName] = useState("Еженедельный черновик");
-  const [automationPrompt, setAutomationPrompt] = useState("Создай документ drafts/weekly-{date}.docx с заголовком: Еженедельный черновик с текстом: Подготовь проверяемый локальный черновик. Ничего не публикуй и не отправляй.");
+  const [automationName, setAutomationName] = useState("");
+  const [automationPrompt, setAutomationPrompt] = useState("");
   const [automationScheduleType, setAutomationScheduleType] = useState<"once" | "weekly">("weekly");
   const [automationTimezone, setAutomationTimezone] = useState(deviceTimezone);
   const [automationRunAt, setAutomationRunAt] = useState(defaultAutomationRunAt);
@@ -1648,6 +1648,8 @@ export default function App() {
         },
         max_parallel_runs: 1
       }, authToken);
+      setAutomationName("");
+      setAutomationPrompt("");
       await refreshBootstrap(false, false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось создать автоматизацию.");
@@ -2534,7 +2536,7 @@ export default function App() {
           <form className="automation-form" onSubmit={handleCreateAutomation}>
             <label>
               Название
-              <input value={automationName} maxLength={120} onChange={(event) => setAutomationName(event.target.value)} required />
+              <input value={automationName} placeholder="Название появится из задания" maxLength={120} onChange={(event) => setAutomationName(event.target.value)} />
             </label>
             <label className="automation-prompt-field">
               Безопасное задание
@@ -2574,7 +2576,7 @@ export default function App() {
               {isSavingAutomation ? "Сохраняю..." : "Создать автоматизацию"}
             </button>
           </form>
-          <p className="muted">Лимит запуска: 20 шагов · 50k токенов · 30 минут · параллелизм 1. Внешняя отправка всё равно потребует approval.</p>
+          <p className="muted">Лимит запуска: 20 шагов · 180k токенов · 30 минут · параллелизм 1. Внешняя отправка всё равно потребует approval.</p>
           <div className="task-list">
             {bootstrap.automations.length === 0 ? <p className="muted">Автоматизаций пока нет.</p> : bootstrap.automations.map((automation) => (
               <article className="task-item" key={automation.id}>

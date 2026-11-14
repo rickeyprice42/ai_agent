@@ -35,6 +35,22 @@ def isolated_settings(root: Path) -> Settings:
 
 
 class AutomationTests(unittest.TestCase):
+    def test_automatic_names_repair_placeholders_and_preserve_custom_names_and_prompts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent=Agent(isolated_settings(Path(directory)),user_id='alice')
+            service=AutomationService(agent.memory.database,'alice')
+            common={'schedule_type':'weekly','timezone_name':'UTC','weekday':4,'time_of_day':'10:00'}
+            old=service.create(name='Еженедельный черновик',prompt='Каждую пятницу находи исследования LLM для Avelin Health.',**common)
+            new=service.create(prompt='Раз в неделю проводи занятие по VBA для Excel.',**common)
+            custom=service.create(name='Моё расписание',prompt='Каждую пятницу готовь обзор датчиков.',**common)
+            items={item['id']:item for item in service.list()}
+            self.assertIn('LLM',items[old['id']]['name'])
+            self.assertIn('VBA',items[new['id']]['name'])
+            self.assertEqual(items[custom['id']]['name'],'Моё расписание')
+            self.assertEqual(items[old['id']]['prompt'],old['prompt'])
+            self.assertEqual(items[old['id']]['next_run_at'],old['next_run_at'])
+            self.assertEqual(items[old['id']]['budget'],old['budget'])
+
     def test_one_shot_weekly_coalescing_restart_and_controls(self):
         with tempfile.TemporaryDirectory() as directory:
             settings = isolated_settings(Path(directory))

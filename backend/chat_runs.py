@@ -45,7 +45,9 @@ class ChatRunService:
         self.service, self.database = service, service.database
         self.owner_id = uuid4().hex
         self._stop = Event()
+        self._heartbeat_stop = Event()
         self._workers = {}
+        self._cancellations = {}
         self._lock = Lock()
         self._context = getattr(service,'_chat_run_context',None) or local()
         service._chat_run_context = self._context
@@ -207,6 +209,10 @@ class ChatRunService:
 
     def _produce(self,run_id,user_id,events,agent,payload,kind,accepted_user=None):
         self._context.run_id = run_id
+        cancellation = Event()
+        with self._lock:
+            self._cancellations[run_id] = cancellation
+        agent.tool_cancellation = cancellation
         done = None
         provider_error = None
         state,outcome,error = 'interrupted','interrupted','Ответ прерван. Неизвестные действия не повторяются.'
@@ -224,6 +230,8 @@ class ChatRunService:
                 try:
                     event = next(events)
                 except StopIteration:
+                    break
+                if self._stop.is_set():
                     break
                 with self.database.connect() as connection:
                     current = connection.execute('SELECT cancel_requested FROM chat_generation_runs WHERE id=?',(run_id,)).fetchone()
@@ -257,9 +265,13 @@ class ChatRunService:
                 close=getattr(events,'close',None)
                 if close:close()
             finally:
+                if getattr(agent, 'tool_cancellation', None) is cancellation:
+                    agent.tool_cancellation = None
                 try:self._finish(run_id,state,outcome,error,agent,done,accepted_user)
                 finally:
-                    with self._lock:self._workers.pop(run_id,None)
+                    with self._lock:
+                        self._workers.pop(run_id,None)
+                        self._cancellations.pop(run_id,None)
                     self._context.run_id = None
 
     def _finish(self,run_id,state,outcome,error,agent,done=None,accepted_user=None):
@@ -272,6 +284,11 @@ class ChatRunService:
                     connection.execute("UPDATE messages SET status='failed',error=? WHERE id=? AND thread_id=? AND status IN ('pending','cancelled','complete')",
                         (row['error'],row['message_id'],row['thread_id']))
                 return
+            if self._stop.is_set():
+                if row['completion_claimed']:
+                    state,outcome,error='completed','completed',None
+                else:
+                    state,outcome,error='interrupted','interrupted','Сервер прервал ответ. Неизвестные действия не повторяются.'
             if row['cancel_requested'] and not row['completion_claimed']:
                 state,outcome,error='cancelled','cancelled','Генерация остановлена пользователем.'
             assistant,user = self._message_snapshot(connection,row)
@@ -287,7 +304,7 @@ class ChatRunService:
                 connection.execute('UPDATE chat_threads SET updated_at=CURRENT_TIMESTAMP WHERE id=?',(row['thread_id'],))
             text = assistant['content'] if assistant else row['text']
             artifacts = assistant['artifacts_json'] if assistant else row['artifacts_json']
-            if assistant and state in {'interrupted','cancelled','failed'} and assistant['status'] in {'pending','cancelled'}:
+            if assistant and state in {'interrupted','cancelled','failed'} and assistant['status'] in {'pending','cancelled','complete'}:
                 connection.execute('UPDATE messages SET status=?,error=? WHERE id=? AND thread_id=?',
                     ('cancelled' if state=='cancelled' else 'failed',error,assistant['id'],row['thread_id']))
             seq = row['latest_seq']+1
@@ -298,6 +315,7 @@ class ChatRunService:
                  artifacts,seq,_now().isoformat(),_now().isoformat(),run_id))
 
     def claim_completion(self,user_id,thread_id):
+        if self._stop.is_set():return False
         run_id = getattr(self._context,'run_id',None)
         if not run_id:return True
         with self.database.connect() as connection:
@@ -315,7 +333,12 @@ class ChatRunService:
     def cancel(self,user_id,run_id):
         self.get(user_id,run_id)
         with self.database.connect() as connection:
-            connection.execute("UPDATE chat_generation_runs SET cancel_requested=1,updated_at=? WHERE id=? AND user_id=? AND state IN ('queued','running') AND completion_claimed=0",(_now().isoformat(),run_id,user_id))
+            changed = connection.execute("UPDATE chat_generation_runs SET cancel_requested=1,updated_at=? WHERE id=? AND user_id=? AND state IN ('queued','running') AND completion_claimed=0",(_now().isoformat(),run_id,user_id)).rowcount
+        if changed:
+            with self._lock:
+                cancellation = self._cancellations.get(run_id)
+                if cancellation is not None:
+                    cancellation.set()
         return self.get(user_id,run_id)
 
     def events_after(self,user_id,run_id,after=0):
@@ -340,7 +363,7 @@ class ChatRunService:
                     connection.execute("UPDATE messages SET status='failed',error=? WHERE id=? AND thread_id=? AND status='pending'",(error,row['message_id'],row['thread_id']))
 
     def _heartbeat_loop(self):
-        while not self._stop.wait(5):
+        while not self._heartbeat_stop.wait(5):
             try:
                 with self._lock:
                     alive=[key for key,worker in self._workers.items() if worker.is_alive()]
@@ -353,6 +376,14 @@ class ChatRunService:
 
     def close(self):
         self._stop.set()
+        with self._lock:
+            for cancellation in self._cancellations.values():
+                cancellation.set()
+            workers = list(self._workers.values())
+        # Keep leases and thread ownership until executing handlers have drained.
+        for worker in workers:
+            worker.join()
+        self._heartbeat_stop.set()
         self._heartbeat.join(timeout=1)
         with self.database.connect() as connection:
             connection.execute("UPDATE chat_generation_runs SET lease_expires_at=? WHERE owner_id=? AND state IN ('queued','running')",(_now().isoformat(),self.owner_id))

@@ -35,7 +35,7 @@ class AutomationService:
     def create(
         self,
         *,
-        name: str,
+        name: str = "",
         prompt: str,
         schedule_type: str,
         timezone_name: str,
@@ -81,7 +81,17 @@ class AutomationService:
         return self.database.update_automation(user_id, automation_id, **normalized)
 
     def list(self, include_deleted: bool = False) -> list[dict]:
-        return self.database.list_automations(self._require_user(), include_deleted=include_deleted)
+        user_id = self._require_user()
+        items = self.database.list_automations(user_id, include_deleted=include_deleted)
+        for item in items:
+            if item['name'] == 'Еженедельный черновик':
+                title = automation_name(item['prompt'])
+                with self.database.connect() as connection:
+                    changed=connection.execute('UPDATE automations SET name=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND name=? AND prompt=?',
+                                       (title,item['id'],user_id,item['name'],item['prompt'])).rowcount
+                    current=connection.execute('SELECT name FROM automations WHERE id=? AND user_id=?',(item['id'],user_id)).fetchone()
+                item['name'] = title if changed else current['name'] if current else item['name']
+        return items
 
     def apply_stock_budget_plan(self, plan: list[dict]) -> dict:
         user_id=self._require_user();applied=[];skipped=[]
@@ -236,7 +246,7 @@ def _normalize_definition(
     budget: dict | None,
     max_parallel_runs: int,
 ) -> dict:
-    clean_name = name.strip()
+    clean_name = name.strip() or automation_name(prompt)
     clean_prompt = prompt.strip()
     if not clean_name or len(clean_name) > 120:
         raise ValueError("Название автоматизации должно содержать от 1 до 120 символов.")
@@ -276,6 +286,22 @@ def _normalize_definition(
         "budget": normalized_budget,
         "max_parallel_runs": parallel,
     }
+
+
+def automation_name(prompt: str) -> str:
+    """Immediate descriptive title without a paid call or placeholder collision."""
+    from ai_agent.chat_titles import _redact_sensitive
+    text = _redact_sensitive(prompt)
+    text = re.sub(r'https?://\S+|@\w+', '', text)
+    text = re.sub(r'^\s*(?:кажд\w+\s+(?:недел\w+|пятниц\w+|суббот\w+|день)|раз\s+в\s+неделю)\s*', '', text, flags=re.I)
+    text = re.sub(r'^\s*(?:готовь|находи|предлагай|проводи|подбирай|подготовь|создай)\s+(?:для меня\s+)?', '', text, flags=re.I)
+    text = re.sub(r'\s+', ' ', text).strip(' .,:;—-')
+    words = text.split()
+    title = ''
+    for word in words[:12]:
+        if len(title) + len(word) + 1 > 100:break
+        title = (title+' '+word).strip()
+    return title[:1].upper()+title[1:] if title else 'Новая автоматизация'
 
 
 def _normalize_budget(value: dict) -> dict[str, int]:
