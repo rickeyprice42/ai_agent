@@ -120,6 +120,7 @@ export function ChatProducts({ products }: { products: ChatProduct[] }) {
       <span className="rich-product-checked">
         Цена проверена <time dateTime={item.checked.toISOString()}>{productDateFormat.format(item.checked)}</time>
       </span>
+      <span className="rich-product-checked">Нужный размер и доставку уточняйте в магазине.</span>
       <a href={item.url.href} target="_blank" rel="noopener noreferrer">На сайте {item.url.hostname} ↗</a>
     </article>)}
   </section>;

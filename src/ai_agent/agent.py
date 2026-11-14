@@ -86,6 +86,9 @@ CHAT_DISPLAY_GUIDANCE = r"""
 - `avelin-text`: {"title":"…","text":"…"} для текста в отдельном окне.
 Показывай известные значения с их единицами, отмечай оценочные данные. В блоки передавай данные, без HTML и скриптов.
 Если пользователь ссылается на другой чат и доступен search_past_chats, найди цитаты по теме или названию перед ответом.
+Для покупок учитывай страну, бюджет и размер пользователя. Для России передавай country="ru" в web_search.
+Подтверждённая карточка товара с ценой полезнее повторных поисков и снимков его фото. Не открывай картинки в браузере ради цены или наличия.
+Наличие модели в магазине не подтверждает размер и доставку в город пользователя. Если они не проверены, укажи это отдельно. Не создавай фото-файлы без просьбы пользователя.
 """
 logger = logging.getLogger("avelin.agent")
 
@@ -267,14 +270,14 @@ class Agent:
                 )
             except ProviderError as exc:
                 self.last_turn_outcome = "failed"
-                if completed_tools.artifacts:
+                if completed_tools.artifacts or completed_tools.products:
                     self.last_turn_outcome = "partial"
                     assistant_text = _provider_failure_artifact_text(completed_tools, exc)
                     self.last_turn_message_id = self.memory.append_message(
                         Message(
                             role="assistant",
                             content=assistant_text,
-                            artifacts=completed_tools.artifacts,
+                            artifacts=completed_tools.message_artifacts(),
                         )
                     )
                     self._extract_autonomous_memory(user_message_id, user_text)
@@ -299,12 +302,12 @@ class Agent:
                 if outcome.approvals:
                     self.last_turn_outcome = "waiting_approval"
                     assistant_text = "Ожидаю подтверждения действия в этом чате."
-                    self.last_turn_message_id = self.memory.append_message(Message(role="assistant", content=assistant_text, artifacts=completed_tools.artifacts))
+                    self.last_turn_message_id = self.memory.append_message(Message(role="assistant", content=assistant_text, artifacts=completed_tools.message_artifacts()))
                     return assistant_text
                 if outcome.questions:
                     self.last_turn_outcome='waiting_clarification'
                     assistant_text=outcome.questions[0]['prompt']
-                    self.last_turn_message_id=self.memory.append_message(Message(role='assistant',content=assistant_text,artifacts=completed_tools.artifacts))
+                    self.last_turn_message_id=self.memory.append_message(Message(role='assistant',content=assistant_text,artifacts=completed_tools.message_artifacts()))
                     return assistant_text
                 if _stop_tool_loop(completed_tools):
                     break
@@ -342,7 +345,7 @@ class Agent:
             else "Достигнут предел шагов агента. Уточни запрос."
         )
         self.last_turn_message_id = self.memory.append_message(
-            Message(role="assistant", content=fallback, artifacts=completed_tools.artifacts)
+            Message(role="assistant", content=fallback, artifacts=completed_tools.message_artifacts())
         )
         self._extract_autonomous_memory(user_message_id, user_text)
         self.last_turn_outcome = "partial" if completed_tools.results else "failed"
@@ -460,7 +463,7 @@ class Agent:
                     if outcome.approvals:
                         self.last_turn_outcome = "waiting_approval"
                         assistant_text = "Ожидаю подтверждения действия в этом чате."
-                        self.last_turn_message_id = self.memory.append_message(Message(role="assistant", content=assistant_text, artifacts=completed_tools.artifacts))
+                        self.last_turn_message_id = self.memory.append_message(Message(role="assistant", content=assistant_text, artifacts=completed_tools.message_artifacts()))
                         completed = True
                         yield {"type": "delta", "text": assistant_text}
                         yield {"type": "done", "outcome": self.last_turn_outcome, "provider": self.settings.model_provider, "model": self.settings.model_name}
@@ -468,7 +471,7 @@ class Agent:
                     if outcome.questions:
                         self.last_turn_outcome='waiting_clarification'
                         assistant_text=outcome.questions[0]['prompt']
-                        self.last_turn_message_id=self.memory.append_message(Message(role='assistant',content=assistant_text,artifacts=completed_tools.artifacts))
+                        self.last_turn_message_id=self.memory.append_message(Message(role='assistant',content=assistant_text,artifacts=completed_tools.message_artifacts()))
                         completed=True
                         yield {'type':'delta','text':assistant_text}
                         yield {'type':'done','outcome':self.last_turn_outcome,'provider':self.settings.model_provider,'model':self.settings.model_name}
@@ -536,7 +539,7 @@ class Agent:
                 else "Достигнут предел шагов агента. Уточни запрос."
             )
             self.last_turn_message_id = self.memory.append_message(
-                Message(role="assistant", content=fallback, artifacts=completed_tools.artifacts)
+                Message(role="assistant", content=fallback, artifacts=completed_tools.message_artifacts())
             )
             self.last_turn_outcome = "partial" if completed_tools.results else "failed"
             completed = True
@@ -558,7 +561,7 @@ class Agent:
                     error="Генерация остановлена пользователем.",
                     provider=self.settings.model_provider,
                     model=self.settings.model_name,
-                    artifacts=completed_tools.artifacts,
+                    artifacts=completed_tools.message_artifacts(),
                 )
             elif message_id is not None and not completed:
                 self.memory.update_message(
@@ -566,13 +569,13 @@ class Agent:
                     content=partial,
                     status="cancelled",
                     error="Генерация остановлена пользователем.",
-                    artifacts=completed_tools.artifacts,
+                    artifacts=completed_tools.message_artifacts(),
                 )
             raise
 
         except ProviderError as exc:
             self.last_turn_outcome = "failed"
-            if completed_tools.artifacts:
+            if completed_tools.artifacts or completed_tools.products:
                 self.last_turn_outcome = "partial"
                 assistant_text = _provider_failure_artifact_text(completed_tools, exc)
                 if message_id is None:
@@ -582,14 +585,14 @@ class Agent:
                         error=None,
                         provider=self.settings.model_provider,
                         model=self.settings.model_name,
-                        artifacts=completed_tools.artifacts,
+                        artifacts=completed_tools.message_artifacts(),
                     )
                 else:
                     self.memory.update_message(
                         message_id,
                         content=assistant_text,
                         status="complete",
-                        artifacts=completed_tools.artifacts,
+                        artifacts=completed_tools.message_artifacts(),
                     )
                 self.last_turn_message_id = message_id
                 if not partial:
@@ -650,6 +653,13 @@ class Agent:
 
     def _provider_messages(self, context, turn_messages: list[Message]) -> list[Message]:
         messages = [*context.messages, *turn_messages]
+        from dataclasses import replace
+        from ai_agent.tool_payloads import compact_tool_output
+        query = next((m.content for m in reversed(messages) if m.role=='user' and m.name!='agent_runtime'), '')
+        # Bound observations before they fill a normal chat, not only scheduled
+        # runs. Originals and verified product objects remain persisted intact.
+        messages = [replace(m,content=compact_tool_output(m.content,6000,query=query))
+                    if m.role=='tool' else m for m in messages]
         if getattr(self, 'automation_output_prefix', ''):
             from dataclasses import replace
             from ai_agent.tool_payloads import compact_tool_output
@@ -803,6 +813,11 @@ class Agent:
                 offer = invocation_output.get("fields", {}).get("merchant_offer")
                 if isinstance(offer, dict):
                     outcome.products[offer["url"]] = offer
+            if tool_call.name == 'browser_read' and status=='completed' and isinstance(invocation_output,dict):
+                from datetime import datetime, timezone
+                from ai_agent.merchant_offer import merchant_offer
+                offer=merchant_offer(invocation_output.get('json_ld',[]),str(invocation_output.get('url','')),datetime.now(timezone.utc).isoformat())
+                if offer:outcome.products[offer['url']]=offer
             yield {"type": "status", "text": _tool_activity_text(tool_call.name, status), "tool": tool_call.name, "phase": status, "round": round_number}
             if tool_call.name=='ask_user' and status=='completed' and isinstance(invocation_output,dict):
                 outcome.questions.append(invocation_output)
@@ -1020,6 +1035,8 @@ class Agent:
         if status == "completed" and tool_name in {
             "browser_read", "browser_interact", "desktop_snapshot", "desktop_interact",
         }:
+            if tool_name in {'browser_read','browser_interact'} and not _wants_screenshot_delivery(user_text):
+                return None
             screenshot = output.get("screenshot") if isinstance(output, dict) else None
             if isinstance(screenshot, dict) and screenshot.get("path"):
                 return {
@@ -1160,7 +1177,13 @@ def _tool_completion_text(outcome: ToolOutcome) -> str:
 
 
 def _provider_failure_artifact_text(outcome: ToolOutcome, error: ProviderError) -> str:
+    if outcome.products and not outcome.artifacts:
+        return f'Проверенные карточки товаров сохранены ниже. Проверку остальных условий завершить не удалось: {error.user_message} Нужный размер и доставку следует проверить отдельно.'
     return f"Созданные файлы сохранены и доступны ниже. Продолжить выполнение не удалось: {error.user_message} Вся задача может быть не завершена."
+
+
+def _wants_screenshot_delivery(text: str) -> bool:
+    return bool(re.search(r'(?:сделай|сохрани|пришли|отправь|покажи|take|save|send|show)[^.!?\n]{0,55}(?:скриншот|снимок\s+экрана|screenshot)|(?:сделай|сохрани|пришли|send|save)[^.!?\n]{0,30}(?:фото|картинк|изображен)',text,re.I))
 
 
 def _explicit_task_queue_intent(text: str) -> bool:
@@ -1254,6 +1277,8 @@ def _runtime_system_prompt(system_prompt: str, phase: str) -> str:
 
 
 def _unfinished_completion_text(outcome: ToolOutcome, user_text: str = "") -> str:
+    if outcome.products:
+        return 'Проверенные карточки товаров доступны ниже. Полная проверка запроса ещё не завершена; нужный размер и доставку следует уточнить отдельно.'
     if not outcome.artifacts:
         for name, status, value in zip(outcome.tool_names, outcome.statuses, outcome.results):
             if name == "analyze_image" and status == "completed":

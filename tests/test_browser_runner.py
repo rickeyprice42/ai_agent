@@ -278,7 +278,7 @@ class BrowserRunnerTests(unittest.TestCase):
                 self.assertEqual(image.size, (1365, 768))
             with Image.open(Path(directory) / full['screenshot']['path']) as image:
                 self.assertGreater(image.height, 1800)
-            visual = browser_read_result(runner, {'url': self.base_url + '/pixel.png', 'screenshot_full_page': False})
+            visual = browser_read_result(runner, {'url': self.base_url + '/pixel.png', 'screenshot':True, 'screenshot_full_page': False})
             self.assertEqual(visual.status, 'completed')
             self.assertEqual(visual.output['images'][0]['url'], self.base_url + '/pixel.png')
             self.assertTrue(visual.output['screenshot']['path'])

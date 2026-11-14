@@ -463,7 +463,8 @@ def register_builtin_tools(
             version="1.0.0",
             description=(
                 "Открывает публичную страницу в изолированном headless Edge, возвращает DOM-first snapshot "
-                "и screenshot. images содержит URL/alt/контекст строки таблицы для адресного просмотра. "
+                "и по явному запросу screenshot (по умолчанию false). images содержит URL/alt/контекст строки таблицы для адресного просмотра. "
+                "Для цены и наличия читай карточку товара, а не прямой URL изображения. "
                 "Для vision длинной страницы выбери screenshot_full_page=false или открой нужный image URL. "
                 "Профиль всегда ephemeral, cookies пользователя недоступны."
             ),

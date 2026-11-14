@@ -66,6 +66,7 @@ class SearchPlan:
     required_domains: tuple[str, ...] = ()
     identity_terms: tuple[str, ...] = ()
     identity_alternatives: tuple[tuple[str, ...], ...] = ()
+    shopping_market: str | None = None
 
 
 class HttpSandbox:
@@ -548,6 +549,7 @@ def _plan_search(query: str, country: str | None = None) -> SearchPlan:
         identity_terms=_discovery_identity_terms(query, price_required),
         identity_alternatives=tuple(tuple(left or right for left, right in re.findall(r'"([^"\n]+)"|«([^»\n]+)»', group.group()))
                                     for group in _QUOTED_ALTERNATIVES.finditer(query)),
+        shopping_market='ru' if (country=='ru' or re.search(r'росси|иркутск|\bRUB\b|рубл|₽',query,re.I)) and re.search(r'купить|кед|кроссов|shop|sneaker|цен|рубл|₽',query,re.I) else None,
     )
 
 
@@ -587,6 +589,10 @@ def _rank_search_results(
         seen_urls.add(canonical_url)
         parsed_url = parse.urlparse(normalized_url)
         hostname = (parsed_url.hostname or "").lower().removeprefix("www.")
+        if plan.shopping_market=='ru' and (hostname.endswith(('.ae','.de','.uk','.ca','.au','.us'))
+                or re.search(r'\b(?:UAE|AED)\b',item['title']+' '+item['snippet'],re.I)):
+            rejected['foreign_market']+=1
+            continue
         if plan.required_domains and not any(hostname==domain or hostname.endswith('.'+domain) for domain in plan.required_domains):
             rejected['domain_mismatch']+=1
             continue

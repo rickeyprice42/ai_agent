@@ -422,7 +422,7 @@ def browser_read_result(runner: PlaywrightBrowserRunner, arguments: dict) -> Too
     return _browser_result(
         lambda: runner.read(
             url=str(arguments.get("url", "")),
-            screenshot=bool(arguments.get("screenshot", True)),
+            screenshot=bool(arguments.get("screenshot", bool(arguments.get('screenshot_path')))),
             screenshot_path=str(arguments.get("screenshot_path", "")).strip() or None,
             screenshot_full_page=bool(arguments.get("screenshot_full_page", True)),
         )

@@ -80,8 +80,8 @@ def compact_tool_output(content: str, max_chars: int, *, query: str = '') -> str
     except (ValueError,TypeError):
         excerpt,_ = text_excerpt(body,max(100,available-70),query)
         return prefix + excerpt + '\n[tool result excerpt; omitted content is not verified here]' + suffix
-    if isinstance(payload,dict) and isinstance(payload.get('fields'),dict):
-        fields = payload['fields']
+    if isinstance(payload,dict) and (isinstance(payload.get('fields'),dict) or 'main_text' in payload):
+        fields = payload.get('fields') if isinstance(payload.get('fields'),dict) else payload
         main = str(fields.get('main_text',''))
         # Title, dates, item-specific offers and URL survive even a small budget.
         packed = {key:payload[key] for key in ['url','retrieved_at','locale','region','status','adapter','extraction_method','confidence','safety'] if key in payload}
@@ -104,4 +104,19 @@ def compact_tool_output(content: str, max_chars: int, *, query: str = '') -> str
     else:
         packed = {'tool_result_excerpt':_bounded(payload,strings=250,items=8),'omitted':True}
     encoded = json.dumps(packed,ensure_ascii=False,separators=(',',':'))
+    if len(encoded)>available:
+        # Width/depth caps alone do not bound a broad JSON object. The budget
+        # is real, including browser snapshots with many elements/trackers.
+        fields=payload.get('fields',payload) if isinstance(payload,dict) else {}
+        packed={'omitted':True,'note':'Observation omitted to fit context. Read the source for missing details.'}
+        if isinstance(fields,dict):
+            for key in ('url','title','text','main_text'):
+                value=(payload.get(key) or fields.get(key)) if isinstance(payload,dict) else None
+                if not isinstance(value,str):continue
+                if key=='url':
+                    if len(value)<available//2:packed[key]=value
+                else:packed[key]=text_excerpt(value,max(50,available//5),query)[0]
+                if len(json.dumps(packed,ensure_ascii=False,separators=(',',':')))>available:
+                    packed.pop(key)
+        encoded=json.dumps(packed,ensure_ascii=False,separators=(',',':'))
     return prefix+encoded+suffix

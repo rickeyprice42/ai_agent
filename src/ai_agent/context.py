@@ -205,6 +205,9 @@ class ContextBuilder:
         tool_payload = json.dumps(tools or [], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         tool_tokens = estimator.count_text(tool_payload)
         turn_reserve = max(0, int(getattr(self, 'turn_reserve_tokens', 0)))
+        if tools and not turn_reserve:
+            # Optional memory must leave room for the next tool observations.
+            turn_reserve = min(8192, max(256, (input_budget-tool_tokens)//3))
         content_budget = input_budget - tool_tokens - 64 - turn_reserve
         if content_budget <= 0:
             raise ContextBudgetError("Tool schemas exceed the available context budget.")
@@ -498,11 +501,14 @@ class ContextBuilder:
             query_parts.extend(
                 step.description for step in task.steps if step.status in {"pending", "running", "blocked"}
             )
-        memories = self.memory.relevant_memories(" ".join(query_parts), limit=self.note_limit)
+        memories = self.memory.relevant_memories(" ".join(query_parts), limit=self.note_limit+20)
+        memories = [memory for memory in memories if memory.kind!='chat_tool'][:self.note_limit]
         if not memories:
             return ""
         lines = []
         for memory in memories:
+            # Raw pages stay in tool/history representations, where their size
+            # can be controlled without rewriting the system instructions.
             source = memory.memory_id or (memory.provenance[0] if memory.provenance else "legacy")
             provenance = (
                 f"; provenance={', '.join(memory.provenance)}"
@@ -514,11 +520,13 @@ class ContextBuilder:
                 if memory.conflict_ids
                 else ""
             )
+            from ai_agent.tool_payloads import text_excerpt
+            content,_ = text_excerpt(memory.content, 1800, query=' '.join(query_parts))
             lines.append(
                 f"- [{memory.scope}/{memory.kind}; source={source}; "
                 f"confidence={memory.confidence:.2f}; score={memory.score:.3f}"
                 f"{provenance}{conflict}] "
-                f"{memory.content}"
+                f"{content}"
             )
         return _section("Relevant long-term memory", "\n".join(lines))
 
