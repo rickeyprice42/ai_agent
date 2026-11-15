@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from threading import Event, Thread
 
 ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT/'src') not in sys.path:sys.path.insert(0,str(ROOT/'src'))
@@ -188,6 +189,84 @@ class LLMAutomationTests(unittest.TestCase):
         self.provider=Provider([ModelResponse(tool_calls=[ToolCall('web_search',{'query':'fixture'})]),ModelResponse(tool_calls=[ToolCall('research_read',{'url':'https://example.org/study'})])])
         self.service.process_automation_queue()
         self.assertEqual(self.result(automation,occurrence)['state'],'cancelled');self.assertEqual(len(self.provider.inputs),1)
+
+    def test_remote_stop_keeps_ownership_until_uncooperative_handler_drains(self):
+        started, release = Event(), Event()
+        errors = []
+        def slow_read(args):
+            started.set()
+            if not release.wait(10):
+                raise RuntimeError('test handler was not released')
+            return ToolResult('completed', output='Already performed read')
+        self.handlers['web_search'] = slow_read
+        self.provider = Provider([
+            ModelResponse(tool_calls=[ToolCall('web_search', {'query':'fixture'})]),
+            ModelResponse(text='Must not request another model turn')])
+        automation, occurrence = self.occurrence()
+        def work():
+            try:self.service.process_automation_queue()
+            except Exception as exc:errors.append(exc)
+        worker = Thread(target=work)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(10))
+            # Independent connection represents an HTTP process controlling
+            # a worker that has no shared in-memory cancellation event.
+            remote = AvelinDatabase(self.service.settings.database_file)
+            remote.request_task_stop(self.user, occurrence['task_run_id'], 'paused')
+            stopping = remote.get_task_run(self.user, occurrence['task_run_id'])
+            self.assertEqual(stopping['state'], 'running')
+            self.assertEqual(stopping['control_requested'], 'paused')
+            self.assertTrue(stopping['worker_id'])
+            self.assertEqual(self.result(automation, occurrence)['control_requested'], 'paused')
+            self.assertIsNone(remote.acquire_task_run(self.user, 'second-worker', 180, run_id=stopping['id']))
+            self.assertIsNone(remote.request_task_stop('other-user', stopping['id'], 'cancelled'))
+            # Escalation from pause to cancellation cannot be downgraded.
+            remote.request_task_stop(self.user, stopping['id'], 'cancelled')
+            remote.request_task_stop(self.user, stopping['id'], 'paused')
+            self.assertEqual(remote.get_task_run(self.user, stopping['id'])['control_requested'], 'cancelled')
+            self.assertTrue(worker.is_alive())
+        finally:
+            release.set()
+            worker.join(15)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        result = self.result(automation, occurrence)
+        self.assertEqual(result['state'], 'cancelled')
+        self.assertIsNone(result['control_requested'])
+        self.assertEqual(len(self.provider.inputs), 1)
+
+    def test_remote_stop_reaches_cooperative_handler(self):
+        started, stopped = Event(), Event()
+        def read(args, context):
+            started.set()
+            from time import monotonic, sleep
+            deadline = monotonic() + 5
+            while not context.cancelled and monotonic() < deadline:sleep(.01)
+            if context.cancelled:stopped.set()
+            return ToolResult('cancelled' if context.cancelled else 'failed', output='Stopped')
+        self.handlers['web_search'] = read
+        self.provider = Provider([ModelResponse(tool_calls=[ToolCall('web_search', {'query':'fixture'})])])
+        automation, occurrence = self.occurrence()
+        worker = Thread(target=self.service.process_automation_queue)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(10))
+            remote = AvelinDatabase(self.service.settings.database_file)
+            remote.request_task_stop(self.user, occurrence['task_run_id'], 'cancelled')
+            self.assertTrue(stopped.wait(3))
+        finally:worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(self.result(automation, occurrence)['state'], 'cancelled')
+
+    def test_expired_pending_stop_is_not_reclaimed_or_replayed(self):
+        _, occurrence = self.occurrence()
+        run_id = occurrence['task_run_id']
+        with self.service.database.connect() as db:
+            db.execute("UPDATE task_runs SET state='running',worker_id='dead',lease_expires_at='2000-01-01',control_requested='cancelled' WHERE id=?", (run_id,))
+        self.assertIsNone(self.service.database.acquire_task_run(self.user, 'new-worker', 180, run_id=run_id))
+        run = self.service.database.get_task_run(self.user, run_id)
+        self.assertEqual((run['state'], run['worker_id'], run['control_requested']), ('running', 'dead', 'cancelled'))
 
     def test_expired_wall_budget_prevents_model_request(self):
         automation,occurrence=self.occurrence({'max_seconds':30})

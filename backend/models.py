@@ -548,6 +548,7 @@ class TaskRunItem(BaseModel):
     task_id: str
     user_id: str
     state: str
+    control_requested: str | None = None
     worker_id: str | None = None
     lease_expires_at: str | None = None
     heartbeat_at: str | None = None
@@ -630,6 +631,7 @@ class AutomationRunItem(BaseModel):
     task_id: str
     task_run_id: str
     state: str
+    control_requested: str | None = None
     budget: dict = Field(default_factory=dict)
     usage: dict = Field(default_factory=dict)
     failure_reason: str | None = None

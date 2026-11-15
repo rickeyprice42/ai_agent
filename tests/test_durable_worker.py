@@ -269,6 +269,29 @@ class DurableWorkerTests(unittest.TestCase):
             agent.tasks.cancel_task(controlled.id)
             self.assertEqual(agent.tasks.task_run(controlled.id)["state"], "cancelled")
 
+    def test_active_tool_uses_remaining_run_time_and_finalizes_failed_step(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Agent(isolated_settings(Path(directory)), user_id='alice')
+            stopped = threading.Event()
+            def slow(args, context):
+                if context.cancellation.wait(3):stopped.set()
+                return ToolResult('cancelled', display_text='Deadline fixture stopped')
+            agent.tools.register(Tool('deadline_probe', 'Read fixture', {'type':'object'}, slow,
+                permissions=(ToolPermission('test.read', 'read'),)))
+            agent.executor.action_planner = StaticPlanner('deadline_probe')
+            task = agent.tasks.create_task('Deadline fixture', steps=['Wait'])
+            run = agent.tasks.task_run(task.id)
+            budget = {**run['budget'], 'max_seconds':30}
+            with agent.memory.database.connect() as connection:
+                connection.execute('UPDATE task_runs SET started_at=?,budget_json=? WHERE id=?',
+                    ((datetime.now(timezone.utc)-timedelta(seconds=29)).isoformat(), json.dumps(budget), run['id']))
+            agent.executor.execute_next_step()
+            self.assertTrue(stopped.is_set())
+            self.assertEqual(agent.tasks.task_run(task.id)['state'], 'failed')
+            task = agent.tasks.get_task(task.id)
+            self.assertEqual(task.status, 'failed')
+            self.assertEqual(task.steps[0].status, 'failed')
+
     def test_pause_interrupts_active_tool_without_worker_overwriting_state(self):
         with tempfile.TemporaryDirectory() as directory:
             agent = Agent(isolated_settings(Path(directory)), user_id="alice")

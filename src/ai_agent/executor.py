@@ -9,6 +9,7 @@ from uuid import uuid4
 import re
 
 from ai_agent.action_log import ActionLogStore
+from ai_agent.run_cancellation import RunCancellation
 from ai_agent.security import (
     ToolPolicyEngine,
     arguments_digest,
@@ -207,13 +208,22 @@ class ExecutionEngine:
         )
         cancellation = Event()
         self._cancellations[run["id"]] = cancellation
+        remaining_seconds = run['budget'].get('max_seconds', 3600)
+        if run.get('started_at'):
+            started = datetime.fromisoformat(str(run['started_at']).replace('Z', '+00:00'))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            remaining_seconds -= max(0, (datetime.now(timezone.utc) - started).total_seconds())
         try:
-            invocation = self.tools.invoke(
-                decision.tool_name,
-                arguments,
-                idempotency_key=deduplication_key if tool.idempotent else None,
-                cancellation=cancellation,
-            )
+            with RunCancellation(self.tasks.database,self.tasks.user_id,run['id'],self.worker_id,
+                                 remaining_seconds=remaining_seconds,
+                                 lease_seconds=self.lease_seconds,parent=cancellation) as guard:
+                invocation = self.tools.invoke(
+                    decision.tool_name,
+                    arguments,
+                    idempotency_key=deduplication_key if tool.idempotent else None,
+                    cancellation=guard,
+                )
         finally:
             self._cancellations.pop(run["id"], None)
         tool_result = invocation.text()
@@ -245,6 +255,11 @@ class ExecutionEngine:
         ) or run
 
         current_run = self.tasks.database.get_task_run(self.tasks.user_id, run["id"])
+        if current_run and current_run.get('control_requested'):
+            current_run=self.tasks.set_run_state(run['id'],current_run['control_requested'],worker_id=self.worker_id)
+        elif guard.is_set() and current_run and current_run['state']=='running' and current_run['worker_id']==self.worker_id:
+            state=guard.outcome if guard.outcome in {'paused','cancelled','failed'} else 'failed'
+            current_run=self.tasks.set_run_state(run['id'],state,worker_id=self.worker_id,failure_reason=guard.reason)
         if current_run is not None and current_run["state"] in {"paused", "cancelled"}:
             state_label = "приостановлено" if current_run["state"] == "paused" else "отменено"
             current_task = self.tasks.get_task(task.id) or task
@@ -252,6 +267,15 @@ class ExecutionEngine:
                 f"Выполнение {state_label} пользователем; состояние worker не перезаписано.",
                 current_task,
             )
+
+        if guard.is_set():
+            # Ownership loss and deadlines must not fall through to step
+            # completion or attempt a second finalization with a cleared owner.
+            current_task = self.tasks.get_task(task.id) or task
+            if current_run and current_run['state'] == 'failed':
+                self.tasks.update_step(step.id, 'failed', guard.reason)
+                current_task = self.tasks.update_task(task.id, 'failed', guard.reason)
+            return _format_task_state(guard.reason, current_task)
 
         if status != "completed":
             updated = self.tasks.update_step(step.id, "failed", tool_result)

@@ -3,7 +3,7 @@ import "./LongTaskPanel.css";
 
 type Plan = { id: string; title: string; goal: string; steps: string[]; acceptance_checks: string[]; status: string;
   revision: number; digest: string; budget: Record<string, number>; work_thread_id?: string;
-  run?: { state: string; failure_reason?: string; usage: Record<string, number> }; task?: { steps: { id: string; description: string; status: string }[] };
+  run?: { state: string; control_requested?: string | null; failure_reason?: string; usage: Record<string, number> }; task?: { steps: { id: string; description: string; status: string }[] };
   artifacts?: { name: string; path: string }[]; result?: string };
 type Props = { token: string; threadId: string; onOpenChat: (id: string) => void; disabled?: boolean };
 const labels: Record<string, string> = { draft: "План на согласование", approved: "План утверждён", queued: "В очереди", running: "В работе", waiting_approval: "Нужно разрешение", paused: "Приостановлено", completed: "Этапы выполнены", failed: "Нужна проверка", cancelled: "Отменено", rejected: "План отклонён" };
@@ -48,7 +48,7 @@ export function LongTaskPanel({ token, threadId, onOpenChat, disabled }: Props) 
       const total = plan.task?.steps.length || plan.steps.length;
       const locked = disabled || busy === plan.id;
       return <article className="long-task-card" key={plan.id}>
-        <div className="long-task-heading"><span>{labels[state] || state}</span>{plan.run ? <span>{completed}/{total}</span> : <span>{total} этапов</span>}</div>
+        <div className="long-task-heading"><span>{plan.run?.control_requested ? "Останавливается…" : labels[state] || state}</span>{plan.run ? <span>{completed}/{total}</span> : <span>{total} этапов</span>}</div>
         <h3>{plan.title}</h3>
         {plan.run ? <progress max={total || 1} value={completed} aria-label="Выполненные этапы" /> : null}
         <details open={plan.status === "draft"}><summary>План и условия выполнения</summary>
@@ -61,9 +61,9 @@ export function LongTaskPanel({ token, threadId, onOpenChat, disabled }: Props) 
         <div className="long-task-actions">
           {plan.status === "draft" ? <><button disabled={locked} onClick={() => void act(plan, "approved")} type="button">Утвердить и начать</button><button disabled={locked} onClick={() => void act(plan, "rejected")} type="button">Отклонить</button></> : null}
           {plan.work_thread_id ? <button type="button" onClick={() => onOpenChat(plan.work_thread_id!)}>Ход работы</button> : null}
-          {["queued", "running"].includes(state) ? <button disabled={locked} onClick={() => void act(plan, "pause")} type="button">Пауза</button> : null}
+          {["queued", "running"].includes(state) ? <button disabled={locked || Boolean(plan.run?.control_requested)} onClick={() => void act(plan, "pause")} type="button">Пауза</button> : null}
           {state === "paused" ? <button disabled={locked} onClick={() => void act(plan, "resume")} type="button">Продолжить</button> : null}
-          {["queued", "running", "waiting_approval", "paused"].includes(state) ? <button disabled={locked} onClick={() => void act(plan, "cancel")} type="button">Отменить</button> : null}
+          {["queued", "running", "waiting_approval", "paused"].includes(state) ? <button disabled={locked || plan.run?.control_requested === "cancelled"} onClick={() => void act(plan, "cancel")} type="button">Отменить</button> : null}
         </div>
       </article>;
     })}

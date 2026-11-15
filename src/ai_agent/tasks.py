@@ -67,7 +67,7 @@ class TaskManager:
         )
         if run is None:
             raise ValueError("Durable task run не найден или lease потерян.")
-        if state in {"completed", "failed", "cancelled"}:
+        if run['state'] in {"completed", "failed", "cancelled"}:
             TaskReportService(self.database, self.user_id).run_report(run_id)
         return run
 
@@ -85,7 +85,7 @@ class TaskManager:
         if run is None or run["state"] in {"completed", "failed", "cancelled"}:
             raise ValueError("Активный durable run не найден.")
         self.set_run_state(run["id"], "paused")
-        return self.update_task(task_id, "paused", "Задача приостановлена пользователем.")
+        return self.get_task(task_id)
 
     def resume_task(self, task_id: str) -> Task:
         run = self.task_run(task_id)
@@ -110,7 +110,7 @@ class TaskManager:
         if run is None or run["state"] in {"completed", "failed", "cancelled"}:
             raise ValueError("Задача уже завершена или не найдена.")
         self.set_run_state(run["id"], "cancelled", failure_reason="Cancelled by user.")
-        return self.update_task(task_id, "cancelled", "Задача отменена пользователем.")
+        return self.get_task(task_id)
 
     def active_task(self) -> Task | None:
         for task in self.list_tasks(limit=50):

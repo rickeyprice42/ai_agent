@@ -187,6 +187,9 @@ class AvelinDatabase:
 
     @staticmethod
     def _migrate_durable_tasks(connection: sqlite3.Connection) -> None:
+        columns={row['name'] for row in connection.execute('PRAGMA table_info(task_runs)')}
+        if 'control_requested' not in columns:
+            connection.execute('ALTER TABLE task_runs ADD COLUMN control_requested TEXT')
         connection.execute(
             """
             INSERT OR IGNORE INTO task_runs (
@@ -2765,7 +2768,7 @@ class AvelinDatabase:
                 SET state = 'queued', worker_id = NULL, lease_expires_at = NULL,
                     failure_reason = 'Recovered after expired worker lease.',
                     updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = ? AND state = 'running'
+                WHERE user_id = ? AND state = 'running' AND control_requested IS NULL
                   AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
                 """,
                 (user_id, now.isoformat()),
@@ -2835,18 +2838,29 @@ class AvelinDatabase:
         allowed = {"queued", "running", "waiting_approval", "paused", "failed", "completed", "cancelled"}
         if state not in allowed:
             raise ValueError(f"Unsupported durable run state: {state}")
-        terminal = state in {"failed", "completed", "cancelled"}
+        if worker_id is None and state in {'paused','cancelled'}:
+            return self.request_task_stop(user_id,run_id,state)
         with self.connect() as connection:
-            params: list[object] = [state, failure_reason]
+            connection.execute('BEGIN IMMEDIATE')
+            current=connection.execute('SELECT * FROM task_runs WHERE id=? AND user_id=?',(run_id,user_id)).fetchone()
+            if current is None:return None
+            if worker_id is not None and current['worker_id']!=worker_id:return None
+            if state=='queued' and current['state']=='paused':
+                unknown=connection.execute("SELECT 1 FROM task_checkpoints WHERE run_id=? AND status IN ('started','cancelled','interrupted') LIMIT 1",(run_id,)).fetchone()
+                if unknown:
+                    raise ValueError('Результат прерванного действия неизвестен. Требуется проверка перед продолжением.')
+            if current['control_requested']:
+                if worker_id is None:return _task_run_payload(current)
+                state=current['control_requested']
+                failure_reason='Исполнение остановлено. Уже выполненные действия не откатываются.'
+            terminal = state in {"failed", "completed", "cancelled"}
             owner_clause = ""
             if worker_id is not None:
-                owner_clause = " AND (worker_id = ? OR worker_id IS NULL)"
-                params.append(worker_id)
-            params.extend([run_id, user_id])
+                owner_clause = " AND worker_id = ?"
             updated = connection.execute(
                 f"""
                 UPDATE task_runs
-                SET state = ?, failure_reason = ?,
+                SET state = ?, failure_reason = ?, control_requested=NULL,
                     worker_id = CASE WHEN ? IN ('running') THEN worker_id ELSE NULL END,
                     lease_expires_at = CASE WHEN ? IN ('running') THEN lease_expires_at ELSE NULL END,
                     finished_at = CASE WHEN ? THEN COALESCE(finished_at, CURRENT_TIMESTAMP) ELSE finished_at END,
@@ -2858,7 +2872,31 @@ class AvelinDatabase:
             )
             if updated.rowcount != 1:
                 return None
+            if worker_id is not None and state in {'paused','cancelled'}:
+                connection.execute('UPDATE tasks SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',
+                                   (state,current['task_id'],user_id))
         return self.get_task_run(user_id, run_id)
+
+    def request_task_stop(self,user_id,run_id,state):
+        with self.connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            self._request_task_stop(connection,user_id,run_id,state)
+            row=connection.execute('SELECT * FROM task_runs WHERE id=? AND user_id=?',(run_id,user_id)).fetchone()
+        return _task_run_payload(row) if row else None
+
+    @staticmethod
+    def _request_task_stop(connection,user_id,run_id,state):
+        if state not in {'paused','cancelled'}:raise ValueError('Invalid stop request')
+        row=connection.execute('SELECT * FROM task_runs WHERE id=? AND user_id=?',(run_id,user_id)).fetchone()
+        if row is None or row['state'] in {'completed','failed','cancelled'}:return
+        if row['state']=='running' and row['worker_id']:
+            target='cancelled' if row['control_requested']=='cancelled' else state
+            connection.execute("UPDATE task_runs SET control_requested=?,failure_reason=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?",
+                (target,'Остановка запрошена. Ожидаем завершения текущего действия.',run_id,user_id))
+        else:
+            connection.execute("UPDATE task_runs SET state=?,control_requested=NULL,worker_id=NULL,lease_expires_at=NULL,failure_reason=?,finished_at=CASE WHEN ?='cancelled' THEN COALESCE(finished_at,CURRENT_TIMESTAMP) ELSE finished_at END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?",
+                (state,'Остановлено пользователем.',state,run_id,user_id))
+            connection.execute('UPDATE tasks SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(state,row['task_id'],user_id))
 
     def finalize_automation_agent_run(
         self, user_id: str, run_id: str, worker_id: str, *, plan_version: int,
@@ -2879,6 +2917,10 @@ class AvelinDatabase:
             link = connection.execute("SELECT 1 FROM automation_llm_runs WHERE run_id=? AND user_id=?", (run_id,user_id)).fetchone()
             if run is None or link is None or run["plan_version"] != plan_version:
                 return None
+            if run['control_requested']:
+                if run['state']!='running' or run['worker_id']!=worker_id:return None
+                state=outcome=run['control_requested']
+                failure_reason='Исполнение остановлено. Уже выполненные действия не откатываются.'
             controlled = run["state"] in {"cancelled", "paused"}
             denied = run["state"] == "waiting_approval" and state == "cancelled" and outcome == "cancelled"
             if controlled:
@@ -2897,7 +2939,7 @@ class AvelinDatabase:
                     running_step = connection.execute(
                         "SELECT id FROM task_steps WHERE task_id=? AND status='blocked' ORDER BY position LIMIT 1", (run["task_id"],)
                     ).fetchone()
-                step_state = "completed" if state == "completed" else "blocked" if state == "waiting_approval" else "failed"
+                step_state = "completed" if state == "completed" else "blocked" if state in {"waiting_approval","paused"} else "failed"
                 if running_step:
                     connection.execute("UPDATE task_steps SET status=?,result=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                         (step_state,result or failure_reason,running_step["id"]))
@@ -2913,7 +2955,7 @@ class AvelinDatabase:
                 params = [next_state, failure_reason or None, next_state in {"completed","failed","cancelled"},
                     run_id,user_id,expected_state,plan_version] + ([] if denied else [worker_id])
                 changed = connection.execute(
-                    f"""UPDATE task_runs SET state=?,failure_reason=?,worker_id=NULL,lease_expires_at=NULL,
+                    f"""UPDATE task_runs SET state=?,failure_reason=?,control_requested=NULL,worker_id=NULL,lease_expires_at=NULL,
                         finished_at=CASE WHEN ? THEN COALESCE(finished_at,CURRENT_TIMESTAMP) ELSE finished_at END,
                         updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND state=? AND plan_version=? AND {owner_clause}""", params
                 ).rowcount
@@ -3493,7 +3535,7 @@ class AvelinDatabase:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT ar.*, tr.state, tr.budget_json, tr.usage_json, tr.failure_reason,
+                SELECT ar.*, tr.state, tr.control_requested, tr.budget_json, tr.usage_json, tr.failure_reason,
                        tr.started_at, tr.finished_at
                 FROM automation_runs AS ar JOIN task_runs AS tr ON tr.id = ar.task_run_id
                 WHERE ar.user_id = ? AND ar.automation_id = ?
@@ -3508,7 +3550,7 @@ class AvelinDatabase:
         with self.connect() as connection:
             last = connection.execute(
                 """
-                SELECT ar.*, tr.state, tr.budget_json, tr.usage_json, tr.failure_reason,
+                SELECT ar.*, tr.state, tr.control_requested, tr.budget_json, tr.usage_json, tr.failure_reason,
                        tr.started_at, tr.finished_at
                 FROM automation_runs AS ar JOIN task_runs AS tr ON tr.id = ar.task_run_id
                 WHERE ar.automation_id = ? ORDER BY ar.scheduled_for DESC LIMIT 1
@@ -4680,6 +4722,7 @@ def _task_run_payload(row: sqlite3.Row) -> dict:
         "task_id": str(row["task_id"]),
         "user_id": str(row["user_id"]),
         "state": str(row["state"]),
+        "control_requested": row['control_requested'],
         "worker_id": row["worker_id"],
         "lease_expires_at": row["lease_expires_at"],
         "heartbeat_at": row["heartbeat_at"],
@@ -4777,6 +4820,7 @@ def _automation_run_payload(row: sqlite3.Row) -> dict:
         "task_id": str(row["task_id"]),
         "task_run_id": str(row["task_run_id"]),
         "state": str(row["state"]),
+        "control_requested": row['control_requested'],
         "budget": {**_default_task_budget(), **_load_json_dict(row["budget_json"])},
         "usage": {**_default_task_usage(), **_load_json_dict(row["usage_json"])},
         "failure_reason": row["failure_reason"],

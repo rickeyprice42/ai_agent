@@ -161,12 +161,10 @@ class LongTaskPlans:
                 raise PlanConflict('Запуск уже завершён. Его состояние не изменено.')
             if action in {'pause','cancel'}:
                 state = 'paused' if action=='pause' else 'cancelled'
-                connection.execute("UPDATE task_runs SET state=?,worker_id=NULL,lease_expires_at=NULL,failure_reason=?,finished_at=CASE WHEN ?='cancelled' THEN CURRENT_TIMESTAMP ELSE finished_at END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?",
-                    (state,'Остановлено пользователем.',state,plan['run_id'],self.user_id))
-                connection.execute('UPDATE tasks SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(state,plan['task_id'],self.user_id))
+                self.database._request_task_stop(connection,self.user_id,plan['run_id'],state)
             else:
                 link = connection.execute('SELECT outcome FROM automation_llm_runs WHERE run_id=? AND user_id=?',(plan['run_id'],self.user_id)).fetchone()
-                unknown = connection.execute("SELECT 1 FROM task_checkpoints WHERE run_id=? AND status='started'",(plan['run_id'],)).fetchone()
+                unknown = connection.execute("SELECT 1 FROM task_checkpoints WHERE run_id=? AND status IN ('started','cancelled','interrupted')",(plan['run_id'],)).fetchone()
                 if current['state']!='paused' or not link:
                     raise PlanConflict('Возобновить можно только приостановленный запуск.')
                 waiting = link['outcome']=='waiting_approval'
@@ -283,7 +281,7 @@ def process_long_tasks(service,limit=1):
     LongTaskPlans(service.database,'local-user')  # Schema only; no model or task creation.
     with service.database.connect() as connection:
         rows = connection.execute("""SELECT p.user_id,p.run_id FROM long_task_plans p JOIN task_runs r ON r.id=p.run_id
-            WHERE p.status='approved' AND (r.state='queued' OR (r.state='running' AND r.lease_expires_at<=?))
+            WHERE p.status='approved' AND (r.state='queued' OR (r.state='running' AND r.control_requested IS NULL AND r.lease_expires_at<=?))
             ORDER BY r.created_at LIMIT ?""",(datetime.now(timezone.utc).isoformat(),max(1,min(int(limit),3)))).fetchall()
     runner = LongTaskRunner(service)
     results = []

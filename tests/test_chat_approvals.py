@@ -25,7 +25,7 @@ class ChatApprovalTests(unittest.TestCase):
         root=Path(self.temp.name)
         self.service=AgentService.__new__(AgentService)
         self.service.root_dir=root
-        self.service.settings=replace(Settings.load(Path(__file__).resolve().parents[1]),model_provider='mock',model_name='mock-local',database_file=root/'db.sqlite',memory_file=root/'memory.json',tool_workspace_dir=root/'workspace')
+        self.service.settings=replace(Settings.load(Path(__file__).resolve().parents[1]),model_provider='mock',model_name='mock-local',openai_api_key='fixture-not-a-real-key',database_file=root/'db.sqlite',memory_file=root/'memory.json',tool_workspace_dir=root/'workspace')
         self.service.database=AvelinDatabase(self.service.settings.database_file)
         self.service._agents={}
         self.service._connector_factories=[]

@@ -251,6 +251,7 @@ export type TaskRunItem = {
   id: string;
   task_id: string;
   state: string;
+  control_requested?: string | null;
   worker_id?: string | null;
   lease_expires_at?: string | null;
   heartbeat_at?: string | null;
@@ -267,6 +268,7 @@ export type AutomationRunItem = {
   task_id: string;
   task_run_id: string;
   state: string;
+  control_requested?: string | null;
   budget: Record<string, number>;
   usage: Record<string, number>;
   failure_reason?: string | null;

@@ -23,6 +23,7 @@ from ai_agent.security import arguments_digest, redact_for_audit, tool_risk
 from ai_agent.tasks import TaskManager
 from ai_agent.task_reports import TaskReportService
 from ai_agent.tools.base import ToolRegistry
+from ai_agent.run_cancellation import RunCancellation
 
 
 SCHEMA="""CREATE TABLE IF NOT EXISTS automation_llm_runs(
@@ -245,9 +246,18 @@ class LLMAutomationRunner:
         manager=TaskManager(self.database,user_id)
         started=time.monotonic();checkpoint=None;forced=None;reason='';done=False
         spent=self.get(user_id,run_id=run['id']).get('active_seconds',0)
+        previous_cancellation=getattr(agent,'tool_cancellation',None)
+        guard=RunCancellation(self.database,user_id,run['id'],self.worker_id,
+                              remaining_seconds=run['budget'].get('max_seconds',3600)-spent,parent=previous_cancellation)
+        guard.__enter__()
+        agent.tool_cancellation=guard
         try:
             while True:
+                if guard.is_set():
+                    forced,reason=guard.outcome,guard.reason;break
                 current=self.database.get_task_run(user_id,run['id'])
+                if current.get('control_requested'):
+                    forced=current['control_requested'];reason='Выполнение остановлено пользователем.';break
                 if current['state']=='running' and current.get('worker_id')!=self.worker_id:
                     forced='interrupted';reason='Worker lease передан другому исполнителю.';break
                 if current['state'] in {'cancelled','paused'}:
@@ -294,8 +304,13 @@ class LLMAutomationRunner:
         except Exception:
             forced='failed';reason='Не удалось выполнить автоматизацию. Подробности доступны в диалоге запуска.'
         finally:
-            close=getattr(events,'close',None)
-            if close:close()
+            try:
+                close=getattr(events,'close',None)
+                if close:close()
+            finally:
+                agent.tool_cancellation=previous_cancellation
+                guard.__exit__()
+            if guard.is_set():forced,reason=guard.outcome,guard.reason
             outcome=forced or getattr(agent,'last_turn_outcome','failed')
             if outcome=='running':outcome='interrupted'
             self._finish(user_id,run,agent,outcome,reason,active_seconds=time.monotonic()-started)

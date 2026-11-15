@@ -30,7 +30,7 @@ def main():
                       'REASONING_FALLBACK_ENABLED':'false','LLM_MAX_RETRIES':'0'}.items():
         os.environ[key]=value
     sys.path[:0]=[str(ROOT),str(ROOT/'src')]
-    import httpx
+    import httpx2 as httpx
     import uvicorn
     from fastapi import FastAPI
     from backend import routes

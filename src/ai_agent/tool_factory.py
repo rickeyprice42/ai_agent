@@ -723,15 +723,13 @@ def _run_sandboxed(source: str, arguments: dict[str, Any], *, timeout_seconds: f
         return ToolResult("failed", display_text="Generated input exceeds the 256 KB limit.")
     try:
         with tempfile.TemporaryDirectory(prefix="avelin-extension-") as directory:
-            completed = subprocess.run(
+            from ai_agent.tools.process_execution import run_process
+            completed = run_process(
                 [sys.executable, "-I", "-S", str(Path(__file__).with_name("generated_runner.py"))],
                 input=encoded,
-                encoding="utf-8",
-                capture_output=True,
                 timeout=max(0.01, min(5, timeout_seconds)),
                 env={},
                 cwd=directory,
-                check=False,
             )
     except subprocess.TimeoutExpired:
         return ToolResult(status="failed", display_text="Sandbox contract test timed out.")
