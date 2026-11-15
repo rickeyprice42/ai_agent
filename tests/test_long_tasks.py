@@ -210,7 +210,7 @@ class LongTaskTests(unittest.TestCase):
             connection.execute("UPDATE automation_llm_runs SET outcome='running' WHERE run_id=?",(plan['run_id'],))
         self.service.process_long_task_queue()
         self.assertEqual(self.provider.inputs,[])
-        self.assertEqual(LongTaskPlans(self.service.database,self.user).get(plan['id'])['run']['state'],'failed')
+        self.assertEqual(LongTaskPlans(self.service.database,self.user).get(plan['id'])['run']['state'],'running')
 
     def test_daily_reports_use_local_day_checkpoints_and_do_not_collide_between_goals(self):
         plans = [self.approve(self.draft()),self.approve(self.draft(title='Вторая независимая бета'))]

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import "./LongTaskPanel.css";
+import { TaskRecoveryPanel } from "./TaskRecoveryPanel";
 
 type Plan = { id: string; title: string; goal: string; steps: string[]; acceptance_checks: string[]; status: string;
   revision: number; digest: string; budget: Record<string, number>; work_thread_id?: string;
-  run?: { state: string; control_requested?: string | null; failure_reason?: string; usage: Record<string, number> }; task?: { steps: { id: string; description: string; status: string }[] };
+  run?: { id: string; state: string; control_requested?: string | null; failure_reason?: string; usage: Record<string, number> }; task?: { steps: { id: string; description: string; status: string }[] };
   artifacts?: { name: string; path: string }[]; result?: string };
 type Props = { token: string; threadId: string; onOpenChat: (id: string) => void; disabled?: boolean };
 const labels: Record<string, string> = { draft: "План на согласование", approved: "План утверждён", queued: "В очереди", running: "В работе", waiting_approval: "Нужно разрешение", paused: "Приостановлено", completed: "Этапы выполнены", failed: "Нужна проверка", cancelled: "Отменено", rejected: "План отклонён" };
@@ -57,6 +58,7 @@ export function LongTaskPanel({ token, threadId, onOpenChat, disabled }: Props) 
           <p className="muted">До {plan.budget.max_steps} действий · до {Math.round(plan.budget.max_seconds / 60)} минут активной работы · до {plan.budget.max_tokens.toLocaleString("ru-RU")} оценочных токенов. Внешние действия требуют отдельных разрешений. Работа продолжается, пока сервер включён.</p>
         </details>
         {plan.run?.failure_reason ? <p className="long-task-notice">{plan.run.failure_reason}</p> : null}
+        {plan.run?.state === "running" ? <TaskRecoveryPanel token={token} runId={plan.run.id} onRecovered={() => void load()} /> : null}
         {state === "completed" ? <p className="long-task-notice">Этапы завершены по журналу работы. Проверьте итоговые файлы и критерии приёмки в диалоге.</p> : null}
         <div className="long-task-actions">
           {plan.status === "draft" ? <><button disabled={locked} onClick={() => void act(plan, "approved")} type="button">Утвердить и начать</button><button disabled={locked} onClick={() => void act(plan, "rejected")} type="button">Отклонить</button></> : null}

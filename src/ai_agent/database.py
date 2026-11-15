@@ -190,6 +190,8 @@ class AvelinDatabase:
         columns={row['name'] for row in connection.execute('PRAGMA table_info(task_runs)')}
         if 'control_requested' not in columns:
             connection.execute('ALTER TABLE task_runs ADD COLUMN control_requested TEXT')
+        if 'worker_identity_json' not in columns:
+            connection.execute('ALTER TABLE task_runs ADD COLUMN worker_identity_json TEXT')
         connection.execute(
             """
             INSERT OR IGNORE INTO task_runs (
@@ -2755,6 +2757,7 @@ class AvelinDatabase:
         return [_task_run_payload(row) for row in rows]
 
     def acquire_task_run(self, user_id: str, worker_id: str, lease_seconds: int = 120, run_id: str | None = None) -> dict | None:
+        from ai_agent.worker_identity import current_worker_identity, worker_quiescence
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(seconds=max(5, min(int(lease_seconds), 900)))).isoformat()
         with self.connect() as connection:
@@ -2762,17 +2765,27 @@ class AvelinDatabase:
             managed_filter = ''
             if run_id is None and connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='long_task_plans'").fetchone():
                 managed_filter = "AND NOT EXISTS (SELECT 1 FROM long_task_plans p WHERE p.run_id=task_runs.id AND p.status='approved')"
-            connection.execute(
-                """
-                UPDATE task_runs
-                SET state = 'queued', worker_id = NULL, lease_expires_at = NULL,
-                    failure_reason = 'Recovered after expired worker lease.',
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = ? AND state = 'running' AND control_requested IS NULL
-                  AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
-                """,
-                (user_id, now.isoformat()),
-            )
+            expired = connection.execute(
+                """SELECT id,worker_identity_json FROM task_runs
+                   WHERE user_id=? AND state='running' AND control_requested IS NULL
+                   AND lease_expires_at IS NOT NULL AND lease_expires_at<=?""", (user_id,now.isoformat())).fetchall()
+            for stale in expired:
+                if not worker_quiescence(stale['worker_identity_json']):
+                    continue
+                unknown = connection.execute("SELECT 1 FROM task_checkpoints WHERE run_id=? AND status IN ('started','cancelled','interrupted') LIMIT 1", (stale['id'],)).fetchone()
+                if unknown:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE task_runs
+                    SET state = 'queued', worker_id = NULL, lease_expires_at = NULL,
+                        failure_reason = 'Recovered after expired worker lease.',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ? AND id=? AND state = 'running' AND control_requested IS NULL
+                      AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+                    """,
+                    (user_id, stale['id'], now.isoformat()),
+                )
             row = connection.execute(
                 f"""
                 SELECT task_runs.id
@@ -2792,12 +2805,12 @@ class AvelinDatabase:
             updated = connection.execute(
                 """
                 UPDATE task_runs
-                SET state = 'running', worker_id = ?, lease_expires_at = ?,
+                SET state = 'running', worker_id = ?, lease_expires_at = ?, worker_identity_json=?,
                     heartbeat_at = ?, started_at = COALESCE(started_at, ?),
                     failure_reason = NULL, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND user_id = ? AND state = 'queued'
                 """,
-                (worker_id, expires_at, now.isoformat(), now.isoformat(), run_id, user_id),
+                (worker_id, expires_at, json.dumps(current_worker_identity()), now.isoformat(), now.isoformat(), run_id, user_id),
             )
             if updated.rowcount != 1:
                 return None
@@ -2877,9 +2890,12 @@ class AvelinDatabase:
                                    (state,current['task_id'],user_id))
         return self.get_task_run(user_id, run_id)
 
-    def request_task_stop(self,user_id,run_id,state):
+    def request_task_stop(self,user_id,run_id,state,*,worker_id=None):
         with self.connect() as connection:
             connection.execute('BEGIN IMMEDIATE')
+            if worker_id is not None:
+                owned=connection.execute("SELECT 1 FROM task_runs WHERE id=? AND user_id=? AND worker_id=? AND state='running'",(run_id,user_id,worker_id)).fetchone()
+                if not owned:return None
             self._request_task_stop(connection,user_id,run_id,state)
             row=connection.execute('SELECT * FROM task_runs WHERE id=? AND user_id=?',(run_id,user_id)).fetchone()
         return _task_run_payload(row) if row else None

@@ -18,6 +18,7 @@ from backend.auth import (
 )
 from backend.models import (
     AutomationCreateRequest,
+    TaskRecoveryRequest,
     AutomationItem,
     AutomationOccurrenceItem,
     AutomationRunItem,
@@ -1060,6 +1061,24 @@ def tick_automations(user: dict[str, str] = Depends(current_user)) -> list[Autom
 @router.get("/task-runs", response_model=list[TaskRunItem])
 def task_runs(user: dict[str, str] = Depends(current_user)) -> list[TaskRunItem]:
     return [TaskRunItem(**item) for item in agent_service.task_runs(user["id"])]
+
+
+@router.get('/task-runs/{run_id}/recovery')
+def task_run_recovery(run_id: str, user: dict[str,str] = Depends(current_user)):
+    from ai_agent.task_recovery import TaskRecovery
+    try:return TaskRecovery(agent_service.database,user['id']).status(run_id)
+    except LookupError as exc:raise HTTPException(status_code=404,detail=str(exc)) from exc
+
+
+@router.post('/task-runs/{run_id}/recover-stop', response_model=TaskRunItem)
+def recover_task_run(run_id: str, payload: TaskRecoveryRequest, user: dict[str,str] = Depends(current_user)):
+    from ai_agent.task_recovery import TaskRecovery, RecoveryConflict
+    try:
+        return TaskRecovery(agent_service.database,user['id']).close(
+            run_id,payload.token,payload.note,payload.acknowledge_unknown_effects)
+    except LookupError as exc:raise HTTPException(status_code=404,detail=str(exc)) from exc
+    except RecoveryConflict as exc:raise HTTPException(status_code=409,detail=str(exc)) from exc
+    except ValueError as exc:raise HTTPException(status_code=400,detail=str(exc)) from exc
 
 
 @router.get("/chats/{thread_id}/plans")

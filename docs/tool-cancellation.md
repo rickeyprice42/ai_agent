@@ -60,16 +60,54 @@ affected 10-test subset passed. Combined unique coverage is 183 tests: 181 passe
 2 Windows-only skips. TypeScript checking and the frontend production build passed.
 See `reports/qa/ave75-cancellation-2026-11-15.md` for evidence and limitations.
 
+Recovery and service shutdown update, 2026-11-15
+
+Durable claims now record the host, boot, process creation identity, and Linux
+service execution domain. A stale heartbeat cannot transfer a live worker's run.
+Automatic stale recovery also requires proof that the old execution domain has
+stopped and no uncertain checkpoint exists. Unknown older claims stay unresolved.
+
+`TaskRecovery` lets an authenticated owner close an orphan as cancelled after
+the lease has expired and execution is proven stopped. A stopped parent PID alone
+is insufficient: detached children could still run. On Ubuntu proof requires an
+OS reboot, or a new invocation of the same systemd service with no remaining old
+processes in its cgroup. Unsupported containment and missing identities fail
+closed. This is conservative while unrelated new subprocesses occupy that group.
+
+The owner reviews results, adds a note and explicitly acknowledges unknown
+effects. A snapshot token and a second containment check under a SQLite write lock
+reject stale/conflicting decisions. Recovery preserves observations/artifacts,
+marks uncertain checkpoints interrupted without verified success, revokes only
+the pending approvals linked to this run, and records an audit entry. It never
+resumes or repeats the unknown action. UI controls are available in long tasks,
+automations and the task queue when a run needs recovery.
+
+Service shutdown sets the durable stop signal before draining the real background
+work. It does not cancel an asyncio wrapper and assume its Python thread exited.
+Active tools receive a persisted pause, retain the lease while draining, and do
+not launch another queued action. Resuming uncertain checkpoints stays blocked.
+
+Ubuntu verification: 191-test regression run passed 189 tests with 2 Windows-only
+skips. The final 10-test recovery subset, including two additional full-lifespan
+shutdown/approval tests, passed. Unique combined coverage: 193 tests, 191 passed,
+2 skips. A separate temporary systemd service proved live-worker recovery stays
+blocked, service restart kills a detached delayed writer, and orphan closure
+preserves unknown evidence without replay. Four headless Edge UI scenarios passed
+at desktop/mobile widths; no physical phone or real-model acceptance is claimed.
+
 Remaining boundaries before closing AVE-75
 
 - Arbitrary in-process Python handlers cannot be forcibly terminated safely.
   They retain ownership and remain stopping until they return. A hard upper bound
   requires moving such handlers into isolated worker processes.
-- If a worker dies with a pending stop, the run deliberately stays unresolved
-  rather than replaying an action with unknown effects. Operator reconciliation
-  and its user flow still need implementation and acceptance tests.
-- Full service shutdown/restart and pause/resume races need a dedicated acceptance
-  sweep, beyond the existing chat shutdown and isolated worker fixtures.
+- Claims from older versions without process identity, different/unverifiable
+  hosts, and unsupported containment cannot use automatic recovery. They require
+  a separately verified operator procedure. Recovery closes a run; it does not
+  establish whether an external action succeeded or implement partial replay.
+- Lifecycle/OS fixtures cover the tested stop/restart races; arbitrary in-process
+  Python handlers still need their own isolated process host for a hard per-tool
+  termination bound without stopping the whole service.
 
 Cancellation does not roll back writes or external requests already performed.
-AVE-75 remains In Progress; this update is an incremental cancellation milestone.
+AVE-75 remains In Progress for the isolated process host. This update completes
+the supported orphan-closure flow and the tested durable shutdown scenarios.

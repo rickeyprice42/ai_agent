@@ -36,6 +36,16 @@ logger = logging.getLogger("avelin.api")
 AUTOMATION_POLL_SECONDS = 5
 
 
+async def _drain_durable_workers(workers):
+    for worker in workers:
+        while not worker.done():
+            try:await asyncio.shield(worker)
+            except asyncio.CancelledError:continue
+        if not worker.cancelled():
+            try:worker.result()
+            except Exception:logger.exception('durable worker failed during shutdown')
+
+
 async def _automation_scheduler(stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
@@ -107,6 +117,9 @@ async def _title_worker(stop: asyncio.Event) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     from backend.chat_runs import chat_runs_for
+    from ai_agent.worker_lifecycle import task_worker_stop
+    from threading import Event
+    agent_service._task_worker_stop = Event()
     chat_runs = chat_runs_for(agent_service)
     stop = asyncio.Event()
     scheduler = asyncio.create_task(_automation_scheduler(stop))
@@ -117,13 +130,15 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
-        chat_runs.close()
         stop.set()
+        task_worker_stop(agent_service).set()
+        # asyncio cancellation cannot stop an already running to_thread call.
+        # Drain durable workers while their guards still own/renew the leases.
+        await _drain_durable_workers((automation_worker,long_task_worker))
+        await asyncio.to_thread(chat_runs.close)
         scheduler.cancel()
-        automation_worker.cancel()
         push_worker.cancel()
         title_worker.cancel()
-        long_task_worker.cancel()
         for worker in (scheduler, automation_worker, push_worker, title_worker,long_task_worker):
             with suppress(asyncio.CancelledError):
                 await worker

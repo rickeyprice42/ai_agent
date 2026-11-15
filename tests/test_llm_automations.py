@@ -178,7 +178,11 @@ class LLMAutomationTests(unittest.TestCase):
             db.execute("UPDATE task_runs SET state='running',worker_id='dead',lease_expires_at='2000-01-01' WHERE id=?",(occurrence['task_run_id'],))
             db.execute("INSERT INTO automation_llm_runs(run_id,user_id,thread_id,outcome) VALUES(?,?,?,'running')",(occurrence['task_run_id'],self.user,thread['id']))
         self.service.process_automation_queue();result=self.result(automation,occurrence)
-        self.assertEqual(result['state'],'failed');self.assertIn('не повторяются',result['failure_reason']);self.assertEqual(self.provider.inputs,[])
+        self.assertEqual(result['state'],'running');self.assertEqual(self.provider.inputs,[])
+        # Legacy metadata cannot establish that a crashed parent's children
+        # have stopped. Keep the result unresolved instead of replaying it.
+        from ai_agent.task_recovery import TaskRecovery
+        self.assertFalse(TaskRecovery(self.service.database,self.user).status(occurrence['task_run_id'])['can_recover'])
 
     def test_cancel_during_first_tool_prevents_later_actions(self):
         automation,occurrence=self.occurrence()

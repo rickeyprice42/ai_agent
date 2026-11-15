@@ -4,7 +4,7 @@ from time import monotonic
 
 
 class RunCancellation:
-    def __init__(self,database,user_id,run_id,worker_id,*,remaining_seconds=3600,lease_seconds=180,parent=None):
+    def __init__(self,database,user_id,run_id,worker_id,*,remaining_seconds=3600,lease_seconds=180,parent=None,shutdown=None):
         self.database=database;self.user_id=user_id;self.run_id=run_id;self.worker_id=worker_id
         self.deadline=monotonic()+max(0,remaining_seconds)
         self.lease_seconds=lease_seconds
@@ -12,6 +12,7 @@ class RunCancellation:
         self.outcome=None;self.reason=''
         self.thread=None
         self.parent=parent
+        self.shutdown=shutdown
         self.next_heartbeat=monotonic()+min(5,lease_seconds/3)
 
     def is_set(self):return self.cancellation.is_set()
@@ -29,6 +30,10 @@ class RunCancellation:
         if not owned:
             self._cancel('interrupted','Владение запуском потеряно. Неизвестные действия не повторяются.')
             return
+        if self.shutdown is not None and self.shutdown.is_set():
+            if not run.get('control_requested'):
+                self.database.request_task_stop(self.user_id,self.run_id,'paused',worker_id=self.worker_id)
+            self._cancel('paused','Сервис останавливается. Дождитесь подтверждения остановки и проверьте результат перед продолжением.')
         if run.get('control_requested'):
             self._cancel(run['control_requested'],'Остановка запрошена пользователем. Уже выполненные действия не откатываются.')
         elif monotonic()>=self.deadline:

@@ -10,6 +10,7 @@ import { PushSettings, detachPush } from "./PushSettings";
 import { TimezonePicker, deviceTimezone } from "./TimezonePicker";
 import { ProjectWorkspace, type ProjectDialogMode } from "./ProjectWorkspace";
 import { LongTaskPanel } from "./LongTaskPanel";
+import { TaskRecoveryPanel } from "./TaskRecoveryPanel";
 import { ChatListRow } from "./ChatListRow";
 import { ChatClarification } from "./ChatClarification";
 import { ThreadMediaDrawer } from "./ThreadMediaDrawer";
@@ -2055,7 +2056,7 @@ export default function App() {
     const run = automationRuns[automationId]?.[0] || fallback;
     if (!run) return <p className="muted">Ещё не запускалась.</p>;
     const state = run.control_requested ? "Останавливается…" : ({queued:"В очереди",running:"Выполняется",completed:"Завершено",failed:"Не удалось выполнить",cancelled:"Отменено",waiting_approval:"Нужно подтверждение",paused:"На паузе"} as Record<string,string>)[run.state] || run.state;
-    return <div className="automation-result"><p className="muted">{state}{run.finished_at ? ` · ${formatFileTime(run.finished_at)}` : ""}</p>{run.thread_id ? <button className="text-button" type="button" disabled={isStartingChat} onClick={() => void handleSelectChat(run.thread_id!)}><WorkspaceIcon name="chat" />{run.state === "waiting_approval" ? "Открыть диалог и подтвердить" : "Открыть диалог запуска"}</button> : null}{run.result || run.failure_reason ? <details><summary>Результат</summary><p>{run.result || run.failure_reason}</p></details> : null}{run.artifacts?.length ? <div className="automation-artifacts">{run.artifacts.map((file) => <button className="text-button" key={file.path} type="button" onClick={() => void handleDownloadArtifact({path:file.path,name:file.name || file.path.split("/").pop() || "Файл",extension:file.extension || `.${file.path.split(".").pop()}`,size_bytes:file.size_bytes || 0})}><WorkspaceIcon name="files" />{file.name || file.path}</button>)}</div> : null}</div>;
+    return <div className="automation-result">{run.state === "running" ? <TaskRecoveryPanel token={authToken} runId={run.task_run_id} onRecovered={() => void refreshBootstrap()} /> : null}<p className="muted">{state}{run.finished_at ? ` · ${formatFileTime(run.finished_at)}` : ""}</p>{run.thread_id ? <button className="text-button" type="button" disabled={isStartingChat} onClick={() => void handleSelectChat(run.thread_id!)}><WorkspaceIcon name="chat" />{run.state === "waiting_approval" ? "Открыть диалог и подтвердить" : "Открыть диалог запуска"}</button> : null}{run.result || run.failure_reason ? <details><summary>Результат</summary><p>{run.result || run.failure_reason}</p></details> : null}{run.artifacts?.length ? <div className="automation-artifacts">{run.artifacts.map((file) => <button className="text-button" key={file.path} type="button" onClick={() => void handleDownloadArtifact({path:file.path,name:file.name || file.path.split("/").pop() || "Файл",extension:file.extension || `.${file.path.split(".").pop()}`,size_bytes:file.size_bytes || 0})}><WorkspaceIcon name="files" />{file.name || file.path}</button>)}</div> : null}</div>;
   }
 
   if (authToken && !currentUser && isLoading) {
@@ -2636,6 +2637,7 @@ export default function App() {
                       <button className="mini-button" onClick={() => void handleCreateReport(bootstrap.task_runs.find((run) => run.task_id === task.id)?.id)} type="button">Отчёт</button>
                     ) : null}
                   </div>
+                  {bootstrap.task_runs.find(run => run.task_id === task.id)?.state === "running" ? <TaskRecoveryPanel token={authToken} runId={bootstrap.task_runs.find(run => run.task_id === task.id)!.id} onRecovered={() => void refreshBootstrap()} /> : null}
                   <div className="task-steps">
                     {task.steps.slice(0, 4).map((step) => (
                       <div className="task-step-row" key={step.id}>

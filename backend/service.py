@@ -126,6 +126,8 @@ class AgentService:
                 )
                 agent.connectors.register(client, enabled=enabled)
             self._agents[key] = agent
+        from ai_agent.worker_lifecycle import task_worker_stop
+        self._agents[key].executor.shutdown_event = task_worker_stop(self)
         return self._agents[key]
 
     def register_connector_factory(self, factory) -> None:
@@ -680,14 +682,16 @@ class AgentService:
 
     def process_automation_queue(self, limit: int = 5) -> list[dict]:
         """Consume only scheduled work; personal task drafts are never auto-run."""
+        from ai_agent.worker_lifecycle import task_worker_stop
+        if task_worker_stop(self).is_set():return []
         with self.database.connect() as connection:
             rows = connection.execute(
                 """SELECT ar.user_id, ar.task_run_id FROM automation_runs ar
                    JOIN automations a ON a.id = ar.automation_id
                    JOIN task_runs tr ON tr.id = ar.task_run_id
                    WHERE a.status != 'deleted' AND (tr.state = 'queued' OR
-                     (tr.state = 'running' AND tr.lease_expires_at <= ?))
-                   ORDER BY ar.created_at, ar.rowid LIMIT ?""",
+                     (tr.state = 'running' AND tr.control_requested IS NULL AND tr.lease_expires_at <= ?))
+                   ORDER BY CASE WHEN tr.state='queued' THEN 0 ELSE 1 END, ar.created_at, ar.rowid LIMIT ?""",
                 (datetime.now(timezone.utc).isoformat(), max(1, min(int(limit), 20))),
             ).fetchall()
         results = []

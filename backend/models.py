@@ -589,6 +589,12 @@ class TaskControlResponse(BaseModel):
     run: TaskRunItem
 
 
+class TaskRecoveryRequest(BaseModel):
+    token: str = Field(pattern='^[a-f0-9]{64}$')
+    note: str = Field(min_length=10, max_length=2000)
+    acknowledge_unknown_effects: bool
+
+
 class LongTaskDecisionRequest(BaseModel):
     decision: str = Field(pattern="^(approved|rejected)$")
     revision: int = Field(ge=1)

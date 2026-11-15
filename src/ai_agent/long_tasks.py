@@ -282,7 +282,7 @@ def process_long_tasks(service,limit=1):
     with service.database.connect() as connection:
         rows = connection.execute("""SELECT p.user_id,p.run_id FROM long_task_plans p JOIN task_runs r ON r.id=p.run_id
             WHERE p.status='approved' AND (r.state='queued' OR (r.state='running' AND r.control_requested IS NULL AND r.lease_expires_at<=?))
-            ORDER BY r.created_at LIMIT ?""",(datetime.now(timezone.utc).isoformat(),max(1,min(int(limit),3)))).fetchall()
+            ORDER BY CASE WHEN r.state='queued' THEN 0 ELSE 1 END, r.created_at LIMIT ?""",(datetime.now(timezone.utc).isoformat(),max(1,min(int(limit),3)))).fetchall()
     runner = LongTaskRunner(service)
     results = []
     for row in rows:

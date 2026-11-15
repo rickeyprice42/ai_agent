@@ -162,7 +162,9 @@ class DurableWorkerTests(unittest.TestCase):
                     "UPDATE task_runs SET lease_expires_at = ? WHERE id = ?",
                     (expired, first["id"]),
                 )
-            recovered = agent.tasks.acquire_durable_run("worker-two", 30)
+            self.assertIsNone(agent.tasks.acquire_durable_run("worker-two",30))
+            with patch('ai_agent.worker_identity.worker_quiescence',return_value=True):
+                recovered = agent.tasks.acquire_durable_run("worker-two", 30)
             self.assertEqual(recovered["id"], first["id"])
             self.assertEqual(recovered["worker_id"], "worker-two")
 
@@ -240,9 +242,9 @@ class DurableWorkerTests(unittest.TestCase):
                     ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), run["id"]),
                 )
             result = agent.executor.execute_next_step()
-            self.assertIn("Повторный запуск заблокирован", result)
+            self.assertIn("нет задач", result)
             self.assertEqual(calls, [])
-            self.assertEqual(agent.tasks.task_run(task.id)["state"], "waiting_approval")
+            self.assertEqual(agent.tasks.task_run(task.id)["state"], "running")
 
     def test_budget_and_user_controls_stop_work_clearly(self):
         with tempfile.TemporaryDirectory() as directory:

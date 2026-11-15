@@ -24,6 +24,7 @@ from ai_agent.tasks import TaskManager
 from ai_agent.task_reports import TaskReportService
 from ai_agent.tools.base import ToolRegistry
 from ai_agent.run_cancellation import RunCancellation
+from ai_agent.worker_lifecycle import task_worker_stop
 
 
 SCHEMA="""CREATE TABLE IF NOT EXISTS automation_llm_runs(
@@ -152,6 +153,7 @@ class LLMAutomationRunner:
         return replace(settings, llm_timeout_seconds=timeout, llm_max_retries=0)
 
     def run(self,user_id,run_id):
+        if task_worker_stop(self.service).is_set():return
         manager=TaskManager(self.database,user_id)
         run=manager.acquire_durable_run(self.worker_id,180,run_id=run_id)
         if run is None:return
@@ -248,7 +250,8 @@ class LLMAutomationRunner:
         spent=self.get(user_id,run_id=run['id']).get('active_seconds',0)
         previous_cancellation=getattr(agent,'tool_cancellation',None)
         guard=RunCancellation(self.database,user_id,run['id'],self.worker_id,
-                              remaining_seconds=run['budget'].get('max_seconds',3600)-spent,parent=previous_cancellation)
+                              remaining_seconds=run['budget'].get('max_seconds',3600)-spent,parent=previous_cancellation,
+                              shutdown=task_worker_stop(self.service))
         guard.__enter__()
         agent.tool_cancellation=guard
         try:

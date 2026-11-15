@@ -56,6 +56,7 @@ class ExecutionEngine:
         self.action_planner = action_planner or HeuristicStepActionPlanner()
         self.worker_id = f"worker-{uuid4()}"
         self.lease_seconds = 180
+        self.shutdown_event = None
         self._cancellations: dict[str, Event] = {}
 
     def interrupt_run(self, run_id: str) -> bool:
@@ -66,6 +67,8 @@ class ExecutionEngine:
         return True
 
     def execute_next_step(self, approved_step_id: str | None = None, run_id: str | None = None) -> str:
+        if self.shutdown_event is not None and self.shutdown_event.is_set():
+            return 'Сервис останавливается. Новая задача не запущена.'
         del approved_step_id
         run = self.tasks.acquire_durable_run(self.worker_id, self.lease_seconds, run_id=run_id)
         if run is None:
@@ -217,7 +220,7 @@ class ExecutionEngine:
         try:
             with RunCancellation(self.tasks.database,self.tasks.user_id,run['id'],self.worker_id,
                                  remaining_seconds=remaining_seconds,
-                                 lease_seconds=self.lease_seconds,parent=cancellation) as guard:
+                                 lease_seconds=self.lease_seconds,parent=cancellation,shutdown=self.shutdown_event) as guard:
                 invocation = self.tools.invoke(
                     decision.tool_name,
                     arguments,
