@@ -142,6 +142,24 @@ class ChatApprovalTests(unittest.TestCase):
         decision=self.agent.policy.authorize(self.agent.tools.get('analyze_image'),{'path':'attachments/photo.png'})
         self.assertEqual(decision.outcome,'deny')
 
+    def test_failed_approved_mutation_is_not_completed_or_sent_back_to_model(self):
+        approval = self.pending()
+        def interrupted(args):
+            self.effects.append('possible effect')
+            raise RuntimeError('Synthetic failure after possible external effect')
+        self.agent.tools.get('external_fixture').handler = interrupted
+        self.agent.provider = ScriptedProvider([ModelResponse(text='Must not request another model turn')])
+        _,events = self.service.decide_chat_approval(self.a,self.thread,approval['id'],'approved')
+        output = list(events)
+        self.assertEqual(output[-1]['outcome'],'failed')
+        self.assertEqual(self.effects,['possible effect'])
+        self.assertEqual(self.agent.provider.inputs,[])
+        self.assertEqual(self.agent.pending_chat_actions.get(self.a,self.thread,approval['id'])['status'],'interrupted')
+        with self.assertRaises((ValueError,ChatBusyError)):
+            _,again = self.service.decide_chat_approval(self.a,self.thread,approval['id'],'approved')
+            list(again)
+        self.assertEqual(len(self.effects),1)
+
     def test_approved_overwrite_preserves_downloadable_artifact(self):
         self.agent.files.write_file('result.txt','old')
         self.agent.provider=ScriptedProvider([ModelResponse(tool_calls=[ToolCall('write_file',{'path':'result.txt','content':'approved replacement','overwrite':True})])])

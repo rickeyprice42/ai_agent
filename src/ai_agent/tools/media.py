@@ -9,6 +9,7 @@ from PIL import Image, ImageOps
 from ai_agent.image_processing import decode_image, jpeg_bytes, MAX_IMAGE_PIXELS
 from ai_agent.tools.base import Tool, ToolPermission
 from ai_agent.tools.files import FileSandbox
+from ai_agent.tools.atomic_files import atomic_output
 
 
 class ImageSandbox:
@@ -83,8 +84,8 @@ class ImageSandbox:
         if len(data) > 40 * 1024 * 1024:
             raise ValueError('Результат превышает 40 МБ.')
         target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open('xb') as handle:
-            handle.write(data)
+        with atomic_output(target,overwrite=False) as temporary:
+            temporary.write_bytes(data)
         return {'path': target.relative_to(self.files.workspace_dir).as_posix(),
                 'width': image.width, 'height': image.height, 'format': output_format,
                 'size_bytes': len(data), 'source_preserved': True,

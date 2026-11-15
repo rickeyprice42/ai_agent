@@ -4,6 +4,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 import re
 import zipfile
+from ai_agent.tools.atomic_files import atomic_output
 
 
 class DocumentSandbox:
@@ -44,12 +45,8 @@ class DocumentSandbox:
             )
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        _write_minimal_docx(
-            target,
-            title=normalized_title,
-            paragraphs=normalized_paragraphs,
-            bullets=normalized_bullets,
-        )
+        with atomic_output(target,overwrite=overwrite) as temporary:
+            _write_minimal_docx(temporary,title=normalized_title,paragraphs=normalized_paragraphs,bullets=normalized_bullets)
         action = "перезаписан" if existed_before else "создан"
         return (
             f"DOCX документ {action}: {self._relative_display_path(target)}\n"
@@ -82,11 +79,8 @@ class DocumentSandbox:
                 f"Лимит: {self.max_text_chars}."
             )
 
-        _append_to_docx(
-            target,
-            paragraphs=normalized_paragraphs,
-            bullets=normalized_bullets,
-        )
+        with atomic_output(target,overwrite=True) as temporary:
+            _append_to_docx(target,paragraphs=normalized_paragraphs,bullets=normalized_bullets,output_target=temporary)
         return (
             f"DOCX документ дополнен: {self._relative_display_path(target)}\n"
             f"Добавлено абзацев: {len(normalized_paragraphs)}\n"
@@ -137,7 +131,7 @@ def _write_minimal_docx(
         archive.writestr("word/document.xml", document_xml)
 
 
-def _append_to_docx(target: Path, paragraphs: list[str], bullets: list[str]) -> None:
+def _append_to_docx(target: Path, paragraphs: list[str], bullets: list[str], output_target: Path | None = None) -> None:
     with zipfile.ZipFile(target, "r") as source:
         entries = {name: source.read(name) for name in source.namelist()}
 
@@ -151,7 +145,7 @@ def _append_to_docx(target: Path, paragraphs: list[str], bullets: list[str]) -> 
     updated_xml = _insert_before_section_properties(document_xml, addition)
     entries["word/document.xml"] = updated_xml.encode("utf-8")
 
-    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(output_target or target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, content in entries.items():
             archive.writestr(name, content)
 

@@ -854,6 +854,10 @@ def register_builtin_tools(
     )
 
 
+    from ai_agent.tools.hosted_files import enable_file_process_hosts
+    enable_file_process_hosts(registry,files,documents,presentations)
+
+
 def _format_notes(memory: MemoryStore) -> str:
     notes = memory.list_notes()
     if not notes:

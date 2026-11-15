@@ -180,6 +180,8 @@ class ToolRegistry:
         if not re.fullmatch(r"\d+\.\d+\.\d+", tool.version):
             raise ValueError(f"Версия инструмента должна быть SemVer: {tool.version}")
         _adapt_legacy_builtin(tool)
+        if getattr(tool.handler,'requires_workspace_write',False) and not any(permission.risk in {'write','high'} for permission in tool.permissions):
+            raise ValueError('Writable process handlers require an explicit write/high permission.')
         _validate_schema_definition(tool.manifest.input_schema)
         _validate_schema_definition(tool.manifest.output_schema)
         self._tools[tool.name] = tool
@@ -360,12 +362,15 @@ class ToolRegistry:
                     local_cancel.set()
                     # Keep the caller/locks alive until the handler really exits.
                     executor.shutdown(wait=True)
-                    return _failure('cancelled', 'Выполнение инструмента отменено.', status='cancelled')
+                    return _failure('cancelled', 'Выполнение инструмента отменено.', status='cancelled',
+                                    details={'outcome_unknown':True} if any(p.risk!='read' for p in tool.permissions) else {})
                 remaining = deadline - perf_counter()
                 if remaining <= 0:
                     local_cancel.set()
                     executor.shutdown(wait=True)
-                    return _failure('timeout', f"Инструмент '{tool.name}' превысил таймаут {tool.timeout_seconds:g} сек.", retryable=tool.idempotent)
+                    safe_read = tool.idempotent and all(permission.risk=='read' for permission in tool.permissions)
+                    return _failure('timeout', f"Инструмент '{tool.name}' превысил таймаут {tool.timeout_seconds:g} сек.", retryable=safe_read,
+                                    details={'outcome_unknown':True} if not all(permission.risk=='read' for permission in tool.permissions) else {})
                 try:
                     raw = future.result(timeout=min(.05, remaining))
                     break
@@ -381,12 +386,14 @@ class ToolRegistry:
                 tool.name,
                 type(exc).__name__,
             )
-            return _failure("internal_error", "Инструмент завершился внутренней ошибкой.")
+            return _failure("internal_error", "Инструмент завершился внутренней ошибкой.",
+                            details={'outcome_unknown':True} if any(p.risk!='read' for p in tool.permissions) else {})
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
 
         if cancellation.is_set():
-            return _failure("cancelled", "Выполнение инструмента отменено.", status="cancelled")
+            return _failure("cancelled", "Выполнение инструмента отменено.", status="cancelled",
+                            details={'outcome_unknown':True} if any(p.risk!='read' for p in tool.permissions) else {})
         result = tool.result_adapter(raw) if tool.result_adapter else _adapt_result(raw)
         if result.ok:
             output_errors = validate_json_schema(result.output, tool.manifest.output_schema)

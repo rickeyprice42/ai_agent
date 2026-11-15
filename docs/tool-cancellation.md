@@ -97,17 +97,28 @@ at desktop/mobile widths; no physical phone or real-model acceptance is claimed.
 
 Remaining boundaries before closing AVE-75
 
-- Arbitrary in-process Python handlers cannot be forcibly terminated safely.
-  They retain ownership and remain stopping until they return. A hard upper bound
-  requires moving such handlers into isolated worker processes.
+- The isolated Python host now supports trusted importable handlers and is enabled
+  for 15 local file/Office/image tools on Ubuntu. It terminates ignoring handlers
+  and detached descendants without restarting the service. Read-only mounts and
+  per-job long-task mounts preserve permissions and data isolation. See
+  `docs/process-tool-host.md` for its contract and platform boundaries.
 - Claims from older versions without process identity, different/unverifiable
   hosts, and unsupported containment cannot use automatic recovery. They require
   a separately verified operator procedure. Recovery closes a run; it does not
   establish whether an external action succeeded or implement partial replay.
-- Lifecycle/OS fixtures cover the tested stop/restart races; arbitrary in-process
-  Python handlers still need their own isolated process host for a hard per-tool
-  termination bound without stopping the whole service.
+- Remaining network/stateful/connector callbacks still require reconstructable
+  profiles and validated egress before moving out of process. They retain the
+  cooperative/drain ownership path; uncooperative legacy threads cannot be safely
+  force-killed individually. No universal hard-stop guarantee is claimed for them.
+
+File writers now stage complete outputs before atomic publication. A failed or
+killed build cannot expose a partially replaced target. Unknown mutation outcomes
+stop the Agent batch/model loop and persist interrupted checkpoints. Idempotency
+alone no longer enables automatic mutation retries after timeout. The approved-
+action path also records unknown outcomes as interrupted and avoids false
+completion/synthesis calls. Cancellation stops remaining calls in the same batch.
 
 Cancellation does not roll back writes or external requests already performed.
-AVE-75 remains In Progress for the isolated process host. This update completes
-the supported orphan-closure flow and the tested durable shutdown scenarios.
+AVE-75 remains In Progress for migration of the remaining legacy/network profiles.
+The isolated local-tool host, supported orphan closure and tested durable shutdown
+scenarios are implemented; their evidence is kept separately from model acceptance.

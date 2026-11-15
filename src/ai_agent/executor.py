@@ -240,11 +240,12 @@ class ExecutionEngine:
             "tool_status": invocation.status,
             "attempts": invocation.attempts,
             "events": [event.type for event in invocation.events],
+            "outcome_unknown": bool(invocation.error and invocation.error.details.get('outcome_unknown')),
         }
         self.tasks.database.update_task_checkpoint(
             self.tasks.user_id,
             checkpoint["id"],
-            status=invocation.status,
+            status='interrupted' if evidence['outcome_unknown'] else invocation.status,
             observation=tool_result,
             artifacts=artifacts,
             evidence=evidence,

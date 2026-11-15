@@ -225,14 +225,19 @@ class LongTaskRunner(LLMAutomationRunner):
             return invoke
         for definition in agent.tools.list_for_model():
             tool = agent.tools.get(definition['name'])
+            from ai_agent.tools.hosted_files import HostedFileHandler
+            if isinstance(tool.handler,HostedFileHandler):
+                view_root = prefix if tool.name in {'list_workspace_files','search_workspace'} else ''
+                tool = replace(tool,handler=tool.handler.restricted_to(job,prefix,view_root=view_root))
             if tool.name in {'read_file','read_file_lines','read_pdf_pages','edit_file_exact','file_metadata','write_file','create_docx','append_docx','create_presentation'}:
                 tool = replace(tool,handler=guarded(tool.handler))
             elif tool.name=='list_workspace_files':
-                tool = replace(tool,handler=lambda args:scoped_files.format_file_list(int(args.get('limit',30))))
+                if not isinstance(tool.handler,HostedFileHandler):
+                    tool = replace(tool,handler=lambda args:scoped_files.format_file_list(int(args.get('limit',30))))
             elif tool.name=='search_workspace':
                 def search(args):
                     return scoped_files.search(args['query'],str(args.get('path','')),include_content=bool(args.get('include_content',True)),limit=int(args.get('limit',50)))
-                tool = replace(tool,handler=search)
+                if not isinstance(tool.handler,HostedFileHandler):tool = replace(tool,handler=search)
             elif tool.name=='run_code_check':
                 def check(args):
                     target = str(args.get('target','')).replace('\\','/')

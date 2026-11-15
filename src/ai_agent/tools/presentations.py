@@ -6,6 +6,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 import re
 import zipfile
+from ai_agent.tools.atomic_files import atomic_output
 
 
 PRESENTATION_CX = 12192000
@@ -117,13 +118,9 @@ class PresentationSandbox:
         target.parent.mkdir(parents=True, exist_ok=True)
         existed_before = target.exists()
         selected_theme = _theme_from_name(_select_theme_name(theme, normalized_style))
-        _write_minimal_pptx(
-            target=target,
-            title=normalized_title,
-            slides=normalized_slides,
-            theme=selected_theme,
-        )
-        _validate_pptx_package(target, expected_slides=len(normalized_slides))
+        with atomic_output(target,overwrite=overwrite) as temporary:
+            _write_minimal_pptx(target=temporary,title=normalized_title,slides=normalized_slides,theme=selected_theme)
+            _validate_pptx_package(temporary,expected_slides=len(normalized_slides))
         action = "перезаписана" if existed_before else "создана"
         return (
             f"PPTX презентация {action}: {self._relative_display_path(target)}\n"

@@ -291,8 +291,9 @@ class LLMAutomationRunner:
                 elif event.get('type')=='status' and checkpoint and event.get('phase') in {'completed','failed','blocked','cancelled','not_found','validation_error'}:
                     tool=event.get('tool');rows=self.database.list_messages(agent.memory.thread_id)
                     observation=next((row['content'] for row in reversed(rows) if row['role']=='tool' and row.get('name')==tool),'')
-                    phase=event['phase'];self.database.update_task_checkpoint(user_id,checkpoint['id'],status=phase,observation=observation[:20000],
-                        evidence={'verified':phase=='completed','tool_status':phase,'thread_id':agent.memory.thread_id},next_action='continue_agent' if phase=='completed' else 'inspect_result')
+                    phase=event['phase'];unknown=bool(event.get('outcome_unknown'))
+                    self.database.update_task_checkpoint(user_id,checkpoint['id'],status='interrupted' if unknown else phase,observation=observation[:20000],
+                        evidence={'verified':phase=='completed' and not unknown,'outcome_unknown':unknown,'tool_status':phase,'thread_id':agent.memory.thread_id},next_action='continue_agent' if phase=='completed' and not unknown else 'inspect_result')
                     checkpoint=None
                     if phase in {'failed','not_found','validation_error'}:self.database.update_task_run_usage(user_id,run['id'],failures=1)
                 if event.get('type')=='done':

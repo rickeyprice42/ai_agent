@@ -55,6 +55,7 @@ class ToolOutcome:
     approvals: list[dict] = field(default_factory=list)
     questions: list[dict] = field(default_factory=list)
     products: dict[str, dict] = field(default_factory=dict)
+    uncertain_actions: bool = False
 
     def message_artifacts(self) -> list[dict]:
         return self.artifacts + [{"_verified_product": product} for product in list(self.products.values())[:6]]
@@ -70,6 +71,7 @@ class ToolOutcome:
         self.approvals.extend(other.approvals)
         self.questions.extend(other.questions)
         self.products.update(other.products)
+        self.uncertain_actions = self.uncertain_actions or other.uncertain_actions
 
 
 MIN_RESEARCH_RESULTS = 2
@@ -241,7 +243,7 @@ class Agent:
             self.last_turn_message_id = self.memory.append_message(
                 Message(role="assistant", content=assistant_text, artifacts=direct_result.artifacts)
             )
-            self._extract_autonomous_memory(user_message_id, user_text)
+            if not direct_result.uncertain_actions:self._extract_autonomous_memory(user_message_id, user_text)
             self.last_turn_outcome = _completed_turn_outcome(direct_result)
             return assistant_text
 
@@ -334,7 +336,7 @@ class Agent:
             self.last_turn_message_id = self.memory.append_message(
                 Message(role="assistant", content=assistant_text, artifacts=completed_tools.message_artifacts())
             )
-            self._extract_autonomous_memory(user_message_id, user_text)
+            if not completed_tools.uncertain_actions:self._extract_autonomous_memory(user_message_id, user_text)
             self.last_turn_outcome = _completed_turn_outcome(completed_tools)
             return assistant_text
 
@@ -347,8 +349,8 @@ class Agent:
         self.last_turn_message_id = self.memory.append_message(
             Message(role="assistant", content=fallback, artifacts=completed_tools.message_artifacts())
         )
-        self._extract_autonomous_memory(user_message_id, user_text)
-        self.last_turn_outcome = "partial" if completed_tools.results else "failed"
+        if not completed_tools.uncertain_actions:self._extract_autonomous_memory(user_message_id, user_text)
+        self.last_turn_outcome = _completed_turn_outcome(completed_tools) if completed_tools.uncertain_actions or 'cancelled' in completed_tools.statuses else "partial" if completed_tools.results else "failed"
         return fallback
 
     def respond_stream(self, user_text: str, *, resume_outcome: ToolOutcome | None = None, resume_messages: list[Message] | None = None, clarification: bool = False, original_request: str | None = None, clarification_context: dict | None = None):
@@ -373,7 +375,7 @@ class Agent:
             self.last_turn_message_id = self.memory.append_message(
                 Message(role="assistant", content=assistant_text, artifacts=direct_result.artifacts)
             )
-            self._extract_autonomous_memory(user_message_id, user_text)
+            if not direct_result.uncertain_actions:self._extract_autonomous_memory(user_message_id, user_text)
             self.last_turn_outcome = _completed_turn_outcome(direct_result)
             yield {"type": "delta", "text": assistant_text}
             yield {
@@ -541,9 +543,9 @@ class Agent:
             self.last_turn_message_id = self.memory.append_message(
                 Message(role="assistant", content=fallback, artifacts=completed_tools.message_artifacts())
             )
-            self.last_turn_outcome = "partial" if completed_tools.results else "failed"
+            self.last_turn_outcome = _completed_turn_outcome(completed_tools) if completed_tools.uncertain_actions or 'cancelled' in completed_tools.statuses else "partial" if completed_tools.results else "failed"
             completed = True
-            self._extract_autonomous_memory(user_message_id, user_text)
+            if not completed_tools.uncertain_actions:self._extract_autonomous_memory(user_message_id, user_text)
             yield {"type": "delta", "text": fallback}
             yield {
                 "type": "done",
@@ -736,6 +738,7 @@ class Agent:
                 tool_call.arguments = {**tool_call.arguments, "detail": "precise"}
             yield {"type": "status", "text": _tool_activity_text(tool_call.name), "tool": tool_call.name, "phase": "started", "round": round_number}
             invocation_output = None
+            outcome_unknown = False
             signature = json.dumps([tool_call.name, tool_call.arguments], sort_keys=True, ensure_ascii=False, default=str)
             prior_calls = {**(previous.calls if previous else {}), **outcome.calls}
             previous_count = len(previous.tool_names) if previous else 0
@@ -791,6 +794,8 @@ class Agent:
                         tool_result = invocation.text()
                         status = invocation.status
                         invocation_output = invocation.output
+                        outcome_unknown = bool(invocation.error and invocation.error.details.get('outcome_unknown'))
+                        outcome.uncertain_actions = outcome.uncertain_actions or outcome_unknown
             self.action_log.record(
                 tool_name=tool_call.name,
                 status=status,
@@ -818,11 +823,12 @@ class Agent:
                 from ai_agent.merchant_offer import merchant_offer
                 offer=merchant_offer(invocation_output.get('json_ld',[]),str(invocation_output.get('url','')),datetime.now(timezone.utc).isoformat())
                 if offer:outcome.products[offer['url']]=offer
-            yield {"type": "status", "text": _tool_activity_text(tool_call.name, status), "tool": tool_call.name, "phase": status, "round": round_number}
+            yield {"type": "status", "text": _tool_activity_text(tool_call.name, status), "tool": tool_call.name, "phase": status, "round": round_number,
+                   **({'outcome_unknown':True} if outcome_unknown else {})}
             if tool_call.name=='ask_user' and status=='completed' and isinstance(invocation_output,dict):
                 outcome.questions.append(invocation_output)
                 yield {'type':'clarification','question':invocation_output}
-            if outcome.approvals or outcome.questions:
+            if outcome.approvals or outcome.questions or outcome.uncertain_actions or status=='cancelled':
                 break
             if previous_count + len(outcome.tool_names) >= MAX_TOOL_CALLS:
                 break
@@ -843,6 +849,16 @@ class Agent:
             yield from self._execute_tool_calls_stream([call], pending["user_prompt"], outcome=outcome)
             if outcome.approvals:
                 raise ValueError("Подтверждение истекло или не соответствует действию.")
+            if outcome.uncertain_actions or any(status!='completed' for status in outcome.statuses):
+                action_state = 'interrupted' if outcome.uncertain_actions else 'failed'
+                self.pending_chat_actions.finish(self.memory.user_id,self.memory.thread_id,approval_id,action_state,
+                    {'statuses':outcome.statuses,'artifacts':outcome.artifacts,'outcome_unknown':outcome.uncertain_actions})
+                text = _unfinished_completion_text(outcome,pending['user_prompt']) if outcome.uncertain_actions else _tool_completion_text(outcome)
+                self.last_turn_outcome = _completed_turn_outcome(outcome)
+                self.last_turn_message_id = self.memory.append_message(Message('assistant',text,artifacts=outcome.message_artifacts()))
+                yield {'type':'delta','text':text}
+                yield {'type':'done','outcome':self.last_turn_outcome,'provider':self.settings.model_provider,'model':self.settings.model_name}
+                return
             self.pending_chat_actions.finish(self.memory.user_id, self.memory.thread_id, approval_id, "completed", {"statuses":outcome.statuses,"artifacts":outcome.artifacts})
             yield {"type":"status","text":"Готовлю ответ по результату подтверждённого действия…","phase":"synthesizing"}
             messages=[Message("assistant","",tool_calls=[call]),*outcome.messages,Message("user","Подтверждённое действие уже выполнено. Продолжи исходную просьбу с его результата. Не выполняй завершённое действие повторно.")]
@@ -945,6 +961,7 @@ class Agent:
         return arguments
 
     def _ensure_requested_research_docx(self, user_text: str, outcome: ToolOutcome) -> None:
+        if outcome.uncertain_actions:return
         if getattr(self, "automation_disable_fallback_files", False) or self.memory.is_shared_thread():
             return
         if outcome.artifacts or "web_search" not in outcome.tool_names:
@@ -1134,6 +1151,7 @@ class Agent:
 
 
 def _tool_completion_text(outcome: ToolOutcome) -> str:
+    if outcome.uncertain_actions:return _unfinished_completion_text(outcome)
     if outcome.artifacts:
         if outcome.preliminary_research:
             return _PRELIMINARY_RESEARCH + " Файл с предварительными результатами можно скачать ниже."
@@ -1220,7 +1238,7 @@ def _completed_turn_outcome(outcome: ToolOutcome) -> str:
 
 
 def _stop_tool_loop(outcome: ToolOutcome) -> bool:
-    return "blocked" in outcome.statuses or len(outcome.tool_names) >= MAX_TOOL_CALLS
+    return outcome.uncertain_actions or bool({'blocked','cancelled'} & set(outcome.statuses)) or len(outcome.tool_names) >= MAX_TOOL_CALLS
 
 
 def _searches_since_read(*outcomes: ToolOutcome | None) -> int:
@@ -1277,6 +1295,8 @@ def _runtime_system_prompt(system_prompt: str, phase: str) -> str:
 
 
 def _unfinished_completion_text(outcome: ToolOutcome, user_text: str = "") -> str:
+    if outcome.uncertain_actions:
+        return 'Выполнение остановлено: результат последнего изменения неизвестен. Уже выполненные действия не откатывались и не будут автоматически повторены. Проверьте файлы и внешние действия перед продолжением.'
     if outcome.products:
         return 'Проверенные карточки товаров доступны ниже. Полная проверка запроса ещё не завершена; нужный размер и доставку следует уточнить отдельно.'
     if not outcome.artifacts:

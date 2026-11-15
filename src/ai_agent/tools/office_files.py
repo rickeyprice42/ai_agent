@@ -9,6 +9,7 @@ from zipfile import ZipFile, ZIP_DEFLATED, BadZipFile
 
 from ai_agent.tools.base import Tool, ToolPermission
 from ai_agent.tools.files import FileSandbox
+from ai_agent.tools.atomic_files import atomic_output
 
 SUFFIXES = {'.docx', '.docm', '.dotm', '.xlsx', '.xlsm', '.xltm', '.pptx', '.pptm', '.potm'}
 SPREADSHEETS = {'.xlsx', '.xlsm', '.xltm'}
@@ -250,8 +251,8 @@ class OfficeSandbox:
                 package.writestr(info, entries[info.filename])
         if sha256(source.read_bytes()).hexdigest() != expected_sha256.lower():
             raise ValueError('stale_file: исходник изменился во время обработки.')
-        with target.open('xb') as handle:
-            handle.write(result.getvalue())
+        with atomic_output(target,overwrite=False) as temporary:
+            temporary.write_bytes(result.getvalue())
         return {'path': target.relative_to(self.files.workspace_dir).as_posix(), 'size_bytes': target.stat().st_size,
                 'changed_parts': sorted(changed), 'macros_preserved': True, 'source_preserved': True,
                 'note': 'Макросы сохранены побайтно и не выполнялись. Excel пересчитает формулы при открытии.'}

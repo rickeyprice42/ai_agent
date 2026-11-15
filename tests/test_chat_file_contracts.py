@@ -212,6 +212,9 @@ class ChatFileContractsTests(unittest.TestCase):
                 ModelResponse(text='Номер требует проверки по каталогу.'),
             ]) as agent:
                 seen = []
+                # This tests argument normalization with a synthetic handler,
+                # independent of local image-provider credentials.
+                agent.tools.get('analyze_image').availability = lambda: (True,None)
                 agent.tools.get('analyze_image').handler = lambda args: seen.append(args) or ToolResult('completed', output={'text': 'Orange jersey', 'provider': 'test', 'model': 'test'})
                 agent.policy.image_attachment_consent = {'attachments/npc.png'}
                 agent.respond('Найди, какой ID у этого скина персонажа')

@@ -11,6 +11,7 @@ import subprocess
 from uuid import uuid4
 
 from ai_agent.types import WorkspaceFile
+from ai_agent.tools.atomic_files import atomic_output
 
 
 class FileSandbox:
@@ -316,7 +317,8 @@ class FileSandbox:
             )
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        with atomic_output(target,overwrite=overwrite) as temporary:
+            temporary.write_text(content,encoding='utf-8')
         action = "перезаписан" if existed_before else "создан"
         return (
             f"Файл {action}: {self._relative_display_path(target)}\n"
