@@ -60,6 +60,12 @@ class HostedHandler:
     def restricted_to(self, workspace, subpath):
         return HostedHandler(replace(self.spec,workspace=Path(workspace),workspace_subpath=subpath),timeout_seconds=self.timeout_seconds)
 
+    def _command(self,roots):
+        return isolated_command(self.spec.workspace,
+            [sys.executable,'-I','/avelin_code/0/ai_agent/tools/process_worker.py'],
+            code_roots=roots,workspace_subpath=self.spec.workspace_subpath,read_only_workspace=self.spec.read_only_workspace)
+
+
     def __call__(self, arguments, context=None):
         context = context or CURRENT_EXECUTION.get()
         payload = {'entrypoint':self.spec.entrypoint,'configuration':self.spec.configuration,
@@ -70,9 +76,7 @@ class HostedHandler:
             return _failed('host_input_limit','Аргументы инструмента превышают предел процесса.')
         roots = (SOURCE_ROOT,) if self.spec.code_root.resolve()==SOURCE_ROOT.resolve() else (SOURCE_ROOT,self.spec.code_root)
         try:
-            command = isolated_command(self.spec.workspace,
-                [sys.executable,'-I','/avelin_code/0/ai_agent/tools/process_worker.py'],
-                code_roots=roots,workspace_subpath=self.spec.workspace_subpath,read_only_workspace=self.spec.read_only_workspace)
+            command = self._command(roots)
         except (ValueError,OSError):
             return _failed('host_unavailable','Изолированный Python-исполнитель недоступен.',status='blocked')
         try:

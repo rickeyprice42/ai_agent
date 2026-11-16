@@ -858,6 +858,8 @@ def register_builtin_tools(
 
     from ai_agent.tools.hosted_files import enable_file_process_hosts
     enable_file_process_hosts(registry,files,documents,presentations)
+    from ai_agent.tools.hosted_http import enable_http_process_host
+    enable_http_process_host(registry,http)
 
 
 def _format_notes(memory: MemoryStore) -> str:

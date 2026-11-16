@@ -62,3 +62,28 @@ egress are implemented. The host is not yet a universal execution contract for
 every legacy callback. Code/Git/shell and generated pure-data tools keep their
 existing process runners. Direct low-level sandbox calls outside ToolRegistry do
 not acquire this host's lifecycle guarantees.
+
+
+## Fixed public HTTP transport (16 November)
+
+On Linux, `http_request` uses a separate, fixed trusted GET/HEAD broker. Generic
+`ProcessHandlerSpec` profiles still have no network capability. The broker shares
+the host network only to run the existing `HttpSandbox` transport: URL and header
+validation, validation of each redirect, and DNS-address pinning on each socket.
+This is a trusted-code egress boundary, not a kernel destination firewall or an
+execution environment for arbitrary/generated network callbacks.
+
+The broker mounts an empty read-only temporary workspace, code/runtime and only
+DNS/NSS/public CA configuration. It does not inherit provider credentials, live
+clients, the application database or user files. A model cannot select its import
+entry point, enable private networks or change this configuration through tool
+arguments. The private-network compatibility option is blocked for this profile.
+Windows registration retains the existing cooperative HTTP implementation.
+
+The registry deadline/cancel signal kills and drains the broker PID namespace,
+including detached descendants, before terminal status. Blocking DNS or socket
+work can therefore no longer keep this particular tool alive indefinitely. No
+remote request already received by its server is rolled back. Research/search,
+browser, stateful and connector callbacks still require their own profiles;
+AVE-75 remains open for those migrations. See
+`reports/qa/ave75-http-host-2026-11-16.md` for scoped evidence.
