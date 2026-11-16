@@ -44,6 +44,7 @@ def register_coding_tool_pack(registry: ToolRegistry, files: FileSandbox) -> Non
                     "path": STRING,
                     "sha256": STRING,
                     "start_line": {"type": "integer"},
+                    "start_column": {"type": "integer"},
                     "end_line": {"type": "integer"},
                     "total_lines": {"type": "integer"},
                     "content": STRING,

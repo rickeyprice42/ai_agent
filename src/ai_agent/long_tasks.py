@@ -5,6 +5,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from hashlib import sha256
 import json
 import re
+import shutil
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -16,6 +17,8 @@ from ai_agent.tools.base import Tool, ToolRegistry
 from ai_agent.tools.files import FileSandbox
 from ai_agent.tools.code_tools import CodeSandbox
 from ai_agent.types import Message
+from ai_agent.llm.base import ProviderError
+from ai_agent.tools.atomic_files import atomic_output
 
 DEFAULT_BUDGET = {'max_steps': 80, 'max_failures': 8, 'max_seconds': 7200,
                   'max_tokens': 800000, 'max_cost_micros': 0}
@@ -168,7 +171,7 @@ class LongTaskPlans:
                 if current['state']!='paused' or not link:
                     raise PlanConflict('Возобновить можно только приостановленный запуск.')
                 waiting = link['outcome']=='waiting_approval'
-                if not waiting and (link['outcome'] not in {'paused','step_completed'} or unknown):
+                if not waiting and (link['outcome'] not in {'paused','step_completed','step_continued'} or unknown):
                     raise PlanConflict('Исполнитель ещё останавливается или результат действия неизвестен. Откройте диалог работы перед продолжением.')
                 if not waiting:
                     connection.execute("UPDATE automation_llm_runs SET outcome='step_completed' WHERE run_id=?",(plan['run_id'],))
@@ -178,6 +181,7 @@ class LongTaskPlans:
 
 
 class LongTaskRunner(LLMAutomationRunner):
+    continuable_outcomes = frozenset({'step_completed','step_continued'})
     allowed_tools = ALLOWED_TOOLS | {'read_file_lines','read_pdf_pages','search_workspace','edit_file_exact','run_code_check'}
     # Reasoning models can take longer than one automation's 30-second window.
     # Keep each request under the worker's 180-second lease window.
@@ -185,7 +189,7 @@ class LongTaskRunner(LLMAutomationRunner):
 
     def run(self,user_id,run_id):
         link = self.get(user_id,run_id=run_id)
-        if link and link['outcome']=='step_completed':
+        if link and link['outcome'] in self.continuable_outcomes:
             self.database.set_metadata('long-task-context-floor:'+run_id,link.get('last_result_message_id') or '')
         return super().run(user_id,run_id)
 
@@ -193,6 +197,8 @@ class LongTaskRunner(LLMAutomationRunner):
         agent = super()._agent(user_id,link,run)
         agent.context.history_after_message_id = self.database.get_metadata('long-task-context-floor:'+run['id']) or None
         agent.context.turn_reserve_tokens = min(8192,max(2048,agent.context.context_window_tokens//4))
+        agent.long_task_step_report = None
+        agent.long_task_checkpoint_floor = max((cp['sequence'] for cp in self.database.list_task_checkpoints(user_id,run['id'],500)),default=0)
         if getattr(agent,'_long_task_tools_scoped',False):
             return agent
         prefix = agent.automation_output_prefix
@@ -201,10 +207,36 @@ class LongTaskRunner(LLMAutomationRunner):
         if job.resolve().relative_to(root).as_posix()!=prefix:
             raise ValueError('Папка задачи перенаправлена за пределы утверждённой области.')
         job.mkdir(parents=True,exist_ok=True)
+        # A job sees only its own directory. Stage the explicitly attached
+        # inputs before restricting tools, rather than granting the whole user
+        # workspace to the worker. Never infer authority from model text.
+        with self.database.connect() as connection:
+            plan = connection.execute('SELECT origin_thread_id,source_message_id FROM long_task_plans WHERE run_id=? AND user_id=?',
+                (run['id'],user_id)).fetchone()
+        source = next((row for row in self.database.list_messages(plan['origin_thread_id'])
+            if row['id']==plan['source_message_id'] and row['role']=='user'),None)
+        inputs = []
+        for item in (source or {}).get('artifacts',[]):
+            if not item.get('_user_attachment'):continue
+            path = str(item.get('path',''))
+            if not re.fullmatch(r'attachments/[a-f0-9]{32}/[^/\\]+',path):
+                raise ProviderError('Некорректный путь входного вложения. Этап остановлен до обращения к модели.','task_input_missing')
+            target = job/path
+            if not target.resolve().is_relative_to(job.resolve()):
+                raise ProviderError('Вложение выходит за пределы папки задачи.','task_input_missing')
+            if not target.exists():
+                try:
+                    original = agent.files.resolve_download_path(path)
+                    with atomic_output(target,overwrite=False) as temporary:
+                        shutil.copyfile(original,temporary)
+                except (ValueError,OSError) as exc:
+                    raise ProviderError(f'Входное вложение недоступно: {path}. Этап остановлен до обращения к модели.','task_input_missing') from exc
+            inputs.append(path)
+        agent.long_task_inputs = inputs
         scoped_files = FileSandbox(job)
         scoped_code = CodeSandbox(job)
         registry = ToolRegistry()
-        def guarded(base):
+        def guarded(base,base_name):
             def invoke(args):
                 args = dict(args)
                 raw = str(args.get('path','')).replace('\\','/')
@@ -217,6 +249,8 @@ class LongTaskRunner(LLMAutomationRunner):
                 if explicit_plan and not raw.startswith(prefix+'/'):
                     raise ValueError('Файл относится к другой задаче.')
                 path = raw if raw.startswith(prefix+'/') else prefix+'/'+raw
+                if base_name not in {'read_file','read_file_lines','read_pdf_pages','file_metadata'} and path.startswith(prefix+'/attachments/'):
+                    raise ValueError('Входные вложения доступны только для чтения; сохраняйте изменения отдельным файлом.')
                 resolved = (root/path).resolve()
                 if not resolved.is_relative_to(job.resolve()):
                     raise ValueError('Файл выходит за пределы папки задачи.')
@@ -230,7 +264,7 @@ class LongTaskRunner(LLMAutomationRunner):
                 view_root = prefix if tool.name in {'list_workspace_files','search_workspace'} else ''
                 tool = replace(tool,handler=tool.handler.restricted_to(job,prefix,view_root=view_root))
             if tool.name in {'read_file','read_file_lines','read_pdf_pages','edit_file_exact','file_metadata','write_file','create_docx','append_docx','create_presentation'}:
-                tool = replace(tool,handler=guarded(tool.handler))
+                tool = replace(tool,handler=guarded(tool.handler,tool.name))
             elif tool.name=='list_workspace_files':
                 if not isinstance(tool.handler,HostedFileHandler):
                     tool = replace(tool,handler=lambda args:scoped_files.format_file_list(int(args.get('limit',30))))
@@ -245,6 +279,15 @@ class LongTaskRunner(LLMAutomationRunner):
                     return scoped_code.run_check(args['runner'],target,int(args.get('timeout_seconds',60)))
                 tool = replace(tool,handler=check)
             registry.register(tool)
+        def report_step(args):
+            if agent.long_task_step_report and agent.long_task_step_report['status']=='blocked':
+                return agent.long_task_step_report
+            agent.long_task_step_report = dict(args)
+            return dict(args)
+        registry.register(Tool(name='report_long_task_step',description='Фиксирует итог текущего хода этапа: completed — этап выполнен, continue — продолжить тот же этап следующим ходом в пределах общего бюджета, blocked — невозможно продолжать без внешних данных/решения. В summary для continue укажи выполненные действия, точные пути/SHA и оставшуюся работу; не повторяй выполненное.',
+            schema={'type':'object','properties':{'status':{'type':'string','enum':['completed','continue','blocked']},
+                'summary':{'type':'string','minLength':5,'maxLength':2000}},'required':['status','summary'],'additionalProperties':False},
+            output_schema={'type':'object','additionalProperties':True},handler=report_step,timeout_seconds=5))
         agent.tools = registry
         agent._long_task_tools_scoped = True
         return agent
@@ -264,22 +307,90 @@ class LongTaskRunner(LLMAutomationRunner):
         return (f"Общая утверждённая цель: {task.description}\nИсходная просьба пользователя (дословно):\n{row['request_text'] or task.description}\n"
             + "Пользователь уже утвердил этот план кнопкой. Условие дождаться утверждения выполнено; доступны только инструменты утверждённой области.\nПроверки результата: " + '; '.join(checks)
             + f"\nЗавершённые этапы (выдержки; полные результаты сохранены в истории):\n{completed or 'Пока нет'}\nТекущий этап {step.position}: {step.description}\n\n"
+            + (f"Сохранённый прогресс текущего этапа, который ещё НЕ завершён:\n{step.result}\nПродолжи с этого места, не повторяя уже подтверждённые действия.\n" if step.result else '')
             + "Выполни только текущий этап целиком, самостоятельно выбирая инструменты. Уточняй у пользователя только действительно недостающие решения или необходимые разрешения. "
             "Фиксируй результат в файлах и проверяй его инструментами; не отмечай выполнение без evidence. "
             f"Рабочая папка: outputs/tasks/{row['id']}/. Все относительные пути из плана считаются внутри неё; не добавляй этот префикс повторно. "
             "Используй фактические пути из результатов инструментов. Для изменения уже созданного файла используй read_file_lines и edit_file_exact с SHA. "
             "Запуск программы требует отдельного согласия. Ничего не публикуй и не отправляй вовне. "
+            "Перед итоговым ответом вызови report_long_task_step: status=completed только при выполненном этапе, status=continue если нужно продолжить тот же этап следующим ходом, status=blocked при внешнем препятствии. "
+            "Промежуточные служебные отчёты делай краткими (до 3000 символов), сохраняя точные выводы и проверки; основной результат важнее объёмного пересказа исходника. "
+            "В одном ходе доступно до 11 раундов инструментов: оставь место для записи результата и report_long_task_step. "
+            "Для исходника в несколько сотен строк читай диапазонами около 100 строк, используя next_start_line/next_start_column при усечении; не перечитывай уже полученные диапазоны. "
+            "Отчёт о препятствии не заменяет результат этапа. Входные вложения скопированы в attachments/ внутри папки задачи и доступны только для чтения. "
             "Если этап не может быть выполнен, явно сообщи о препятствии. Нельзя выдавать концепт за готовую релизную игру.")
 
     def _finish(self,user_id,run,agent,outcome,reason,active_seconds=0):
         if outcome == 'completed':
+            report = getattr(agent,'long_task_step_report',None)
+            link = self.get(user_id,run_id=run['id'])
+            rows = self.database.list_messages(link['thread_id']) if link else []
+            final = next((row['content'] for row in reversed(rows) if row['role']=='assistant'),'')
+            if report and report['status']=='continue':
+                return self._continue_stage(user_id,run,agent,report,rows,active_seconds)
+            # Compatibility safety net for older model turns that predate the
+            # structured report. An explicit blocker is never success evidence.
+            blocked = re.search(r'(?:этап\s*\d*\s*(?:заблокирован|не выполнен)|stage\s*\d*\s*(?:is\s+)?blocked)',final,re.I)
+            if not report:
+                outcome,reason = 'partial','Нет явного подтверждения результата через report_long_task_step. Последующие этапы не запускались.'
+            elif report['status']=='blocked' or blocked:
+                outcome,reason = 'partial', (report['summary'] if report else 'Этап заблокирован. Последующие этапы не запускались; откройте диалог работы.')
             task = TaskManager(self.database,user_id).get_task(run['task_id'])
             step = TaskManager(self.database,user_id).running_step(task)
             evidence = [cp for cp in self.database.list_task_checkpoints(user_id,run['id'],500)
-                if step and cp.get('step_id')==step.id and cp['status']=='completed' and cp.get('evidence',{}).get('verified')]
+                if step and cp.get('step_id')==step.id and cp['tool_name']!='report_long_task_step' and cp['status']=='completed' and cp.get('evidence',{}).get('verified')]
             if not evidence:
                 outcome,reason = 'partial','Этап не подтверждён выполненными инструментами. Нужна проверка в диалоге работы.'
+            if outcome=='completed' and agent and step:
+                # Explicit output paths are executable acceptance checks, not
+                # just prose for the model. A Markdown blocker cannot replace
+                # a promised HTML deliverable.
+                required_text = step.description
+                if not any(item.status=='pending' for item in task.steps):
+                    required_text += '\n'+task.description
+                paths = set(re.findall(r'outputs/[\w./-]+\.(?:html|md|css|js|json|txt|docx|pptx)\b',required_text,re.I))
+                for path in paths:
+                    try:
+                        target = agent.files.resolve_download_path(agent.automation_output_prefix+'/'+path)
+                        if not target.stat().st_size:raise ValueError('Empty output')
+                    except (ValueError,OSError):
+                        outcome,reason = 'partial',f'Не создан обязательный результат этапа: {path}. Последующие этапы не запускались.'
+                        break
         return super()._finish(user_id,run,agent,outcome,reason,active_seconds)
+
+    def _continue_stage(self,user_id,run,agent,report,rows,active_seconds):
+        task=TaskManager(self.database,user_id).get_task(run['task_id'])
+        step=TaskManager(self.database,user_id).running_step(task)
+        checkpoints=self.database.list_task_checkpoints(user_id,run['id'],500)
+        progress=[cp for cp in checkpoints if step and cp.get('step_id')==step.id
+            and cp['sequence']>agent.long_task_checkpoint_floor and cp['tool_name']!='report_long_task_step'
+            and cp['status']=='completed' and cp.get('evidence',{}).get('verified')]
+        if not progress or any(cp['status'] in {'started','interrupted','cancelled'} for cp in checkpoints):
+            return super()._finish(user_id,run,agent,'partial','Нет проверенного прогресса или результат действия неизвестен. Автоматическое продолжение остановлено.',active_seconds)
+        final=next((row for row in reversed(rows) if row['role']=='assistant'),None)
+        link=self.get(user_id,run_id=run['id'])
+        artifacts=[]
+        for item in {item['path']:item for item in [*link['artifacts'],*(final.get('artifacts',[]) if final else [])] if item.get('path')}.values():
+            if not item['path'].startswith(agent.automation_output_prefix+'/'):continue
+            try:agent.files.resolve_download_path(item['path'])
+            except (ValueError,OSError):continue
+            artifacts.append(item)
+        # Same lease/CAS rules as finalization: cancellation wins and the step
+        # remains running. Only a known completed turn is eligible for replay.
+        control=None
+        with self.database.connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            current=connection.execute('SELECT * FROM task_runs WHERE id=? AND user_id=?',(run['id'],user_id)).fetchone()
+            if not current or current['state']!='running' or current['worker_id']!=self.worker_id or current['plan_version']!=run['plan_version']:
+                return
+            control=current['control_requested']
+            if not control:
+                connection.execute("UPDATE task_runs SET state='queued',worker_id=NULL,lease_expires_at=NULL,failure_reason=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",(run['id'],))
+                connection.execute('UPDATE task_steps SET result=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status=\'running\'',(report['summary'],step.id))
+                connection.execute("UPDATE automation_llm_runs SET outcome='step_continued',result=?,artifacts_json=?,active_seconds=active_seconds+?,last_result_message_id=?,updated_at=CURRENT_TIMESTAMP WHERE run_id=? AND user_id=?",
+                    (report['summary'],json.dumps(artifacts,ensure_ascii=False),max(0,active_seconds),final['id'] if final else None,run['id'],user_id))
+        if control:
+            return super()._finish(user_id,run,agent,control,'Остановка запрошена пользователем.',active_seconds)
 
 
 def process_long_tasks(service,limit=1):

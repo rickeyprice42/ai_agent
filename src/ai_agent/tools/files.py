@@ -86,6 +86,7 @@ class FileSandbox:
             "path": self._relative_display_path(target),
             "sha256": _file_sha256(target),
             "start_line": start,
+            "start_column": max(1,int(start_column)),
             "end_line": last,
             "total_lines": len(lines),
             "content": ''.join(chunks),

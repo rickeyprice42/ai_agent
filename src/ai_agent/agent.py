@@ -266,7 +266,7 @@ class Agent:
                     include_task_queue=task_queue,
                 )
                 response = self.provider.generate(
-                    system_prompt=_runtime_system_prompt(context.system_prompt, phase),
+                    system_prompt=_runtime_system_prompt(context.system_prompt, phase,stage_report=self.tools.has('report_long_task_step')),
                     messages=self._provider_messages(context, turn_messages),
                     tools=tool_definitions,
                 )
@@ -294,7 +294,7 @@ class Agent:
                 raise
 
             if response.tool_calls:
-                if phase == "final":
+                if phase == "final" and not _only_stage_report(response.tool_calls,tool_definitions):
                     break
                 turn_messages.append(Message(role="assistant", content=response.text, tool_calls=response.tool_calls, provider_items=response.provider_items))
                 outcome = self._execute_tool_calls(response.tool_calls, user_text, previous=completed_tools,
@@ -311,9 +311,11 @@ class Agent:
                     assistant_text=outcome.questions[0]['prompt']
                     self.last_turn_message_id=self.memory.append_message(Message(role='assistant',content=assistant_text,artifacts=completed_tools.message_artifacts()))
                     return assistant_text
-                if _stop_tool_loop(completed_tools):
-                    break
-                continue
+                if phase=='final':
+                    response.text=(getattr(self,'long_task_step_report',None) or {}).get('summary') or response.text
+                else:
+                    if _stop_tool_loop(completed_tools) and not _can_finalize_stage(self,completed_tools):break
+                    continue
 
             self._ensure_requested_research_docx(user_text, completed_tools)
             if self._missing_requested_docx(user_text, completed_tools) and "research_quality_gate" not in completed_tools.tool_names and not file_repair_requested and attempt < MAX_TOOL_ROUNDS - 1:
@@ -410,7 +412,7 @@ class Agent:
                 )
                 response = None
                 for chunk in self.provider.stream(
-                    system_prompt=_runtime_system_prompt(context.system_prompt, phase),
+                    system_prompt=_runtime_system_prompt(context.system_prompt, phase,stage_report=self.tools.has('report_long_task_step')),
                     messages=self._provider_messages(context, turn_messages),
                     tools=tool_definitions,
                 ):
@@ -450,7 +452,7 @@ class Agent:
                         )
                         message_id = None
                         partial = ""
-                    if phase == "final":
+                    if phase == "final" and not _only_stage_report(response.tool_calls,tool_definitions):
                         break
                     turn_messages.append(Message(role="assistant", content=response.text, tool_calls=response.tool_calls, provider_items=response.provider_items))
                     outcome = ToolOutcome()
@@ -478,9 +480,11 @@ class Agent:
                         yield {'type':'delta','text':assistant_text}
                         yield {'type':'done','outcome':self.last_turn_outcome,'provider':self.settings.model_provider,'model':self.settings.model_name}
                         return
-                    if _stop_tool_loop(completed_tools):
-                        break
-                    continue
+                    if phase=='final':
+                        response.text=(getattr(self,'long_task_step_report',None) or {}).get('summary') or response.text
+                    else:
+                        if _stop_tool_loop(completed_tools) and not _can_finalize_stage(self,completed_tools):break
+                        continue
 
                 self._ensure_requested_research_docx(contract_text, completed_tools)
                 if self._missing_requested_docx(contract_text, completed_tools) and "research_quality_gate" not in completed_tools.tool_names and not file_repair_requested and attempt < MAX_TOOL_ROUNDS - 1:
@@ -746,7 +750,8 @@ class Agent:
                 tool_result = "Этот инструмент не доступен для текущего запроса или этапа. Выполни исходную просьбу доступными средствами; обычный ответ не требует изменения очереди задач."
                 status = "validation_error"
                 arguments = tool_call.arguments
-            elif previous_count + len(outcome.tool_names) >= MAX_TOOL_CALLS:
+            elif previous_count + len(outcome.tool_names) >= MAX_TOOL_CALLS and not (
+                    tool_call.name=='report_long_task_step' and allowed_tools=={'report_long_task_step'} and self.tools.has(tool_call.name)):
                 tool_result = "Достигнут предел вызовов инструментов за один запрос. Продолжи отдельным сообщением."
                 status = "blocked"
                 arguments = tool_call.arguments
@@ -1254,7 +1259,7 @@ def _searches_since_read(*outcomes: ToolOutcome | None) -> int:
 
 def _turn_phase(outcome: ToolOutcome, attempt: int) -> str:
     searches = _searches_since_read(outcome)
-    if attempt >= MAX_TOOL_ROUNDS - 1 or searches > MAX_SEARCHES_BEFORE_READ:
+    if attempt >= MAX_TOOL_ROUNDS - 1 or len(outcome.tool_names)>=MAX_TOOL_CALLS or searches > MAX_SEARCHES_BEFORE_READ:
         return "final"
     return "read_sources" if searches >= MAX_SEARCHES_BEFORE_READ or _repeated_discovery(outcome) else "normal"
 
@@ -1277,18 +1282,32 @@ def _repeated_discovery(*outcomes: ToolOutcome | None) -> bool:
 
 def _tools_for_phase(tools: list[dict], phase: str) -> list[dict]:
     if phase == "final":
-        return []
+        return [tool for tool in tools if tool['name']=='report_long_task_step']
     if phase == "read_sources":
         return [tool for tool in tools if tool["name"] != "web_search"]
     return tools
 
 
-def _runtime_system_prompt(system_prompt: str, phase: str) -> str:
+def _only_stage_report(calls,definitions):
+    return len(calls)==1 and calls[0].name=='report_long_task_step' and any(tool['name']=='report_long_task_step' for tool in definitions)
+
+
+def _can_finalize_stage(agent,outcome):
+    return agent.tools.has('report_long_task_step') and not outcome.uncertain_actions and not {'blocked','cancelled'} & set(outcome.statuses)
+
+
+def _runtime_system_prompt(system_prompt: str, phase: str, *, stage_report=False) -> str:
     # Guidance is ephemeral control state, never an additional user request.
     # Reading a source resets the phase and must remove the search restriction.
     if phase == "normal":
         return system_prompt
     hint = _FINALIZE_FROM_EVIDENCE if phase == "final" else _READ_SOURCE_AFTER_SEARCH
+    if phase=='final' and stage_report:
+        hint=('Работа инструментами в этом ходе закончена. Доступен только report_long_task_step: вызови его один раз, '
+              'status=completed только если текущий этап действительно выполнен и проверен; status=continue если осталась работа, которую можно продолжить следующим ходом; '
+              'status=blocked только при внешнем препятствии, требующем данных или решения пользователя. '
+              'Лимит текущего хода не является внешним препятствием: для него используй continue и передай точные пути, SHA, непрочитанные диапазоны и оставшуюся работу. '
+              'Сохранение отчёта о препятствии не является выполнением этапа. Не вызывай другие инструменты.')
     return (system_prompt + "\n\n[Внутреннее управление текущим шагом агента]\n"
             "Это временная инструкция среды выполнения, а не просьба или ограничение пользователя. "
             "Не приписывай её пользователю и не описывай её как его указание.\n" + hint)

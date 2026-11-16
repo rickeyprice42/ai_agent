@@ -49,6 +49,14 @@ def isolated_agent(responses):
 
 
 class RuntimeAuditTests(unittest.TestCase):
+    def test_past_chat_search_result_passes_the_registered_output_contract(self):
+        with isolated_agent([]) as agent:
+            source=agent.memory.database.create_chat_thread(agent.memory.user_id,'Игра со звёздами')
+            agent.memory.database.add_message('user','В игре собираем звёзды и получаем очки.',thread_id=source['id'])
+            result=agent.tools.invoke('search_past_chats',{'query':'звёзды'})
+            self.assertTrue(result.ok,result.text())
+            self.assertIn('собираем',result.text())
+
     def test_shared_chat_exposes_public_tools_and_rejects_forged_private_call(self):
         responses = [
             ModelResponse(tool_calls=[ToolCall("read_file", {"path": "private.txt"}, "forged")]),

@@ -77,6 +77,7 @@ class BudgetProvider:
 
 
 class LLMAutomationRunner:
+    continuable_outcomes = frozenset({'step_completed'})
     allowed_tools = ALLOWED_TOOLS
     max_provider_timeout = 120
 
@@ -158,7 +159,7 @@ class LLMAutomationRunner:
         run=manager.acquire_durable_run(self.worker_id,180,run_id=run_id)
         if run is None:return
         link=self.get(user_id,run_id=run_id)
-        if link is not None and link['outcome']!='step_completed':
+        if link is not None and link['outcome'] not in self.continuable_outcomes:
             if link['outcome']=='waiting_approval':
                 manager.set_run_state(run_id,'waiting_approval',worker_id=self.worker_id,failure_reason='Откройте диалог автоматизации и подтвердите ожидающее действие.')
             else:

@@ -71,6 +71,7 @@ class LongTaskIndependentReview(unittest.TestCase):
         # A deliberately tiny playable CLI prototype, not a claim of a full game.
         self.fixture.provider=automation_fixture.Provider([
             ModelResponse(tool_calls=[ToolCall('write_file',{'path':'concept.md','content':'Guess a number from 1 to 10. Feedback says lower, higher or correct.'})]),
+            ModelResponse(tool_calls=[ToolCall('report_long_task_step',{'status':'completed','summary':'Концепция сохранена в concept.md.'})]),
             ModelResponse(text='Концепция сохранена в concept.md.')])
         self.service.process_long_task_queue()
         self.assertEqual(self.plans.get(self.plan['id'])['run']['state'],'queued')
@@ -88,6 +89,7 @@ class LongTaskIndependentReview(unittest.TestCase):
             ModelResponse(tool_calls=[ToolCall('write_file',{'path':'game.py','content':game}),
                                       ToolCall('write_file',{'path':'tests/test_game.py','content':tests})]),
             ModelResponse(tool_calls=[ToolCall('run_code_check',{'runner':'python_unittest','target':'tests','timeout_seconds':10})]),
+            ModelResponse(tool_calls=[ToolCall('report_long_task_step',{'status':'completed','summary':'Код создан; три проверки прошли.'})]),
             ModelResponse(text='Первая CLI-версия готова; три проверки игровой обратной связи прошли.')])
         self.service._agents.clear()
         self.service.process_long_task_queue()

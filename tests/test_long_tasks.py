@@ -15,6 +15,9 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 Provider = fixtures.Provider
 
+def completed_report():
+    return ModelResponse(tool_calls=[ToolCall('report_long_task_step',{'status':'completed','summary':'Результат текущего этапа сохранён и проверен.'})])
+
 
 class LongTaskTests(unittest.TestCase):
     setUp = fixtures.LLMAutomationTests.setUp
@@ -78,7 +81,7 @@ class LongTaskTests(unittest.TestCase):
         self.assertFalse((path.parent/'__pycache__').exists())
         self.service._agents.clear()
         agent = self.service.agent_for_user(self.user,plan['work_thread_id'])
-        agent.provider = Provider([ModelResponse(text='Файл проверен компилятором, этап завершён.')])
+        agent.provider = Provider([completed_report(),ModelResponse(text='Файл проверен компилятором, этап завершён.')])
         approval = agent.pending_chat_actions.list(self.user,plan['work_thread_id'])[0]
         _,events = self.service.decide_chat_approval(self.user,plan['work_thread_id'],approval['id'],'approved')
         list(events)
@@ -122,7 +125,7 @@ class LongTaskTests(unittest.TestCase):
         plan = self.approve(self.draft())
         contents = [('concept.md','# Concept\nAvoid the moving blocks.'),('index.html','<!doctype html><title>Beta</title><button>Play</button>'),('beta-notes.md','# Beta\nThree verified files.')]
         for index,(name,content) in enumerate(contents):
-            self.provider = Provider([ModelResponse(tool_calls=[ToolCall('write_file',{'path':name,'content':content})]),ModelResponse(text=f'Этап {index+1} выполнен; файл сохранён.')])
+            self.provider = Provider([ModelResponse(tool_calls=[ToolCall('write_file',{'path':name,'content':content})]),completed_report(),ModelResponse(text=f'Этап {index+1} выполнен; файл сохранён.')])
             self.service._agents.clear()
             runs = self.service.process_long_task_queue()
             self.assertEqual(len(runs),1)
@@ -140,10 +143,10 @@ class LongTaskTests(unittest.TestCase):
     def test_next_phase_uses_verified_handoff_without_replaying_large_old_tool_outputs(self):
         plan = self.approve(self.draft())
         large = 'OLD_PHASE_CONTENT_' * 1000
-        self.provider = Provider([ModelResponse(tool_calls=[ToolCall('write_file',{'path':'concept.md','content':large})]),ModelResponse(text='Концепт сохранён в concept.md.')])
+        self.provider = Provider([ModelResponse(tool_calls=[ToolCall('write_file',{'path':'concept.md','content':large})]),completed_report(),ModelResponse(text='Концепт сохранён в concept.md.')])
         self.service.process_long_task_queue()
         old_rows = self.service.database.list_messages(plan['work_thread_id'])
-        self.provider = Provider([ModelResponse(tool_calls=[ToolCall('write_file',{'path':'index.html','content':'<!doctype html><title>Beta</title>'})]),ModelResponse(text='HTML сохранён.')])
+        self.provider = Provider([ModelResponse(tool_calls=[ToolCall('write_file',{'path':'index.html','content':'<!doctype html><title>Beta</title>'})]),completed_report(),ModelResponse(text='HTML сохранён.')])
         self.service._agents.clear()
         self.service.process_long_task_queue()
         request = self.provider.inputs[0]
@@ -170,6 +173,150 @@ class LongTaskTests(unittest.TestCase):
         current = LongTaskPlans(self.service.database,self.user).get(plan['id'])
         self.assertEqual(current['run']['state'],'failed')
         self.assertIn('не подтверждён',current['run']['failure_reason'])
+
+    def attached_plan(self, missing=False):
+        thread = self.service.database.create_chat_thread(self.user,title='Attached game')
+        path = 'attachments/'+'a'*32+'/index.txt'
+        original = self.service.agent_for_user(self.user).files.workspace_dir/path
+        original.parent.mkdir(parents=True,exist_ok=True)
+        if not missing:original.write_text('<html>original game</html>',encoding='utf8')
+        self.service.database.add_message('user','Продолжи приложенную игру.',thread_id=thread['id'],
+            artifacts=[{'path':path,'_user_attachment':True}])
+        plan = LongTaskPlans(self.service.database,self.user).propose(thread['id'],title='Продолжение игры',
+            goal='Продолжи приложенную игру и сохрани автономный HTML.',
+            steps=['Прочитай входной прототип и сохрани план.', 'Создай обновлённый HTML.'],
+            acceptance_checks=['Исходник сохранён, новый HTML существует.'])
+        return self.approve(plan),path,original
+
+    def test_attached_input_is_readable_in_job_after_restart_but_not_writable(self):
+        plan,path,original = self.attached_plan()
+        runner = LongTaskRunner(self.service)
+        for _ in range(2):
+            self.service._agents.clear()
+            agent = runner._agent(self.user,runner.get(self.user,run_id=plan['run_id']),plan['run'])
+            self.assertIn('original game',str(agent.tools.get('read_file_lines').handler({'path':path})))
+            with self.assertRaises(ValueError):agent.tools.get('write_file').handler({'path':path,'content':'overwrite','overwrite':True})
+            with self.assertRaises(ValueError):agent.tools.get('read_file').handler({'path':'../private.txt'})
+        self.assertEqual(original.read_text(encoding='utf8'),'<html>original game</html>')
+
+    def test_missing_attached_input_fails_before_any_paid_model_call(self):
+        plan,_,_ = self.attached_plan(missing=True)
+        self.service.process_long_task_queue()
+        result = LongTaskPlans(self.service.database,self.user).get(plan['id'])
+        self.assertEqual(self.provider.inputs,[])
+        self.assertEqual(result['run']['state'],'failed')
+        self.assertIn('Входное вложение недоступно',result['run']['failure_reason'])
+
+    def test_blocker_report_is_not_a_completed_stage_or_permission_to_continue(self):
+        plan = self.approve(self.draft())
+        self.provider = Provider([
+            ModelResponse(tool_calls=[ToolCall('write_file',{'path':'BLOCKED.md','content':'Missing prerequisite'})]),
+            ModelResponse(tool_calls=[ToolCall('report_long_task_step',{'status':'blocked','summary':'Не хватает исходного файла.'})]),
+            ModelResponse(text='Отчёт сохранён.')])
+        self.service.process_long_task_queue()
+        result = LongTaskPlans(self.service.database,self.user).get(plan['id'])
+        self.assertEqual(result['run']['state'],'failed')
+        self.assertNotEqual(result['task']['steps'][0]['status'],'completed')
+        self.assertEqual(result['task']['steps'][1]['status'],'pending')
+        self.assertEqual(self.service.process_long_task_queue(),[])
+
+    def test_legacy_explicit_blocked_text_cannot_complete_stage_by_saving_notes(self):
+        plan = self.approve(self.draft())
+        self.provider = Provider([
+            ModelResponse(tool_calls=[ToolCall('write_file',{'path':'BASELINE.md','content':'Blocked report'})]),
+            ModelResponse(text='**Этап 1 заблокирован:** исходный файл недоступен.')])
+        self.service.process_long_task_queue()
+        result = LongTaskPlans(self.service.database,self.user).get(plan['id'])
+        self.assertEqual(result['run']['state'],'failed')
+        self.assertEqual(result['task']['steps'][1]['status'],'pending')
+
+    def test_partial_read_without_explicit_stage_report_never_advances(self):
+        plan,path,_ = self.attached_plan()
+        self.provider = Provider([
+            ModelResponse(tool_calls=[ToolCall('read_file_lines',{'path':path})]),
+            ModelResponse(text='Этап 1 не завершён. Исходник прочитан частично.')])
+        self.service.process_long_task_queue()
+        result = LongTaskPlans(self.service.database,self.user).get(plan['id'])
+        self.assertEqual(result['run']['state'],'failed')
+        self.assertIn('Нет явного подтверждения',result['run']['failure_reason'])
+        self.assertEqual(result['task']['steps'][1]['status'],'pending')
+
+    def test_completed_report_and_markdown_cannot_replace_required_html(self):
+        plan = self.approve(self.draft(steps=['Создай outputs/game/index.html и проверь его.', 'Проверь игру.']))
+        self.provider = Provider([
+            ModelResponse(tool_calls=[ToolCall('write_file',{'path':'notes.md','content':'No game created'})]),
+            completed_report(),ModelResponse(text='Этап завершён.')])
+        self.service.process_long_task_queue()
+        result = LongTaskPlans(self.service.database,self.user).get(plan['id'])
+        self.assertEqual(result['run']['state'],'failed')
+        self.assertIn('outputs/game/index.html',result['run']['failure_reason'])
+        self.assertEqual(result['task']['steps'][1]['status'],'pending')
+
+    def test_final_round_reserves_only_the_stage_report_without_an_extra_model_call(self):
+        for limit,value in [('MAX_TOOL_ROUNDS',2),('MAX_TOOL_CALLS',1)]:
+            with self.subTest(limit=limit):
+                plan=self.approve(self.draft(title='Проверка завершения '+limit))
+                self.provider=Provider([
+                    ModelResponse(tool_calls=[ToolCall('write_file',{'path':'concept.md','content':'Verified concept'})]),
+                    completed_report()])
+                with patch('ai_agent.agent.'+limit,value):self.service.process_long_task_queue()
+                result=LongTaskPlans(self.service.database,self.user).get(plan['id'])
+                self.assertEqual(result['run']['state'],'queued')
+                self.assertEqual(result['task']['steps'][0]['status'],'completed')
+                self.assertEqual({t['name'] for t in self.provider.inputs[-1]['tools']},{'report_long_task_step'})
+                self.assertEqual(len(self.provider.inputs),2)
+                # Keep this fixture out of the next subtest's scheduler queue.
+                LongTaskPlans(self.service.database,self.user).control(plan['id'],'cancel')
+
+    def test_known_progress_continues_same_stage_after_restart_without_advancing(self):
+        plan=self.approve(self.draft())
+        self.provider=Provider([
+            ModelResponse(tool_calls=[ToolCall('write_file',{'path':'concept.md','content':'Persisted concept'})]),
+            ModelResponse(tool_calls=[ToolCall('report_long_task_step',{'status':'continue','summary':'concept.md сохранён; осталось проверить его и закончить этап.'})])])
+        with patch('ai_agent.agent.MAX_TOOL_ROUNDS',2):self.service.process_long_task_queue()
+        store=LongTaskPlans(self.service.database,self.user);current=store.get(plan['id'])
+        self.assertEqual(current['run']['state'],'queued')
+        self.assertEqual(current['task']['steps'][0]['status'],'running')
+        self.assertEqual(current['task']['steps'][1]['status'],'pending')
+        self.assertIn('осталось проверить',current['task']['steps'][0]['result'])
+        prior_usage=current['run']['usage']['steps']
+        self.service._agents.clear()
+        self.provider=Provider([
+            ModelResponse(tool_calls=[ToolCall('read_file_lines',{'path':'concept.md'})]),
+            completed_report(),ModelResponse(text='Этап завершён.')])
+        self.service.process_long_task_queue()
+        current=store.get(plan['id'])
+        self.assertEqual(current['run']['state'],'queued')
+        self.assertEqual(current['task']['steps'][0]['status'],'completed')
+        self.assertEqual(current['task']['steps'][1]['status'],'pending')
+        self.assertGreater(current['run']['usage']['steps'],prior_usage)
+        prompt=self.provider.inputs[0]['messages'][-1].content
+        self.assertIn('Сохранённый прогресс текущего этапа',prompt)
+        self.assertIn('осталось проверить',prompt)
+
+    def test_empty_continuation_does_not_create_a_paid_retry_loop(self):
+        plan=self.approve(self.draft())
+        self.provider=Provider([ModelResponse(tool_calls=[ToolCall('report_long_task_step',{'status':'continue','summary':'Продолжи без подтверждённого прогресса.'})]),ModelResponse(text='Продолжим.')])
+        self.service.process_long_task_queue()
+        current=LongTaskPlans(self.service.database,self.user).get(plan['id'])
+        self.assertEqual(current['run']['state'],'failed')
+        self.assertEqual(self.service.process_long_task_queue(),[])
+
+    def test_cancel_wins_race_with_continuation_commit_and_releases_worker(self):
+        plan=self.approve(self.draft())
+        self.provider=Provider([
+            ModelResponse(tool_calls=[ToolCall('write_file',{'path':'concept.md','content':'Saved before cancellation'})]),
+            ModelResponse(tool_calls=[ToolCall('report_long_task_step',{'status':'continue','summary':'Файл сохранён, осталось проверить.'})])])
+        original=LongTaskRunner._continue_stage
+        def cancel_then_commit(runner,*args):
+            LongTaskPlans(self.service.database,self.user).control(plan['id'],'cancel')
+            return original(runner,*args)
+        with patch('ai_agent.agent.MAX_TOOL_ROUNDS',2),patch.object(LongTaskRunner,'_continue_stage',cancel_then_commit):
+            self.service.process_long_task_queue()
+        current=LongTaskPlans(self.service.database,self.user).get(plan['id'])
+        self.assertEqual(current['run']['state'],'cancelled')
+        self.assertIsNone(current['run']['worker_id'])
+        self.assertEqual(self.service.process_long_task_queue(),[])
 
     def test_long_task_provider_timeout_follows_configuration_and_remaining_budget(self):
         plan = self.approve(self.draft())

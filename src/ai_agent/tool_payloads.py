@@ -80,6 +80,9 @@ def compact_tool_output(content: str, max_chars: int, *, query: str = '') -> str
     except (ValueError,TypeError):
         excerpt,_ = text_excerpt(body,max(100,available-70),query)
         return prefix + excerpt + '\n[tool result excerpt; omitted content is not verified here]' + suffix
+    if isinstance(payload,dict) and isinstance(payload.get('content'),str) and all(
+            key in payload for key in ('start_line','end_line','total_lines','next_start_line','sha256')):
+        return prefix + _compact_file_lines(payload,available) + suffix
     if isinstance(payload,dict) and (isinstance(payload.get('fields'),dict) or 'main_text' in payload):
         fields = payload.get('fields') if isinstance(payload.get('fields'),dict) else payload
         main = str(fields.get('main_text',''))
@@ -120,3 +123,45 @@ def compact_tool_output(content: str, max_chars: int, *, query: str = '') -> str
                     packed.pop(key)
         encoded=json.dumps(packed,ensure_ascii=False,separators=(',',':'))
     return prefix+encoded+suffix
+
+
+def _compact_file_lines(payload: dict, limit: int) -> str:
+    """Keep contiguous code and accurate continuation, never a 250-char gist.
+
+    Generic JSON packing loses almost all code yet keeps the original line
+    range. File reads must instead describe precisely what the model sees.
+    """
+    content = payload['content']
+    def pack(count):
+        excerpt = content[:count]
+        boundaries = list(re.finditer(r'(?m)^(\d+): ',excerpt))
+        result = {**payload,'content':excerpt,'truncated':True,
+            'excerpt':{'omitted':True,'method':'contiguous prefix; continue with next_start_line/next_start_column'}}
+        if boundaries:
+            last = boundaries[-1]
+            number = int(last.group(1))
+            column = int(payload.get('start_column',1)) if number==payload['start_line'] else 1
+            result.update(end_line=number,next_start_line=number,
+                next_start_column=column+len(excerpt[last.end():]))
+        else:
+            result.update(content='',end_line=payload['start_line']-1,
+                next_start_line=payload['start_line'],next_start_column=payload.get('start_column',1))
+        if count==len(content):
+            for key in ('end_line','truncated','next_start_line','next_start_column'):result[key]=payload[key]
+        return json.dumps(result,ensure_ascii=False,separators=(',',':'))
+    lo,hi=0,len(content)
+    while lo<hi:
+        mid=(lo+hi+1)//2
+        if len(pack(mid))<=limit:lo=mid
+        else:hi=mid-1
+    # Prefer ending at a complete line. A single long line uses a column
+    # continuation so even minified code can be read without omissions.
+    boundary=content.rfind('\n',0,lo)
+    if boundary>0 and lo<len(content):
+        result=json.loads(pack(boundary))
+        result.update(next_start_line=result['end_line']+1,next_start_column=1)
+        encoded=json.dumps(result,ensure_ascii=False,separators=(',',':'))
+    else:encoded=pack(lo)
+    if len(encoded)>limit:
+        return json.dumps({'omitted':True,'note':'File metadata exceeds context budget; request a shorter file path or smaller read.'},separators=(',',':'))
+    return encoded

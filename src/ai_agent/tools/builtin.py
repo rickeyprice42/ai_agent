@@ -105,6 +105,8 @@ def register_builtin_tools(
                 "required": ["query"],
             },
             handler=lambda args: search_past_chats(memory, args["query"]),
+            output_schema={"type":"object","properties":{"matches":{"type":"array"},"message":{"type":"string"}},
+                "required":["matches","message"],"additionalProperties":False},
         )
     )
 
