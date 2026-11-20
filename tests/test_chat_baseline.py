@@ -255,7 +255,7 @@ class ChatRegressionTest(unittest.TestCase):
         </item></channel></rss>"""
         sandbox = HttpSandbox()
         response = FakeHttpResponse(html, {"Content-Type": "text/html; charset=utf-8"})
-        with patch("ai_agent.tools.http.request.urlopen", return_value=response):
+        with patch("ai_agent.tools.http.HttpSandbox._open_public", return_value=response):
             result = sandbox.search("Python books Apple Books", limit=3)
         self.assertIn("Python Essentials", result)
         self.assertIn("https://books.apple.com/us/book/id1", result)
@@ -280,6 +280,7 @@ class ChatRegressionTest(unittest.TestCase):
                 "Content-Type: text/html\nBody:\n<binary garbage>"
             )
             with patch.object(agent.http, "request", return_value=raw_result):
+                agent.tools.get('http_request').handler=lambda args:agent.http.request(**args)
                 events = list(agent.respond_stream("Найди актуальные книги в интернете"))
             assistant_text = [event["text"] for event in events if event["type"] == "delta"][-1]
             self.assertIn("HTTP 400", assistant_text)
@@ -329,6 +330,7 @@ class ChatRegressionTest(unittest.TestCase):
                 "   Snippet: An advanced Python guide."
             )
             with patch.object(agent.http, "search", return_value=search_result):
+                agent.tools.get("web_search").handler=lambda args:agent.http.search(**args)
                 events = list(
                     agent.respond_stream(
                         "Найди книги в интернете и создай Word-файл python_books.docx"

@@ -194,7 +194,7 @@ class ResearchQualityTest(unittest.TestCase):
         )
         sandbox = HttpSandbox()
         empty_lite = FakeHttpResponse(b"<html></html>")
-        with patch("ai_agent.tools.http.request.urlopen", side_effect=[empty_apple, empty_lite, polluted_rss]):
+        with patch("ai_agent.tools.http.HttpSandbox._open_public", side_effect=[empty_apple, empty_lite, polluted_rss]):
             with self.assertRaisesRegex(ValueError, "no relevant results"):
                 sandbox.search("недорогие книги Apple Books", limit=5)
 
@@ -207,7 +207,7 @@ class ResearchQualityTest(unittest.TestCase):
         )
         sandbox = HttpSandbox()
         with patch(
-            "ai_agent.tools.http.request.urlopen",
+            "ai_agent.tools.http.HttpSandbox._open_public",
             side_effect=[TimeoutError("timed out"), FakeHttpResponse(b"<html></html>"), polluted_rss],
         ):
             with self.assertRaisesRegex(ValueError, "no relevant results"):
@@ -239,7 +239,7 @@ class ResearchQualityTest(unittest.TestCase):
         }
         sandbox = HttpSandbox()
         with patch(
-            "ai_agent.tools.http.request.urlopen",
+            "ai_agent.tools.http.HttpSandbox._open_public",
             return_value=FakeHttpResponse(json.dumps(payload).encode()),
         ) as urlopen:
             result = sandbox.search("cheap fiction Apple Books", limit=2)
@@ -291,7 +291,7 @@ class ResearchQualityTest(unittest.TestCase):
             FakeHttpResponse(json.dumps(lookup).encode()),
         ]
         sandbox = HttpSandbox()
-        with patch("ai_agent.tools.http.request.urlopen", side_effect=responses) as urlopen:
+        with patch("ai_agent.tools.http.HttpSandbox._open_public", side_effect=responses) as urlopen:
             result = sandbox.search(
                 "лучшие недорогие книги Apple Books рекомендации 2024",
                 limit=2,
@@ -340,7 +340,7 @@ class ResearchQualityTest(unittest.TestCase):
         }
         sandbox = HttpSandbox()
         with patch(
-            "ai_agent.tools.http.request.urlopen",
+            "ai_agent.tools.http.HttpSandbox._open_public",
             return_value=FakeHttpResponse(json.dumps(payload).encode()),
         ):
             result = sandbox.search("Python Apple Books", limit=5, country="us")
@@ -361,7 +361,7 @@ class ResearchQualityTest(unittest.TestCase):
             {"Content-Type": "application/rss+xml; charset=utf-8"},
         )
         sandbox = HttpSandbox()
-        with patch("ai_agent.tools.http.request.urlopen", return_value=polluted_rss):
+        with patch("ai_agent.tools.http.HttpSandbox._open_public", return_value=polluted_rss):
             with self.assertRaisesRegex(ValueError, "no relevant results") as raised:
                 sandbox.search(
                     "топ гангстерских фильмов доступных по подписке Apple TV",
@@ -380,7 +380,7 @@ class ResearchQualityTest(unittest.TestCase):
             {"Content-Type": "application/rss+xml; charset=utf-8"},
         )
         sandbox = HttpSandbox()
-        with patch("ai_agent.tools.http.request.urlopen", return_value=rss) as urlopen:
+        with patch("ai_agent.tools.http.HttpSandbox._open_public", return_value=rss) as urlopen:
             result = sandbox.search(
                 "gangster crime movies available with Apple TV subscription",
                 limit=5,
@@ -401,7 +401,7 @@ class ResearchQualityTest(unittest.TestCase):
             {"Content-Type": "application/rss+xml; charset=utf-8"},
         )
         sandbox = HttpSandbox()
-        with patch("ai_agent.tools.http.request.urlopen", return_value=rss):
+        with patch("ai_agent.tools.http.HttpSandbox._open_public", return_value=rss):
             with self.assertRaisesRegex(ValueError, "storefront_mismatch"):
                 sandbox.search(
                     "gangster crime movies available with Apple TV subscription",
@@ -417,7 +417,7 @@ class ResearchQualityTest(unittest.TestCase):
             {"Content-Type": "application/rss+xml; charset=utf-8"},
         )
         sandbox = HttpSandbox()
-        with patch("ai_agent.tools.http.request.urlopen", return_value=rss) as urlopen:
+        with patch("ai_agent.tools.http.HttpSandbox._open_public", return_value=rss) as urlopen:
             result = sandbox.search(
                 "топ гангстерских фильмов доступных по подписке Apple TV",
                 limit=5,
@@ -467,6 +467,7 @@ class ResearchQualityTest(unittest.TestCase):
                 "   Snippet: Catalog: Apple Books. Price: $2.99. Genres: Fiction"
             )
             with patch.object(agent.http, "search", return_value=search_result):
+                agent.tools.get("web_search").handler=lambda args:agent.http.search(**args)
                 first = list(agent.respond_stream("Найди книги и создай Word-файл books.docx"))
                 second = list(agent.respond_stream("Найди книги и создай Word-файл books.docx"))
 
@@ -504,6 +505,7 @@ class ResearchQualityTest(unittest.TestCase):
                 "   Snippet: Catalog: Apple Books. Price: $1.99"
             )
             with patch.object(agent.http, "search", return_value=search_result):
+                agent.tools.get("web_search").handler=lambda args:agent.http.search(**args)
                 events = list(agent.respond_stream("Найди книги и создай Word-файл books.docx"))
 
             self.assertFalse((root / "workspace" / "books.docx").exists())

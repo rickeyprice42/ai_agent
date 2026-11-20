@@ -2,6 +2,24 @@
 import json
 import logging
 from urllib import request, error, parse
+from ai_agent.tools.public_transport import PinnedHTTPSHandler
+
+
+def validate_search_endpoint(url):
+    parsed=parse.urlparse(url)
+    if (parsed.scheme!='https' or parsed.hostname!='api.openai.com' or parsed.port not in (None,443)
+            or parsed.username or parsed.password or parsed.path!='/v1/responses' or parsed.query or parsed.fragment):
+        raise ValueError('Hosted search requires the official OpenAI endpoint.')
+
+
+class _NoSearchRedirect(request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs):return None
+
+
+def _open_official(req,timeout):
+    validate_search_endpoint(req.full_url)
+    opener=request.build_opener(request.ProxyHandler({}),PinnedHTTPSHandler(False),_NoSearchRedirect())
+    return opener.open(req,timeout=timeout)
 
 
 class HostedSearch:
@@ -10,13 +28,15 @@ class HostedSearch:
         self.model=model
         self.url=base_url.rstrip('/')+'/responses'
         self.timeout=timeout
+        self.last_usage=None
+        self.attempted=False
 
     def __call__(self, query, limit, country=None):
         # A configured custom LLM endpoint is not automatically trusted with
         # a second provider's credential or compatible hosted search.
-        parsed=parse.urlparse(self.url)
-        if parsed.scheme!='https' or parsed.hostname!='api.openai.com' or parsed.port not in (None,443):
-            raise ValueError('Hosted search requires the official OpenAI endpoint.')
+        self.last_usage=None
+        self.attempted=False
+        validate_search_endpoint(self.url)
         tool={'type':'web_search'}
         if country and len(country)==2:
             tool['user_location']={'type':'approximate','country':country.upper()}
@@ -29,7 +49,8 @@ class HostedSearch:
         req=request.Request(self.url,data=json.dumps(payload).encode(),
                             headers={'Authorization':'Bearer '+self.api_key,'Content-Type':'application/json'},method='POST')
         try:
-            with request.urlopen(req,timeout=self.timeout) as response:
+            self.attempted=True
+            with _open_official(req,timeout=self.timeout) as response:
                 raw=response.read(1000001)
             if len(raw)>1000000:raise ValueError('Hosted search response exceeded its limit.')
             data=json.loads(raw)
@@ -39,6 +60,7 @@ class HostedSearch:
             raise ValueError('Hosted search is temporarily unavailable.') from None
         if not isinstance(data,dict) or not isinstance(data.get('output'),list):
             raise ValueError('Hosted search returned an invalid response.')
+        self.last_usage=data.get('usage') if isinstance(data.get('usage'),dict) else None
         output=data['output']
         if data.get('status')!='completed' or not any(x.get('type')=='web_search_call' and x.get('status')=='completed' for x in output):
             raise ValueError('Hosted search did not complete a verified search call.')

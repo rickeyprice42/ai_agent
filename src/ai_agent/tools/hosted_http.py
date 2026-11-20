@@ -3,7 +3,9 @@
 Only this trusted transport receives the host network. Generic HostedHandlers,
 generated code, and file workers retain their network namespace. The broker
 uses the existing URL/redirect/header validation and DNS-pinned connections;
-it has an empty read-only workspace and no provider credentials or live clients.
+it has an empty read-only workspace and no live clients. The public HTTP profile
+has no provider credentials; the separate fixed search profile passes only its
+required fallback credential through private stdin.
 """
 from pathlib import Path
 import sys
@@ -15,7 +17,7 @@ from ai_agent.tools.process_host import HostedHandler,ProcessHandlerSpec
 class _HTTPBroker(HostedHandler):
     """Trusted egress boundary, never a network option for generic workers.
 
-    Production constructs only the fixed public HTTP entry point below. This
+    Production constructs only fixed public HTTP/search transport entry points. This
     broker itself is trusted to validate and pin every outgoing connection;
     its network isolation is not a kernel destination firewall. No caller
     supplied module, client, workspace or private-network flag is accepted.

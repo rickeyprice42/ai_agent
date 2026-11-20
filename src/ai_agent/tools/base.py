@@ -363,14 +363,14 @@ class ToolRegistry:
                     # Keep the caller/locks alive until the handler really exits.
                     executor.shutdown(wait=True)
                     return _failure('cancelled', 'Выполнение инструмента отменено.', status='cancelled',
-                                    details={'outcome_unknown':True} if any(p.risk!='read' for p in tool.permissions) else {})
+                                    details=_unknown_execution_details(tool))
                 remaining = deadline - perf_counter()
                 if remaining <= 0:
                     local_cancel.set()
                     executor.shutdown(wait=True)
-                    safe_read = tool.idempotent and all(permission.risk=='read' for permission in tool.permissions)
+                    safe_read = tool.idempotent and all(permission.risk=='read' for permission in tool.permissions) and not getattr(tool.handler,'may_incur_usage',False)
                     return _failure('timeout', f"Инструмент '{tool.name}' превысил таймаут {tool.timeout_seconds:g} сек.", retryable=safe_read,
-                                    details={'outcome_unknown':True} if not all(permission.risk=='read' for permission in tool.permissions) else {})
+                                    details=_unknown_execution_details(tool))
                 try:
                     raw = future.result(timeout=min(.05, remaining))
                     break
@@ -387,13 +387,13 @@ class ToolRegistry:
                 type(exc).__name__,
             )
             return _failure("internal_error", "Инструмент завершился внутренней ошибкой.",
-                            details={'outcome_unknown':True} if any(p.risk!='read' for p in tool.permissions) else {})
+                            details=_unknown_execution_details(tool))
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
 
         if cancellation.is_set():
             return _failure("cancelled", "Выполнение инструмента отменено.", status="cancelled",
-                            details={'outcome_unknown':True} if any(p.risk!='read' for p in tool.permissions) else {})
+                            details=_unknown_execution_details(tool))
         result = tool.result_adapter(raw) if tool.result_adapter else _adapt_result(raw)
         if result.ok:
             output_errors = validate_json_schema(result.output, tool.manifest.output_schema)
@@ -418,6 +418,14 @@ class ToolRegistry:
         if tool.availability is not None:
             return tool.availability()
         return True, None
+
+
+
+def _unknown_execution_details(tool):
+    billable=bool(getattr(tool.handler,'may_incur_usage',False))
+    details={'outcome_unknown':True} if billable or any(p.risk!='read' for p in tool.permissions) else {}
+    if billable:details['billable_usage_unknown']=True
+    return details
 
 
 def validate_json_schema(value: Any, schema: dict[str, Any], path: str = "$") -> list[str]:

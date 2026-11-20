@@ -37,7 +37,7 @@ class SearchAuditTests(unittest.TestCase):
     def test_lite_discovery_is_primary_and_preserves_direct_result_url(self):
         href='//duckduckgo.com/l/?'+parse.urlencode({'uddg':'https://arxiv.org/abs/2505.09388'})
         html=f'<a class="result-link" href="{href}">Qwen3 Technical Report</a><td class="result-snippet">A multilingual Qwen3 tool calling study.</td>'
-        with patch('ai_agent.tools.http.request.urlopen',return_value=SearchResponse(html.encode())) as call:
+        with patch('ai_agent.tools.http.HttpSandbox._open_public',return_value=SearchResponse(html.encode())) as call:
             result=HttpSandbox().search('Qwen3 technical report multilingual tool calling 2025')
             self.assertEqual(call.call_count,1)
             self.assertIn('lite.duckduckgo.com',call.call_args.args[0].full_url)
@@ -48,7 +48,7 @@ class SearchAuditTests(unittest.TestCase):
     def test_lite_challenge_is_not_executed_and_fallback_is_bounded_with_cooldown(self):
         rss=b'<rss><channel><item><title>Qwen3 Technical Report</title><link>https://arxiv.org/abs/2505.09388</link><description>Qwen3 multilingual tool calling.</description></item></channel></rss>'
         sandbox=HttpSandbox()
-        with patch('ai_agent.tools.http.request.urlopen',side_effect=[SearchResponse(b'<form id="challenge-form">Verify you are human</form>'),SearchResponse(rss),SearchResponse(rss)]) as call:
+        with patch('ai_agent.tools.http.HttpSandbox._open_public',side_effect=[SearchResponse(b'<form id="challenge-form">Verify you are human</form>'),SearchResponse(rss),SearchResponse(rss)]) as call:
             self.assertIn('bing_rss',sandbox.search('Qwen3 technical report'))
             self.assertIn('bing_rss',sandbox.search('Qwen3 multilingual study'))
             self.assertEqual(call.call_count,3)
@@ -57,7 +57,7 @@ class SearchAuditTests(unittest.TestCase):
     def test_unrelated_lite_results_allow_relevant_bing_fallback(self):
         unrelated = b'<a class="result-link" href="https://example.com/mail">Mail login</a>'
         relevant = b'<rss><channel><item><title>Qwen3 Technical Report</title><link>https://arxiv.org/abs/2505.09388</link><description>Qwen3 technical report.</description></item></channel></rss>'
-        with patch('ai_agent.tools.http.request.urlopen', side_effect=[SearchResponse(unrelated), SearchResponse(relevant)]) as call:
+        with patch('ai_agent.tools.http.HttpSandbox._open_public', side_effect=[SearchResponse(unrelated), SearchResponse(relevant)]) as call:
             result = HttpSandbox().search('Qwen3 technical report')
         self.assertEqual(call.call_count, 2)
         self.assertIn('Search provider: bing_rss', result)

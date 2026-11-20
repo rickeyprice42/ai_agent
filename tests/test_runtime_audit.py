@@ -211,6 +211,9 @@ class RuntimeAuditTests(unittest.TestCase):
         search_result = "Search query: safe files\nResults:\n1. Guide one\n   URL: https://example.com/1\n   Snippet: First guide.\n2. Guide two\n   URL: https://example.com/2\n   Snippet: Second guide."
         responses = [ModelResponse(tool_calls=[ToolCall("web_search", {"query": "safe files"})]), ModelResponse(text="")]
         with isolated_agent(responses) as agent, patch.object(agent.http, "search", return_value=search_result):
+            # This test covers document grounding, not network process hosting.
+            # Inject the synthetic result at the registered tool boundary.
+            agent.tools.get('web_search').handler=lambda args:agent.http.search(**args)
             events = list(agent.respond_stream("Найди источники и создай Word-файл sources.docx"))
             final = "".join(event.get("text", "") for event in events if event["type"] == "delta")
             self.assertIn("содержимое страниц не проверено", final)

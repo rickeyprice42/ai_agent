@@ -16,18 +16,18 @@ class HostedSearchTests(unittest.TestCase):
             {'type':'web_search_call','status':'completed','action':{'sources':[{'url':'https://example.org/report','title':'Qwen tool calling report'}]}},
             {'type':'message','content':[{'type':'output_text','text':'A Qwen tool calling report.',
                 'annotations':[{'type':'url_citation','url':'https://example.org/report','title':'Qwen report'}]}]}]}
-        with patch('ai_agent.tools.hosted_search.request.urlopen',return_value=BytesIO(json.dumps(payload).encode())) as call:
+        with patch('ai_agent.tools.hosted_search._open_official',return_value=BytesIO(json.dumps(payload).encode())) as call:
             result=HostedSearch('synthetic-key')('Qwen tool calling',5)
         self.assertEqual(len(result),1)
         sent=json.loads(call.call_args.args[0].data)
         self.assertEqual(sent['tool_choice'],'required')
         self.assertFalse(sent['store'])
         payload['output']=payload['output'][1:]
-        with patch('ai_agent.tools.hosted_search.request.urlopen',return_value=BytesIO(json.dumps(payload).encode())):
+        with patch('ai_agent.tools.hosted_search._open_official',return_value=BytesIO(json.dumps(payload).encode())):
             with self.assertRaisesRegex(ValueError,'verified search'):HostedSearch('synthetic-key')('Qwen',5)
 
     def test_custom_endpoint_never_receives_openai_credential(self):
-        with patch('ai_agent.tools.hosted_search.request.urlopen') as send:
+        with patch('ai_agent.tools.hosted_search._open_official') as send:
             with self.assertRaises(ValueError):HostedSearch('synthetic-key',base_url='https://other.example/v1')('query',5)
             send.assert_not_called()
 
@@ -39,7 +39,7 @@ class HostedSearchTests(unittest.TestCase):
             response=BytesIO(b'<form id="challenge-form">captcha</form>')
             response.headers={'Content-Type':'text/html'}
             return response
-        with patch('ai_agent.tools.http.request.urlopen',side_effect=challenge):
+        with patch('ai_agent.tools.http.HttpSandbox._open_public',side_effect=challenge):
             result=http.search('Qwen tool calling benchmarks')
         self.assertIn('openai_web_search',result)
         self.assertIn('https://example.org/qwen',result)

@@ -194,7 +194,7 @@ class HttpSandbox:
                 try:
                     req = request.Request(source_url, headers={'User-Agent':SEARCH_USER_AGENT,
                         'Accept-Encoding':'identity','Accept-Language':'en-US,en;q=0.9,ru;q=0.7'}, method='GET')
-                    with request.urlopen(req,timeout=self.timeout_seconds) as response:
+                    with self._open_public(req) as response:
                         body,_ = _decode_body(response.read(self.max_response_chars*8),self.max_response_chars*4,dict(response.headers.items()))
                     if re.search(r'(?i)anomaly-modal|challenge-form|g-recaptcha|verify you are human',body):
                         self._search_cooldowns[source] = monotonic()+300
@@ -304,7 +304,7 @@ class HttpSandbox:
             method="GET",
         )
         try:
-            with request.urlopen(search_request, timeout=self.timeout_seconds) as response:
+            with self._open_public(search_request) as response:
                 headers = dict(response.headers.items())
                 raw_body = response.read(self.max_response_chars * 8)
         except error.HTTPError as exc:
@@ -319,6 +319,14 @@ class HttpSandbox:
         if not isinstance(payload, dict):
             raise ValueError(f"{label} returned an invalid payload.")
         return payload
+
+    def _open_public(self,req):
+        self._validate_url(req.full_url)
+        self._validate_headers(dict(req.header_items()))
+        opener=request.build_opener(request.ProxyHandler({}),
+            PinnedHTTPHandler(self.allow_private_networks),PinnedHTTPSHandler(self.allow_private_networks),
+            _SafeRedirectHandler(self._validate_url))
+        return opener.open(req,timeout=self.timeout_seconds)
 
     def _validate_url(self, url: str) -> parse.ParseResult:
         stripped = url.strip()

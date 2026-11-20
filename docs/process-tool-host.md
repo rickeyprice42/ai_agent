@@ -87,3 +87,29 @@ remote request already received by its server is rolled back. Research/search,
 browser, stateful and connector callbacks still require their own profiles;
 AVE-75 remains open for those migrations. See
 `reports/qa/ave75-http-host-2026-11-16.md` for scoped evidence.
+
+## Fixed web search transport (20 November)
+
+Linux `web_search` now reconstructs its public providers in the same killable
+trusted broker, with an empty read-only workspace. This is another fixed entry
+point, not a network permission for generic workers. Search and Apple catalog
+requests validate URLs/redirects and pin DNS addresses at socket creation.
+
+When the OpenAI fallback is configured, only its required credential and scalar
+configuration cross private JSON stdin. No live client, inherited environment,
+application database or user files are passed. The fallback accepts only the
+official HTTPS `/v1/responses` endpoint, rejects redirects, disables environment
+proxies and pins public addresses. This is trusted transport validation, not a
+kernel destination firewall.
+
+Completed calls merge bounded provider cooldowns back into the parent so fresh
+processes retain anti-bot pauses. A forced kill may lose an in-flight cooldown
+update. A timeout or cancellation with possible billable fallback marks the
+outcome and usage unknown: it is not automatically retried or followed by another
+model/tool round. This cannot undo a request already accepted remotely and does
+not prove that a charge occurred.
+
+Windows keeps cooperative search execution. Research, browser, stateful and
+connector callbacks still need their own process profiles; AVE-75 remains open.
+See `reports/qa/ave75-search-host-2026-11-20.md` for scoped verification. No paid
+provider requests were used to validate this migration.
