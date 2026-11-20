@@ -17,7 +17,7 @@ from ai_agent.tools.process_host import HostedHandler,ProcessHandlerSpec
 class _HTTPBroker(HostedHandler):
     """Trusted egress boundary, never a network option for generic workers.
 
-    Production constructs only fixed public HTTP/search transport entry points. This
+    Production constructs only fixed public HTTP/search/research entry points. This
     broker itself is trusted to validate and pin every outgoing connection;
     its network isolation is not a kernel destination firewall. No caller
     supplied module, client, workspace or private-network flag is accepted.

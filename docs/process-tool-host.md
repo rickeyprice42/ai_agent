@@ -113,3 +113,29 @@ Windows keeps cooperative search execution. Research, browser, stateful and
 connector callbacks still need their own process profiles; AVE-75 remains open.
 See `reports/qa/ave75-search-host-2026-11-20.md` for scoped verification. No paid
 provider requests were used to validate this migration.
+
+## Research HTTP and parsing phase (20 November)
+
+Linux `research_read` now runs public HTTP fetching, HTML/JSON parsing, site
+adapters and evidence construction in a fresh fixed broker process. Its empty
+read-only workspace has no application database, user files, browser profile or
+provider keys. It uses the validated/pinned `HttpSandbox` transport. No generic
+network capability was added; this remains trusted application egress validation.
+
+The parent retains the reader cache and trace. A successful HTTP phase returns
+the structured result. A page needing JavaScript or independent browser TLS
+verification returns only fallback metadata, not the raw page/hydration payload.
+The parent runs the existing browser fallback without repeating the HTTP fetch.
+Explicit force-browser requests bypass the HTTP worker. Login, policy and anti-bot
+failures retain their typed refusal behavior.
+
+Host timeout, cancellation and protocol/output-limit failures stop the reader
+without launching browser fallback or caching a partial result. Cancellation is
+also checked between HTTP completion and browser startup. Linux tests exercise
+a deliberately stuck parser and detached network descendant, not only a slow
+socket. Windows keeps the cooperative implementation.
+
+This bounds the HTTP/parser phase only. Browser execution and its subsequent
+DOM parsing still use the existing cooperative/drain path; stateful and connector
+profiles also remain outstanding. AVE-75 is not complete. Evidence is recorded in
+`reports/qa/ave75-research-http-2026-11-20.md`.

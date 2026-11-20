@@ -13,7 +13,7 @@ import re
 
 from ai_agent.merchant_offer import merchant_offer
 from ai_agent.security import PROMPT_INJECTION_PATTERN
-from ai_agent.tools.base import ToolResult, failure_result
+from ai_agent.tools.base import CURRENT_EXECUTION, ToolResult, failure_result
 from ai_agent.tools.browser import BrowserFailure, PlaywrightBrowserRunner
 from ai_agent.tools.http import HttpSandbox, HttpTransportError, HttpAddressBlocked
 
@@ -77,6 +77,9 @@ class BrowserResearchReader:
         self.max_fragments = max(1, min(int(max_fragments), 20))
         self._cache: dict[str, tuple[float, dict]] = {}
         self._trace: list[dict[str, Any]] = []
+        # Linux installs a fixed process profile for the HTTP/parse phase.
+        # Cache ownership and browser fallback stay in this reader.
+        self.http_stage = None
 
     def availability(self) -> tuple[bool, str | None]:
         return True, None
@@ -137,7 +140,7 @@ class BrowserResearchReader:
         self._record_trace(result, result["extraction_method"], started)
         return result
 
-    def _read_uncached(
+    def _read_http_stage(
         self,
         url: str,
         *,
@@ -171,7 +174,7 @@ class BrowserResearchReader:
                     raise refusal
                 if not _needs_browser(http_fields):
                     try:
-                        return _research_result(
+                        return {"result": _research_result(
                             url=http_response["url"],
                             locale=locale,
                             region=region,
@@ -181,7 +184,7 @@ class BrowserResearchReader:
                             fields=http_fields,
                             catalog=catalog,
                             max_fragments=self.max_fragments,
-                        )
+                        )}
                     except ResearchFailure as exc:
                         if exc.code != "availability_unconfirmed":
                             raise
@@ -203,14 +206,37 @@ class BrowserResearchReader:
                 code = "private_network_blocked" if message.startswith('Private, local, link-local') else "http_failed"
                 raise ResearchFailure(code, message, retryable=code == "http_failed") from exc
 
+        return {"http_text_chars": len(str(http_fields.get("main_text", ""))),
+                "offer_failure": ({"code": http_offer_failure.code, "message": http_offer_failure.message,
+                    "retryable": http_offer_failure.retryable, "details": http_offer_failure.details}
+                    if http_offer_failure else None),
+                "transport_failure": ({"code": transport_failure.code, "message": str(transport_failure)}
+                    if transport_failure else None)}
+
+    def _read_uncached(self, url: str, *, locale: str, region: str, catalog: str,
+                       adapter: str, force_browser: bool) -> dict:
+        stage = self.http_stage or self._read_http_stage
+        state = stage(url, locale=locale, region=region, catalog=catalog,
+                      adapter=adapter, force_browser=force_browser)
+        context = CURRENT_EXECUTION.get()
+        if context is not None and context.cancelled:
+            raise ResearchFailure('cancelled', 'Выполнение reader отменено.')
+        if "result" in state:
+            return state["result"]
+        http_text_chars = state["http_text_chars"]
+        http_offer_failure = ResearchFailure(**state["offer_failure"]) if state["offer_failure"] else None
+        transport_failure = (HttpTransportError(**state["transport_failure"])
+                             if state["transport_failure"] else None)
         available, reason = self.browser.availability()
         if not available:
+            if http_offer_failure:
+                raise http_offer_failure
             if transport_failure:
                 raise ResearchFailure(transport_failure.code,str(transport_failure),True)
             raise ResearchFailure(
                 "unsupported_dynamic_page",
                 reason or "Dynamic page требует browser fallback, но он недоступен.",
-                details={"http_text_chars": len(str(http_fields.get("main_text", "")))},
+                details={"http_text_chars": http_text_chars},
             )
         try:
             snapshot = self.browser.read(url=url, screenshot=False)
