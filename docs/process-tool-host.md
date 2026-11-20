@@ -139,3 +139,39 @@ This bounds the HTTP/parser phase only. Browser execution and its subsequent
 DOM parsing still use the existing cooperative/drain path; stateful and connector
 profiles also remain outstanding. AVE-75 is not complete. Evidence is recorded in
 `reports/qa/ave75-research-http-2026-11-20.md`.
+
+## Browser process pair (21 November)
+
+On Linux, `browser_read`, `browser_interact` and the browser used by
+`research_read` now share a fixed process backend. A networkless bubblewrap
+process runs Playwright, Chromium, DOM snapshots and catalog HTML extraction.
+A separate fixed egress process uses host networking, validates the initial
+URL/host policy and pins public addresses on every outgoing connection. The two
+communicate through an authenticated HTTP proxy over a private Unix socket;
+only a loopback relay exists inside the browser network namespace. Chromium
+cannot bypass the proxy with a direct socket to public or host-loopback targets.
+
+These are sibling namespaces: Ubuntu AppArmor rejected nested bubblewrap. No
+host security policy, NoNewPrivileges setting or generic process capability was
+relaxed. The parent holds ownership until both process domains are killed and
+drained on completion, cancellation or deadline, including detached descendants.
+It does not turn a remotely accepted browser action into a reversible one.
+Uncertain interaction failures retain outcome_unknown and are not retried.
+
+Neither process sees user files, the application database or provider keys. The
+browser runtime, fonts and CA certificates are read-only; profiles/screenshots
+are ephemeral. The proxy alone gets a writable private scratch bridge for its
+socket and per-call credentials. Screenshots cross bounded JSON IPC and are
+published atomically by the parent after process teardown and cancellation
+checks. Existing files survive failed/cancelled captures. The PNG limit is
+900,000 bytes; excessive output fails explicitly rather than silently truncating.
+
+Browser presence is checked from the installed Playwright manifest/files without
+starting a driver in the service process. The fixed browser worker retains CPU,
+deadline and IPC limits, but omits the generic Python worker's 1 GiB RLIMIT_AS
+because Chromium reserves a large virtual address range. This is not a dedicated
+resident-memory/cgroup quota for Chromium; generic workers keep their old limit.
+
+Windows remains cooperative. The reader's final post-browser evidence processing,
+stateful and connector callbacks still need scoped migration; AVE-75 stays open.
+See `reports/qa/ave75-browser-host-2026-11-21.md` for verification and limits.

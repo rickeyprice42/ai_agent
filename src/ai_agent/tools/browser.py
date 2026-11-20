@@ -59,8 +59,11 @@ class PlaywrightBrowserRunner:
         self.allow_private_networks = allow_private_networks
         self.max_text_chars = max(1000, min(int(max_text_chars), 100000))
         self.max_elements = max(10, min(int(max_elements), 500))
+        self.process_backend = None
 
     def availability(self) -> tuple[bool, str | None]:
+        if self.process_backend is not None:
+            return self.process_backend.availability()
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
@@ -124,6 +127,9 @@ class PlaywrightBrowserRunner:
         screenshot_path: str | None,
         screenshot_full_page: bool = True,
     ) -> dict:
+        if self.process_backend is not None:
+            return self.process_backend(url=url, actions=actions, expected_dom_hash=expected_dom_hash,
+                screenshot=screenshot, screenshot_path=screenshot_path, screenshot_full_page=screenshot_full_page)
         available, reason = self.availability()
         if not available:
             raise BrowserFailure("browser_unavailable", reason or "Browser runner недоступен.")
@@ -146,7 +152,7 @@ class PlaywrightBrowserRunner:
 
         stage = "startup"
         try:
-            with BrowserEgressProxy(
+            with getattr(self, '_proxy_factory', BrowserEgressProxy)(
                 lambda host: _host_allowed(host, operation_hosts) or _catalog_resource_allowed(initial_host, host, 'GET', False),
                 allow_private=self.allow_private_networks,
                 timeout_seconds=max(1, self.timeout_ms // 1000),

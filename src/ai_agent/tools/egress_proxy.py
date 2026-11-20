@@ -7,6 +7,7 @@ from time import monotonic
 from urllib.parse import urlsplit
 import select
 import socket
+from socketserver import TCPServer
 
 from ai_agent.tools.public_transport import connect_public, AddressBlocked
 
@@ -113,9 +114,19 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                     self.server.connections.discard(upstream)
 
 
+class _UnixProxyServer(_ProxyServer):
+    address_family = socket.AF_UNIX if hasattr(socket, 'AF_UNIX') else socket.AF_INET
+
+    def server_bind(self):
+        # HTTPServer assumes an IP/port pair; filesystem UNIX sockets do not.
+        TCPServer.server_bind(self)
+
+
 class BrowserEgressProxy:
-    def __init__(self, allowed_host, *, allow_private=False, timeout_seconds=15):
-        self.server = _ProxyServer(('127.0.0.1', 0), _ProxyHandler)
+    def __init__(self, allowed_host, *, allow_private=False, timeout_seconds=15, unix_socket=None):
+        self.unix_socket = unix_socket
+        self.server = (_UnixProxyServer(str(unix_socket), _ProxyHandler) if unix_socket
+                       else _ProxyServer(('127.0.0.1', 0), _ProxyHandler))
         self.username = 'avelin'
         self.password = token_urlsafe(32)
         self.server.authorization = 'Basic ' + b64encode(f'{self.username}:{self.password}'.encode()).decode()
@@ -129,7 +140,8 @@ class BrowserEgressProxy:
 
     def __enter__(self):
         self.thread.start()
-        return {'server': f'http://127.0.0.1:{self.server.server_port}',
+        return {**({'socket': str(self.unix_socket)} if self.unix_socket else
+                   {'server': f'http://127.0.0.1:{self.server.server_port}'}),
                 'username': self.username, 'password': self.password, 'bypass': '<-loopback>'}
 
     def __exit__(self, *args):
