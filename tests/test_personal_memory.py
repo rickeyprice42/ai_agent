@@ -34,6 +34,38 @@ def temporary_service(database_file: Path) -> AgentService:
 
 
 class PersonalMemoryDatabaseTests(unittest.TestCase):
+    def test_chat_memory_cancellation_rolls_back_note_episode_and_thread(self):
+        from threading import Event
+        from ai_agent.tools.base import CURRENT_EXECUTION, ToolExecutionContext
+
+        with tempfile.TemporaryDirectory() as directory:
+            memory = MemoryStore(Path(directory) / "memory.sqlite3", user_id="alice")
+            database = memory.database
+            database.add_message("user", "Remember this", thread_id=memory.thread_id)
+            before = memory.current_thread()
+            cancelled = Event()
+            create_record = database.create_memory_record
+
+            def cancel_after_insert(*args, **kwargs):
+                result = create_record(*args, **kwargs)
+                cancelled.set()
+                return result
+
+            token = CURRENT_EXECUTION.set(ToolExecutionContext(cancelled))
+            try:
+                with patch.object(database, "create_memory_record", side_effect=cancel_after_insert):
+                    with self.assertRaises(InterruptedError):
+                        memory.remember_current_chat()
+            finally:
+                CURRENT_EXECUTION.reset(token)
+            self.assertEqual(database.list_notes("alice"), [])
+            self.assertEqual(database.list_memory_records("alice"), [])
+            self.assertEqual(memory.current_thread()["memory_saved_at"], before["memory_saved_at"])
+            memory.remember_current_chat()
+            self.assertEqual(len(database.list_notes("alice")), 1)
+            self.assertEqual(database.list_memory_records("alice")[0]["kind"], "episode")
+            self.assertIsNotNone(memory.current_thread()["memory_saved_at"])
+
     def test_cancelled_note_rolls_back_both_memory_writes(self):
         from threading import Event
         from ai_agent.tools.base import CURRENT_EXECUTION, ToolExecutionContext

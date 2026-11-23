@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2157,7 +2157,8 @@ class AvelinDatabase:
             for row in rows
         ]
 
-    def remember_thread(self, user_id: str, thread_id: str) -> str | None:
+    def remember_thread(self, user_id: str, thread_id: str, *,
+                        check_cancelled: Callable[[], None] | None = None) -> str | None:
         thread = self.get_chat_thread(user_id, thread_id)
         if thread is None or thread["deleted_at"] is not None:
             return None
@@ -2172,34 +2173,40 @@ class AvelinDatabase:
         title = str(thread["title"] or "Chat")
         summary = "; ".join(user_messages[-6:])
         content = f"Chat memory [{title}]: {summary}"
-        note_id = self.add_note(
-            content,
-            user_id=user_id,
-            project_id=thread["project_id"],
-            source_thread_id=thread_id,
-        )
-        self.create_memory_record(
-            user_id,
-            kind="episode",
-            content=content,
-            scope="project" if thread["project_id"] else "chat",
-            project_id=thread["project_id"],
-            thread_id=thread_id,
-            consent_granted=True,
-            source_type="chat_summary",
-            source_id=note_id,
-        )
         with self.connect() as connection:
-            connection.execute(
+            updated = connection.execute(
                 """
                 UPDATE chat_threads
                 SET memory_saved_at = CURRENT_TIMESTAMP,
                     memory_enabled = 1,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = ? AND id = ?
+                WHERE user_id = ? AND id = ? AND deleted_at IS NULL
                 """,
                 (user_id, thread_id),
             )
+            if updated.rowcount != 1:
+                return None
+            note_id = self.add_note(
+                content,
+                user_id=user_id,
+                project_id=thread["project_id"],
+                source_thread_id=thread_id,
+                transaction=connection,
+            )
+            self.create_memory_record(
+                user_id,
+                kind="episode",
+                content=content,
+                scope="project" if thread["project_id"] else "chat",
+                project_id=thread["project_id"],
+                thread_id=thread_id,
+                consent_granted=True,
+                source_type="chat_summary",
+                source_id=note_id,
+                transaction=connection,
+            )
+            if check_cancelled is not None:
+                check_cancelled()
         return content
 
     def add_message(

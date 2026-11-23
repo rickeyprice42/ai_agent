@@ -111,9 +111,7 @@ class MemoryStore:
                 source_id=note_id,
                 transaction=transaction,
             )
-            context = CURRENT_EXECUTION.get()
-            if context is not None and context.cancelled:
-                raise InterruptedError("Memory write cancelled")
+            _check_memory_write_cancelled()
         return f"Запомнил: {note}"
 
     def list_notes(self) -> list[str]:
@@ -347,7 +345,9 @@ class MemoryStore:
                 "Общий чат не переносится в личную память. "
                 "Поделитесь конкретным фактом через общую доску проекта."
             )
-        result = self.database.remember_thread(self.user_id, self.thread_id)
+        result = self.database.remember_thread(
+            self.user_id, self.thread_id, check_cancelled=_check_memory_write_cancelled,
+        )
         if result is None:
             return "Чат не найден или удален."
         if not result:
@@ -566,3 +566,9 @@ def _note_scope(note: dict, current_thread_id: str) -> str:
     if note.get("project_id"):
         return "current_project"
     return "global"
+
+
+def _check_memory_write_cancelled() -> None:
+    context = CURRENT_EXECUTION.get()
+    if context is not None and context.cancelled:
+        raise InterruptedError("Memory write cancelled")
