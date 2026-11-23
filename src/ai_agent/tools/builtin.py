@@ -621,6 +621,8 @@ def register_builtin_tools(
         )
     )
 
+    registry.get("analyze_image").handler.may_incur_usage = True
+
     desktop_output_schema = {
         "type": "object",
         "properties": {

@@ -61,7 +61,7 @@ class StubVision:
 
     def analyze(self, image: bytes, mime_type: str, prompt: str) -> str:
         if self.fail:
-            raise ProviderError("offline", "unavailable")
+            raise ProviderError("model unavailable", "model_not_found")
         return self.text
 
 
@@ -77,6 +77,22 @@ def isolated_settings(root: Path) -> Settings:
 
 
 class MultimodalFailoverTests(unittest.TestCase):
+    def test_unknown_vision_outcome_does_not_call_fallback(self):
+        from ai_agent.llm.vision import analyze_image_result
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (40, 40)).save(root / "fixture.png")
+            primary = StubVision("ollama_cloud", "primary")
+            fallback = StubVision("openai", "fallback")
+            with patch.object(primary, "analyze", side_effect=ProviderError("timeout", "timeout")), \
+                    patch.object(fallback, "analyze") as second:
+                result = analyze_image_result(VisionRouter(root, [primary, fallback]), {"path": "fixture.png"})
+            self.assertTrue(result.error.details["billable_usage_unknown"])
+            self.assertFalse(result.error.retryable)
+            second.assert_not_called()
+
     def test_precise_vision_prefers_configured_openai_and_keeps_normal_routing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

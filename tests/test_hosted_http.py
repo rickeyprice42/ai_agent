@@ -28,6 +28,22 @@ class HTTPHostContracts(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform=='linux' and Path('/usr/bin/bwrap').exists(),'requires Linux bubblewrap')
 class HTTPHostLinux(unittest.TestCase):
+    def test_vision_request_crosses_real_process_with_large_body(self):
+        from dataclasses import replace
+        from ai_agent.tools import hosted_vision
+
+        def fixture(spec, *, timeout_seconds):
+            return _HTTPBroker(replace(spec, entrypoint="http_host_fixture:run",
+                code_root=ROOT / "tests", configuration={**spec.configuration, "operation": "vision"}),
+                timeout_seconds=timeout_seconds)
+
+        with patch.object(hosted_vision, "_HTTPBroker", side_effect=fixture):
+            response = hosted_vision.hosted_vision_request(
+                "https://api.openai.com/v1/responses", {"image": "a" * 2_100_000}, 5,
+                {"Authorization": "Bearer synthetic"}, provider="fixture",
+            )
+        self.assertEqual(response, {"output_text": "Synthetic image description"})
+
     def fixture(self,workspace,operation,timeout=3):
         return _HTTPBroker(ProcessHandlerSpec('http_host_fixture:run',workspace,
             code_root=ROOT/'tests',configuration={'operation':operation},expose_value_errors=True),timeout_seconds=timeout)

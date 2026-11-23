@@ -10,7 +10,7 @@ import mimetypes
 import socket
 
 from ai_agent.llm.base import ProviderError
-from ai_agent.tools.base import ToolResult, failure_result
+from ai_agent.tools.base import CURRENT_EXECUTION, ToolResult, failure_result
 from ai_agent.image_processing import IMAGE_FORMATS, decode_image, jpeg_bytes
 
 
@@ -21,6 +21,8 @@ SUPPORTED_IMAGE_TYPES = {
     ".webp": "image/webp",
     ".gif": "image/gif",
 }
+
+_SAFE_FALLBACK_CODES = {"unauthorized", "model_not_found", "rate_limited", "unavailable_profile"}
 
 OBSERVATION_RULES = (
     "Сначала внимательно прочитай видимые надписи, логотипы и цифры на основном объекте, "
@@ -190,10 +192,15 @@ class VisionRouter:
             # read when configured; general vision keeps its chosen default.
             providers = sorted(providers, key=lambda provider: provider.name != "openai")
         for provider in providers:
+            context = CURRENT_EXECUTION.get()
+            if context is not None and context.cancelled:
+                raise ProviderError("Анализ изображения отменён.", "cancelled")
             try:
                 text = provider.analyze(image, mime_type, prompt)
                 return VisionResult(text=text, provider=provider.name, model=provider.model)
             except ProviderError as exc:
+                if exc.code not in _SAFE_FALLBACK_CODES:
+                    raise
                 last_error = exc
         raise last_error or ProviderError("Все vision-провайдеры недоступны.", "unavailable")
 
@@ -209,7 +216,9 @@ def analyze_image_result(router: VisionRouter, arguments: dict) -> ToolResult:
     except ValueError as exc:
         return failure_result("invalid_image", str(exc))
     except ProviderError as exc:
-        return failure_result(exc.code, exc.user_message, retryable=exc.code in {"timeout", "unavailable", "rate_limited"})
+        unknown = exc.code not in _SAFE_FALLBACK_CODES | {"cancelled"}
+        return failure_result(exc.code, exc.user_message,
+                              details={"outcome_unknown": True, "billable_usage_unknown": True} if unknown else {})
     return ToolResult(
         status="completed",
         output={"text": result.text, "provider": result.provider, "model": result.model},
@@ -224,6 +233,14 @@ def _json_request(
     *,
     provider: str,
 ) -> dict:
+    import sys
+    if sys.platform == "linux" and CURRENT_EXECUTION.get() is not None:
+        from ai_agent.tools.hosted_vision import hosted_vision_request
+        return hosted_vision_request(url, payload, timeout_seconds, extra_headers, provider=provider)
+    return _send_json_request(url, payload, timeout_seconds, extra_headers, provider=provider)
+
+
+def _send_json_request(url, payload, timeout_seconds, extra_headers, *, provider, opener=None):
     headers = {"Content-Type": "application/json", **extra_headers}
     req = request.Request(
         url,
@@ -232,8 +249,15 @@ def _json_request(
         method="POST",
     )
     try:
-        with request.urlopen(req, timeout=timeout_seconds) as response:
-            return json.load(response)
+        open_request = opener or request.urlopen
+        with open_request(req, timeout=timeout_seconds) as response:
+            body = response.read(1_000_001)
+        if len(body) > 1_000_000:
+            raise ProviderError(f"Ответ {provider} превышает допустимый размер.", "invalid_response")
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            raise ProviderError(f"{provider} вернула некорректный результат.", "invalid_response")
+        return data
     except json.JSONDecodeError as exc:
         raise ProviderError(f"{provider} вернула некорректный JSON.", "invalid_response") from exc
     except error.HTTPError as exc:

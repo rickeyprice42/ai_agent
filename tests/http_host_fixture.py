@@ -3,6 +3,18 @@ def run(arguments,configuration):
     import os,socket,subprocess,sys,time
     from pathlib import Path
     operation=configuration['operation']
+    if operation == 'vision':
+        from ai_agent.llm import vision
+        from ai_agent.tools.hosted_vision import call_vision_request
+
+        def fake_send(url, payload, timeout, headers, *, provider, opener):
+            assert payload["image"] == "a" * 2_100_000
+            assert headers["Authorization"] == "Bearer synthetic"
+            assert not Path("/var/lib/avelin/avelin.sqlite3").exists()
+            return {"output_text": "Synthetic image description"}
+
+        vision._send_json_request = fake_send
+        return call_vision_request(arguments, configuration)
     if operation=='boundary':
         return {'secret_env':os.environ.get('AVELIN_TEST_SECRET'),
             'provider_keys':Path('/etc/avelin/provider-keys.txt').exists(),
