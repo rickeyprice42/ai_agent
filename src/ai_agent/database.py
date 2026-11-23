@@ -2534,6 +2534,9 @@ class AvelinDatabase:
         description: str,
         priority: int = 3,
         steps: list[str] | None = None,
+        *,
+        initial_status: str = "created",
+        check_cancelled: Callable[[], None] | None = None,
     ) -> dict:
         self.ensure_user_defaults(user_id)
         task_id = str(uuid4())
@@ -2541,10 +2544,10 @@ class AvelinDatabase:
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO tasks (id, user_id, description, priority)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO tasks (id, user_id, description, priority, status)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (task_id, user_id, description, priority),
+                (task_id, user_id, description, priority, initial_status),
             )
             for position, step in enumerate(normalized_steps, start=1):
                 connection.execute(
@@ -2570,11 +2573,13 @@ class AvelinDatabase:
                     json.dumps(_default_task_usage(), sort_keys=True),
                 ),
             )
+            if check_cancelled is not None:
+                check_cancelled()
         return self.get_task(task_id) or {
             "id": task_id,
             "user_id": user_id,
             "description": description,
-            "status": "created",
+            "status": initial_status,
             "priority": priority,
             "result": None,
             "steps": [],

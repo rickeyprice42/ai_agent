@@ -7,7 +7,7 @@ from ai_agent.memory import MemoryStore
 from ai_agent.past_chats import search_past_chats
 from ai_agent.planner import Planner
 from ai_agent.tasks import TaskManager
-from ai_agent.tools.base import Tool, ToolPermission, ToolRegistry
+from ai_agent.tools.base import CURRENT_EXECUTION, Tool, ToolPermission, ToolRegistry
 from ai_agent.tools.browser import PlaywrightBrowserRunner, browser_interact_result, browser_read_result
 from ai_agent.tools.coding_pack import register_coding_tool_pack
 from ai_agent.tools.media import register_image_tools
@@ -876,6 +876,12 @@ def _format_notes(memory: MemoryStore) -> str:
     return f"Вот что я помню:\n{formatted}"
 
 
+def _check_task_write_cancelled() -> None:
+    context = CURRENT_EXECUTION.get()
+    if context is not None and context.cancelled:
+        raise InterruptedError("Task creation cancelled")
+
+
 def _create_task(tasks: TaskManager, args: dict) -> str:
     raw_steps = args.get("steps", [])
     steps = [str(step) for step in raw_steps if str(step).strip()] if isinstance(raw_steps, list) else []
@@ -883,6 +889,7 @@ def _create_task(tasks: TaskManager, args: dict) -> str:
         description=str(args.get("description", "")),
         priority=int(args.get("priority", 3)),
         steps=steps,
+        check_cancelled=_check_task_write_cancelled,
     )
     return _format_task(task)
 
@@ -896,8 +903,9 @@ def _plan_task(planner: Planner, tasks: TaskManager, args: dict) -> str:
         description=plan.goal,
         priority=plan.priority,
         steps=plan.steps,
+        initial_status="planned",
+        check_cancelled=_check_task_write_cancelled,
     )
-    task = tasks.update_task(task.id, "planned")
     return f"План создан и добавлен в очередь.\n{_format_task(task)}"
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from ai_agent.database import AvelinDatabase
 from ai_agent.task_reports import TaskReportService
 from ai_agent.types import Task, TaskStep
@@ -22,6 +24,9 @@ class TaskManager:
         description: str,
         priority: int = 3,
         steps: list[str] | None = None,
+        *,
+        initial_status: str = "created",
+        check_cancelled: Callable[[], None] | None = None,
     ) -> Task:
         description = description.strip()
         if not description:
@@ -32,6 +37,8 @@ class TaskManager:
             description=description,
             priority=_normalize_priority(priority),
             steps=steps,
+            initial_status=initial_status,
+            check_cancelled=check_cancelled,
         )
         return _task_from_row(task)
 

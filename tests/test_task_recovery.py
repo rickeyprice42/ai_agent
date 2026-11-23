@@ -20,6 +20,32 @@ class TaskRecoveryTests(unittest.TestCase):
     setUp = fixtures.LLMAutomationTests.setUp
     tearDown = fixtures.LLMAutomationTests.tearDown
 
+    def test_plan_tool_rolls_back_task_steps_and_run_on_cancel(self):
+        from types import SimpleNamespace
+        from ai_agent.tools import builtin
+
+        database = self.service.database
+        manager = TaskManager(database, self.user)
+        planner = SimpleNamespace(create_plan=lambda **kwargs: SimpleNamespace(
+            goal="Cancellation fixture", priority=3, steps=["First step"],
+        ))
+
+        def counts():
+            with database.connect() as connection:
+                return tuple(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                             for table in ("tasks", "task_steps", "task_runs"))
+
+        before = counts()
+        with patch.object(builtin, "_check_task_write_cancelled", side_effect=InterruptedError):
+            with self.assertRaises(InterruptedError):
+                builtin._plan_task(planner, manager, {"goal": "Cancellation fixture"})
+        self.assertEqual(counts(), before)
+        builtin._plan_task(planner, manager, {"goal": "Cancellation fixture"})
+        task = manager.list_tasks()[0]
+        self.assertEqual(task.status, "planned")
+        self.assertEqual([step.description for step in task.steps], ["First step"])
+        self.assertEqual(counts(), tuple(count + 1 for count in before))
+
     def orphan(self):
         task = TaskManager(self.service.database,self.user).create_task('Recovery fixture',steps=['External fixture'])
         run = self.service.database.acquire_task_run(self.user,'old-worker')
