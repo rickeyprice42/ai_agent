@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -14,6 +15,24 @@ import sqlite3
 
 DEFAULT_USER_ID = "local-user"
 DEFAULT_THREAD_ID = "default-thread"
+_READ_CANCELLATION: ContextVar[Callable[[], bool] | None] = ContextVar(
+    "database_read_cancellation", default=None,
+)
+
+
+@contextmanager
+def cancellable_database_read(cancelled: Callable[[], bool]) -> Iterator[None]:
+    token = _READ_CANCELLATION.set(cancelled)
+    try:
+        yield
+    finally:
+        _READ_CANCELLATION.reset(token)
+
+
+def check_database_read_cancelled() -> None:
+    cancelled = _READ_CANCELLATION.get()
+    if cancelled is not None and cancelled():
+        raise InterruptedError("Database read cancelled")
 
 
 class AvelinDatabase:
@@ -31,14 +50,21 @@ class AvelinDatabase:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path)
+        cancelled = _READ_CANCELLATION.get()
+        check_database_read_cancelled()
+        connection = sqlite3.connect(self.path, timeout=1.0 if cancelled is not None else 5.0)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
         try:
+            if cancelled is not None:
+                connection.set_progress_handler(cancelled, 1000)
+            connection.execute("PRAGMA foreign_keys = ON")
             yield connection
+            check_database_read_cancelled()
             connection.commit()
         except Exception:
+            connection.set_progress_handler(None, 0)
             connection.rollback()
+            check_database_read_cancelled()
             raise
         finally:
             connection.close()

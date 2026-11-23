@@ -34,6 +34,28 @@ def temporary_service(database_file: Path) -> AgentService:
 
 
 class PersonalMemoryDatabaseTests(unittest.TestCase):
+    def test_cancellable_read_interrupts_a_running_sql_statement(self):
+        from ai_agent.database import cancellable_database_read
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = AvelinDatabase(Path(directory) / "memory.sqlite3")
+            checks = 0
+
+            def cancelled():
+                nonlocal checks
+                checks += 1
+                return checks > 4
+
+            with self.assertRaises(InterruptedError), cancellable_database_read(cancelled):
+                with database.connect() as connection:
+                    connection.execute("""
+                        WITH RECURSIVE numbers(n) AS (
+                            VALUES(1) UNION ALL SELECT n + 1 FROM numbers WHERE n < 100000
+                        ) SELECT SUM(n) FROM numbers
+                    """).fetchone()
+            with database.connect() as connection:
+                self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+
     def test_chat_memory_cancellation_rolls_back_note_episode_and_thread(self):
         from threading import Event
         from ai_agent.tools.base import CURRENT_EXECUTION, ToolExecutionContext

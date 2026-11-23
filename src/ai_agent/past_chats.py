@@ -4,6 +4,7 @@ import json
 import re
 
 from ai_agent.memory import user_authored_text
+from ai_agent.database import check_database_read_cancelled
 from ai_agent.types import Message
 
 
@@ -24,6 +25,7 @@ def search_past_chats(memory, query: str) -> dict:
 
     matches = []
     for row in memory.database.past_chat_messages(memory.user_id, memory.thread_id, terms):
+        check_database_read_cancelled()
         content = row["content"]
         if row["role"] == "user":
             try:

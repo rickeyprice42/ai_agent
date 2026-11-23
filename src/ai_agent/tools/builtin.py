@@ -8,6 +8,7 @@ from ai_agent.past_chats import search_past_chats
 from ai_agent.planner import Planner
 from ai_agent.tasks import TaskManager
 from ai_agent.tools.base import CURRENT_EXECUTION, Tool, ToolPermission, ToolRegistry
+from ai_agent.database import cancellable_database_read, check_database_read_cancelled
 from ai_agent.tools.browser import PlaywrightBrowserRunner, browser_interact_result, browser_read_result
 from ai_agent.tools.coding_pack import register_coding_tool_pack
 from ai_agent.tools.media import register_image_tools
@@ -87,7 +88,7 @@ def register_builtin_tools(
             name="recall_notes",
             description="Возвращает сохраненные заметки пользователя.",
             schema={"type": "object", "properties": {}},
-            handler=lambda _: _format_notes(memory),
+            handler=lambda _: _read_state(_format_notes, memory),
         )
     )
 
@@ -104,7 +105,7 @@ def register_builtin_tools(
                 "properties": {"query": {"type": "string", "minLength": 3, "maxLength": 300}},
                 "required": ["query"],
             },
-            handler=lambda args: search_past_chats(memory, args["query"]),
+            handler=lambda args: _read_state(search_past_chats, memory, args["query"]),
             output_schema={"type":"object","properties":{"matches":{"type":"array"},"message":{"type":"string"}},
                 "required":["matches","message"],"additionalProperties":False},
         )
@@ -769,7 +770,9 @@ def register_builtin_tools(
                     "limit": {"type": "integer", "description": "Сколько задач показать"},
                 },
             },
-            handler=lambda args: _format_tasks(tasks.list_tasks(limit=int(args.get("limit", 20)))),
+            handler=lambda args: _read_state(
+                lambda: _format_tasks(tasks.list_tasks(limit=int(args.get("limit", 20)))),
+            ),
         )
     )
 
@@ -884,6 +887,17 @@ def _format_notes(memory: MemoryStore) -> str:
         return "В памяти пока ничего нет."
     formatted = "\n".join(f"{index}. {note}" for index, note in enumerate(notes, start=1))
     return f"Вот что я помню:\n{formatted}"
+
+
+def _read_state(operation, *args):
+    context = CURRENT_EXECUTION.get()
+    if context is None:
+        return operation(*args)
+    with cancellable_database_read(lambda: context.cancelled):
+        check_database_read_cancelled()
+        result = operation(*args)
+        check_database_read_cancelled()
+        return result
 
 
 def _check_task_write_cancelled() -> None:
