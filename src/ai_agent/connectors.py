@@ -341,15 +341,29 @@ class ConnectorRegistry:
                 return _connector_failure(ConnectorFailure("disconnected", "Connector is disabled."))
             try:
                 self._consume_rate_limit(entry)
-                raw = entry.client.call_tool(spec.name, arguments, context.cancellation)
             except ConnectorFailure as exc:
                 return _connector_failure(exc)
+            if context.cancelled:
+                return ToolResult(status="cancelled", error=ToolError("cancelled", "Connector call was cancelled."))
+            try:
+                raw = entry.client.call_tool(spec.name, arguments, context.cancellation)
+            except ConnectorFailure as exc:
+                if exc.code == "unavailable" or context.cancelled:
+                    return _unknown_connector_outcome()
+                return _connector_failure(exc)
+            except Exception:
+                return _unknown_connector_outcome()
+            if isinstance(entry.client, McpClient) and isinstance(raw, dict) and raw.get("isError") is True:
+                return _unknown_connector_outcome()
             output = {
                 "data": raw,
                 "provenance": {"source": "external_connector", "connector_id": connector_id, "tool": spec.name},
                 "trust": "untrusted_external_data",
             }
             return ToolResult(status="completed", output=output, display_text=json.dumps(output, ensure_ascii=False, sort_keys=True))
+
+        # The remote server's read-only annotation is only a hint.
+        handler.may_have_remote_effects = True
 
         tool = Tool(
             name=tool_name,
@@ -385,6 +399,12 @@ class ConnectorRegistry:
         if connector_id not in self._entries:
             raise KeyError("Connector not found.")
         return self._entries[connector_id]
+
+
+def _unknown_connector_outcome() -> ToolResult:
+    message = "Не удалось подтвердить исход запроса к коннектору. Проверьте результат перед повтором."
+    return ToolResult(status="failed", display_text=message,
+                      error=ToolError("connector_outcome_unknown", message, details={"outcome_unknown": True}))
 
 
 def _connector_failure(exc: ConnectorFailure) -> ToolResult:

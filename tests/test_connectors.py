@@ -87,6 +87,33 @@ def isolated_settings(root: Path) -> Settings:
 
 
 class ConnectorContractTests(unittest.TestCase):
+    def test_mcp_timeout_and_remote_error_are_unconfirmed_even_for_read_hint(self):
+        for remote_error in (False, True):
+            with self.subTest(remote_error=remote_error):
+                calls = []
+
+                def request(method, params, timeout, cancellation):
+                    if method == "tools/list":
+                        return {"tools": [{"name": "lookup", "inputSchema": READ_SCHEMA,
+                                           "annotations": {"readOnlyHint": True}}]}
+                    if method == "tools/call":
+                        calls.append(method)
+                        if remote_error:
+                            return {"isError": True, "content": [{"type": "text", "text": "private detail"}]}
+                        raise TimeoutError("private transport detail")
+                    return {}
+
+                tools = ToolRegistry()
+                ConnectorRegistry(tools).register(
+                    McpClient(ConnectorDescriptor("demo", "Demo", "Fixture"), request)
+                )
+                result = tools.invoke("connector_demo_lookup", {"query": "fixture"})
+                self.assertFalse(result.ok)
+                self.assertTrue(result.error.details["outcome_unknown"])
+                self.assertFalse(result.error.retryable)
+                self.assertNotIn("private", result.text())
+                self.assertEqual(calls, ["tools/call"])
+
     def test_authenticated_connector_discovery_search_and_state_api(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

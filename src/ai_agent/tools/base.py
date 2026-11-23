@@ -368,7 +368,7 @@ class ToolRegistry:
                 if remaining <= 0:
                     local_cancel.set()
                     executor.shutdown(wait=True)
-                    safe_read = tool.idempotent and all(permission.risk=='read' for permission in tool.permissions) and not getattr(tool.handler,'may_incur_usage',False)
+                    safe_read = tool.idempotent and not _unknown_execution_details(tool)
                     return _failure('timeout', f"Инструмент '{tool.name}' превысил таймаут {tool.timeout_seconds:g} сек.", retryable=safe_read,
                                     details=_unknown_execution_details(tool))
                 try:
@@ -423,7 +423,8 @@ class ToolRegistry:
 
 def _unknown_execution_details(tool):
     billable=bool(getattr(tool.handler,'may_incur_usage',False))
-    details={'outcome_unknown':True} if billable or any(p.risk!='read' for p in tool.permissions) else {}
+    uncertain = getattr(tool.handler, 'may_have_remote_effects', False)
+    details={'outcome_unknown':True} if billable or uncertain or any(p.risk!='read' for p in tool.permissions) else {}
     if billable:details['billable_usage_unknown']=True
     return details
 
