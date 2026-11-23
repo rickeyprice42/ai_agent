@@ -20,6 +20,28 @@ class TaskRecoveryTests(unittest.TestCase):
     setUp = fixtures.LLMAutomationTests.setUp
     tearDown = fixtures.LLMAutomationTests.tearDown
 
+    def test_cancelled_task_updates_leave_task_and_steps_intact(self):
+        manager = TaskManager(self.service.database, self.user)
+        task = manager.create_task("Mutation fixture", steps=["Original"])
+        before = self.service.database.get_task(task.id)
+
+        def cancel():
+            raise InterruptedError("Cancelled before commit")
+
+        for action, args in (
+            (manager.add_step, (task.id, "Extra")),
+            (manager.update_task, (task.id, "completed", "Result")),
+            (manager.update_step, (task.steps[0].id, "completed", "Result")),
+        ):
+            with self.subTest(action=action.__name__):
+                with self.assertRaises(InterruptedError):
+                    action(*args, check_cancelled=cancel)
+                self.assertEqual(self.service.database.get_task(task.id), before)
+
+        updated = manager.add_step(task.id, "Extra")
+        self.assertEqual(updated.status, "planned")
+        self.assertEqual([step.description for step in updated.steps], ["Original", "Extra"])
+
     def test_plan_tool_rolls_back_task_steps_and_run_on_cancel(self):
         from types import SimpleNamespace
         from ai_agent.tools import builtin

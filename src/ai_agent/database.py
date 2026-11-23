@@ -2648,7 +2648,8 @@ class AvelinDatabase:
             )
         return tasks
 
-    def update_task_status(self, task_id: str, status: str, result: str | None = None) -> dict | None:
+    def update_task_status(self, task_id: str, status: str, result: str | None = None, *,
+                        check_cancelled: Callable[[], None] | None = None) -> dict | None:
         with self.connect() as connection:
             connection.execute(
                 """
@@ -2658,6 +2659,8 @@ class AvelinDatabase:
                 """,
                 (status, result, task_id),
             )
+            if check_cancelled is not None:
+                check_cancelled()
         return self.get_task(task_id)
 
     def clear_task_result(self, task_id: str) -> dict | None:
@@ -2695,12 +2698,15 @@ class AvelinDatabase:
                 for row in rows
             ]
 
-    def add_task_step(self, task_id: str, description: str) -> dict | None:
-        task = self.get_task(task_id)
-        if task is None:
-            return None
-        position = len(task["steps"]) + 1
+    def add_task_step(self, task_id: str, description: str, *,
+                        check_cancelled: Callable[[], None] | None = None) -> dict | None:
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
+                return None
+            position = connection.execute(
+                "SELECT COALESCE(MAX(position), 0) + 1 FROM task_steps WHERE task_id = ?", (task_id,),
+            ).fetchone()[0]
             connection.execute(
                 """
                 INSERT INTO task_steps (id, task_id, position, description)
@@ -2717,6 +2723,8 @@ class AvelinDatabase:
                 """,
                 (task_id,),
             )
+            if check_cancelled is not None:
+                check_cancelled()
         return self.get_task(task_id)
 
     def update_task_step_status(
@@ -2724,6 +2732,8 @@ class AvelinDatabase:
         step_id: str,
         status: str,
         result: str | None = None,
+        *,
+        check_cancelled: Callable[[], None] | None = None,
     ) -> dict | None:
         with self.connect() as connection:
             row = connection.execute(
@@ -2741,6 +2751,8 @@ class AvelinDatabase:
                 """,
                 (status, result, step_id),
             )
+            if check_cancelled is not None:
+                check_cancelled()
         return self.get_task(task_id)
 
     def get_task_run(self, user_id: str, run_id: str) -> dict | None:

@@ -252,17 +252,21 @@ class TaskManager:
         updated = self.update_step(step.id, "blocked", result)
         return self.update_task(updated.id, "blocked", result)
 
-    def add_step(self, task_id: str, description: str) -> Task:
+    def add_step(self, task_id: str, description: str, *,
+                   check_cancelled: Callable[[], None] | None = None) -> Task:
         description = description.strip()
         if not description:
             raise ValueError("Описание шага не должно быть пустым.")
 
-        task = self.database.add_task_step(task_id=task_id.strip(), description=description)
+        task = self.database.add_task_step(
+            task_id=task_id.strip(), description=description, check_cancelled=check_cancelled,
+        )
         if task is None:
             raise ValueError("Задача не найдена.")
         return _task_from_row(task)
 
-    def update_task(self, task_id: str, status: str, result: str | None = None) -> Task:
+    def update_task(self, task_id: str, status: str, result: str | None = None, *,
+                   check_cancelled: Callable[[], None] | None = None) -> Task:
         normalized_status = status.strip().lower()
         if normalized_status not in TASK_STATUSES:
             raise ValueError(f"Неизвестный статус задачи: {status}.")
@@ -270,13 +274,15 @@ class TaskManager:
         task = self.database.update_task_status(
             task_id=task_id.strip(),
             status=normalized_status,
+            check_cancelled=check_cancelled,
             result=result.strip() if isinstance(result, str) and result.strip() else None,
         )
         if task is None:
             raise ValueError("Задача не найдена.")
         return _task_from_row(task)
 
-    def update_step(self, step_id: str, status: str, result: str | None = None) -> Task:
+    def update_step(self, step_id: str, status: str, result: str | None = None, *,
+                   check_cancelled: Callable[[], None] | None = None) -> Task:
         normalized_status = status.strip().lower()
         if normalized_status not in STEP_STATUSES:
             raise ValueError(f"Неизвестный статус шага: {status}.")
@@ -284,6 +290,7 @@ class TaskManager:
         task = self.database.update_task_step_status(
             step_id=step_id.strip(),
             status=normalized_status,
+            check_cancelled=check_cancelled,
             result=result.strip() if isinstance(result, str) and result.strip() else None,
         )
         if task is None:

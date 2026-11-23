@@ -733,6 +733,7 @@ def register_builtin_tools(
                 },
                 "required": ["description"],
             },
+            permissions=(ToolPermission("tasks.write", "write"),),
             handler=lambda args: _create_task(tasks, args),
         )
     )
@@ -752,6 +753,7 @@ def register_builtin_tools(
                 },
                 "required": ["goal"],
             },
+            permissions=(ToolPermission("tasks.write", "write"),),
             handler=lambda args: _plan_task(planner, tasks, args),
         )
     )
@@ -794,10 +796,12 @@ def register_builtin_tools(
                 },
                 "required": ["task_id", "description"],
             },
+            permissions=(ToolPermission("tasks.write", "write"),),
             handler=lambda args: _format_task(
                 tasks.add_step(
                     task_id=str(args.get("task_id", "")),
                     description=str(args.get("description", "")),
+                    check_cancelled=_check_task_write_cancelled,
                 )
             ),
         )
@@ -819,11 +823,13 @@ def register_builtin_tools(
                 },
                 "required": ["task_id", "status"],
             },
+            permissions=(ToolPermission("tasks.write", "write"),),
             handler=lambda args: _format_task(
                 tasks.update_task(
                     task_id=str(args.get("task_id", "")),
                     status=str(args.get("status", "")),
                     result=str(args.get("result", "")),
+                    check_cancelled=_check_task_write_cancelled,
                 )
             ),
         )
@@ -845,11 +851,13 @@ def register_builtin_tools(
                 },
                 "required": ["step_id", "status"],
             },
+            permissions=(ToolPermission("tasks.write", "write"),),
             handler=lambda args: _format_task(
                 tasks.update_step(
                     step_id=str(args.get("step_id", "")),
                     status=str(args.get("status", "")),
                     result=str(args.get("result", "")),
+                    check_cancelled=_check_task_write_cancelled,
                 )
             ),
         )
@@ -879,7 +887,7 @@ def _format_notes(memory: MemoryStore) -> str:
 def _check_task_write_cancelled() -> None:
     context = CURRENT_EXECUTION.get()
     if context is not None and context.cancelled:
-        raise InterruptedError("Task creation cancelled")
+        raise InterruptedError("Task write cancelled")
 
 
 def _create_task(tasks: TaskManager, args: dict) -> str:
