@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -1225,10 +1225,13 @@ class AvelinDatabase:
         user_id: str = DEFAULT_USER_ID,
         project_id: str | None = None,
         source_thread_id: str | None = None,
+        *,
+        transaction: sqlite3.Connection | None = None,
     ) -> str:
-        self.ensure_user_defaults(user_id)
+        if transaction is None:
+            self.ensure_user_defaults(user_id)
         note_id = str(uuid4())
-        with self.connect() as connection:
+        with (self.connect() if transaction is None else nullcontext(transaction)) as connection:
             connection.execute(
                 """
                 INSERT INTO notes (id, user_id, content, project_id, source_thread_id)
@@ -1269,8 +1272,10 @@ class AvelinDatabase:
         source_type: str = "user",
         source_id: str | None = None,
         source_uri: str | None = None,
+        transaction: sqlite3.Connection | None = None,
     ) -> dict:
-        self.ensure_user_defaults(user_id)
+        if transaction is None:
+            self.ensure_user_defaults(user_id)
         normalized_kind = _normalize_memory_kind(kind)
         normalized_scope = _normalize_memory_scope(scope)
         normalized_content = content.strip()
@@ -1288,7 +1293,7 @@ class AvelinDatabase:
         store = "health" if sensitive else "personal"
         memory_id = str(uuid4())
         consented_at = datetime.now(timezone.utc).isoformat()
-        with self.connect() as connection:
+        with (self.connect() if transaction is None else nullcontext(transaction)) as connection:
             connection.execute(
                 f"""
                 INSERT INTO {table} (
@@ -1320,6 +1325,11 @@ class AvelinDatabase:
                 """,
                 (str(uuid4()), user_id, memory_id, store, source_type.strip() or "user", source_id, source_uri),
             )
+        if transaction is not None:
+            row = transaction.execute(
+                f"SELECT * FROM {table} WHERE user_id = ? AND id = ?", (user_id, memory_id),
+            ).fetchone()
+            return self._memory_record_payload(transaction, row, store, sensitive)
         record = self.get_memory_record(user_id, memory_id, sensitive=sensitive)
         if record is None:
             raise RuntimeError("Saved memory could not be loaded.")

@@ -34,6 +34,30 @@ def temporary_service(database_file: Path) -> AgentService:
 
 
 class PersonalMemoryDatabaseTests(unittest.TestCase):
+    def test_cancelled_note_rolls_back_both_memory_writes(self):
+        from threading import Event
+        from ai_agent.tools.base import CURRENT_EXECUTION, ToolExecutionContext
+
+        with tempfile.TemporaryDirectory() as directory:
+            memory = MemoryStore(Path(directory) / "memory.sqlite3", user_id="alice")
+            cancelled = Event()
+            create_record = memory.database.create_memory_record
+
+            def cancel_after_insert(*args, **kwargs):
+                result = create_record(*args, **kwargs)
+                cancelled.set()
+                return result
+
+            token = CURRENT_EXECUTION.set(ToolExecutionContext(cancelled))
+            try:
+                with patch.object(memory.database, "create_memory_record", side_effect=cancel_after_insert):
+                    with self.assertRaises(InterruptedError):
+                        memory.add_note("Cancelled note")
+            finally:
+                CURRENT_EXECUTION.reset(token)
+            self.assertEqual(memory.database.list_notes("alice"), [])
+            self.assertEqual(memory.database.list_memory_records("alice"), [])
+
     def test_explicit_remember_tool_dual_writes_lifecycle_record(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
