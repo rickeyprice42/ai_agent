@@ -20,6 +20,38 @@ class TaskRecoveryTests(unittest.TestCase):
     setUp = fixtures.LLMAutomationTests.setUp
     tearDown = fixtures.LLMAutomationTests.tearDown
 
+    def test_cancelled_start_rolls_back_task_and_first_step(self):
+        manager = TaskManager(self.service.database, self.user)
+        task = manager.create_task("Start fixture", steps=["First", "Second"])
+
+        def cancel():
+            raise InterruptedError("Cancelled before commit")
+
+        with self.assertRaises(InterruptedError):
+            manager.start_next_task(check_cancelled=cancel)
+        unchanged = manager.get_task(task.id)
+        self.assertEqual(unchanged.status, "created")
+        self.assertEqual([step.status for step in unchanged.steps], ["pending", "pending"])
+        started = manager.start_next_task()
+        self.assertEqual(started.status, "executing")
+        self.assertEqual([step.status for step in started.steps], ["running", "pending"])
+
+    def test_outer_tool_cancellation_reaches_durable_run_guard(self):
+        from ai_agent.run_cancellation import RunCancellation
+        from ai_agent.tools.base import ToolExecutionContext
+
+        task, run, _ = self.orphan()
+        database = self.service.database
+        with database.connect() as connection:
+            connection.execute("UPDATE task_runs SET control_requested=NULL WHERE id=?", (run["id"],))
+        parent = Event()
+        with RunCancellation(database, self.user, run["id"], "old-worker",
+                             tool_parent=ToolExecutionContext(parent)) as guard:
+            self.assertFalse(guard.is_set())
+            parent.set()
+            self.assertTrue(guard.cancellation.wait(2))
+            self.assertEqual(guard.outcome, "cancelled")
+
     def test_cancelled_task_updates_leave_task_and_steps_intact(self):
         manager = TaskManager(self.service.database, self.user)
         task = manager.create_task("Mutation fixture", steps=["Original"])

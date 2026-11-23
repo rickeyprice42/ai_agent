@@ -709,6 +709,7 @@ def register_builtin_tools(
                 "Сам выбирает безопасный инструмент для известных типов шагов, пишет action log и обновляет статусы."
             ),
             schema={"type": "object", "properties": {}},
+            permissions=(ToolPermission("tasks.write", "write"),),
             handler=lambda _: executor.execute_next_step(),
         )
     )
@@ -780,6 +781,7 @@ def register_builtin_tools(
                 "и первый pending-шаг в running."
             ),
             schema={"type": "object", "properties": {}},
+            permissions=(ToolPermission("tasks.write", "write"),),
             handler=lambda _: _start_next_task(tasks),
         )
     )
@@ -918,7 +920,7 @@ def _plan_task(planner: Planner, tasks: TaskManager, args: dict) -> str:
 
 
 def _start_next_task(tasks: TaskManager) -> str:
-    task = tasks.start_next_task()
+    task = tasks.start_next_task(check_cancelled=_check_task_write_cancelled)
     if task is None:
         return "В очереди нет задач, которые можно запустить."
 

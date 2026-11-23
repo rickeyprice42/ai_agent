@@ -152,16 +152,15 @@ class TaskManager:
                 return task
         return None
 
-    def start_next_task(self) -> Task | None:
+    def start_next_task(self, *, check_cancelled: Callable[[], None] | None = None) -> Task | None:
         task = self.next_runnable_task()
         if task is None:
             return None
 
-        started = self.update_task(task.id, "executing")
-        for step in started.steps:
-            if step.status == "pending":
-                return self.update_step(step.id, "running")
-        return started
+        started = self.database.start_task_with_first_step(
+            self.user_id, task.id, check_cancelled=check_cancelled,
+        )
+        return _task_from_row(started) if started is not None else None
 
     def ensure_running_task(self) -> Task | None:
         active = self.active_task()

@@ -4,7 +4,7 @@ from time import monotonic
 
 
 class RunCancellation:
-    def __init__(self,database,user_id,run_id,worker_id,*,remaining_seconds=3600,lease_seconds=180,parent=None,shutdown=None):
+    def __init__(self,database,user_id,run_id,worker_id,*,remaining_seconds=3600,lease_seconds=180,parent=None,tool_parent=None,shutdown=None):
         self.database=database;self.user_id=user_id;self.run_id=run_id;self.worker_id=worker_id
         self.deadline=monotonic()+max(0,remaining_seconds)
         self.lease_seconds=lease_seconds
@@ -12,6 +12,7 @@ class RunCancellation:
         self.outcome=None;self.reason=''
         self.thread=None
         self.parent=parent
+        self.tool_parent=tool_parent
         self.shutdown=shutdown
         self.next_heartbeat=monotonic()+min(5,lease_seconds/3)
 
@@ -23,7 +24,8 @@ class RunCancellation:
             self.cancellation.set()
 
     def _poll(self):
-        if self.parent is not None and self.parent.is_set():
+        if ((self.parent is not None and self.parent.is_set())
+                or (self.tool_parent is not None and self.tool_parent.cancelled)):
             self._cancel('cancelled','Выполнение остановлено пользователем.')
         run=self.database.get_task_run(self.user_id,self.run_id)
         owned=run and run['state']=='running' and run['worker_id']==self.worker_id

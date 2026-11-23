@@ -17,7 +17,7 @@ from ai_agent.security import (
     tool_risk,
 )
 from ai_agent.tasks import TaskManager
-from ai_agent.tools.base import ToolRegistry
+from ai_agent.tools.base import CURRENT_EXECUTION, ToolRegistry
 from ai_agent.types import Task, TaskStep
 
 
@@ -67,6 +67,9 @@ class ExecutionEngine:
         return True
 
     def execute_next_step(self, approved_step_id: str | None = None, run_id: str | None = None) -> str:
+        parent = CURRENT_EXECUTION.get()
+        if parent is not None and parent.cancelled:
+            return "Выполнение отменено до запуска."
         if self.shutdown_event is not None and self.shutdown_event.is_set():
             return 'Сервис останавливается. Новая задача не запущена.'
         del approved_step_id
@@ -90,6 +93,9 @@ class ExecutionEngine:
 
         checkpoints = self.tasks.checkpoints(run["id"])
         decision = self.action_planner.decide(task, step, checkpoints)
+        if parent is not None and parent.cancelled:
+            self.tasks.set_run_state(run["id"], "cancelled", worker_id=self.worker_id)
+            return "Выполнение отменено до вызова инструмента."
         if decision.tool_name is None:
             result = (
                 "Не удалось подобрать действие для этого шага. Уточни действие или разбей задачу на шаги.\n"
@@ -220,7 +226,8 @@ class ExecutionEngine:
         try:
             with RunCancellation(self.tasks.database,self.tasks.user_id,run['id'],self.worker_id,
                                  remaining_seconds=remaining_seconds,
-                                 lease_seconds=self.lease_seconds,parent=cancellation,shutdown=self.shutdown_event) as guard:
+                                 lease_seconds=self.lease_seconds,parent=cancellation,
+                                 tool_parent=parent,shutdown=self.shutdown_event) as guard:
                 invocation = self.tools.invoke(
                     decision.tool_name,
                     arguments,

@@ -2648,6 +2648,26 @@ class AvelinDatabase:
             )
         return tasks
 
+    def start_task_with_first_step(self, user_id: str, task_id: str, *,
+                                   check_cancelled: Callable[[], None] | None = None) -> dict | None:
+        with self.connect() as connection:
+            updated = connection.execute(
+                """UPDATE tasks SET status = 'executing', updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND user_id = ? AND status IN ('created', 'planned')""",
+                (task_id, user_id),
+            )
+            if updated.rowcount != 1:
+                return None
+            connection.execute(
+                """UPDATE task_steps SET status = 'running', updated_at = CURRENT_TIMESTAMP
+                   WHERE id = (SELECT id FROM task_steps WHERE task_id = ? AND status = 'pending'
+                               ORDER BY position, created_at LIMIT 1)""",
+                (task_id,),
+            )
+            if check_cancelled is not None:
+                check_cancelled()
+        return self.get_task(task_id)
+
     def update_task_status(self, task_id: str, status: str, result: str | None = None, *,
                         check_cancelled: Callable[[], None] | None = None) -> dict | None:
         with self.connect() as connection:
