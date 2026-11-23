@@ -266,7 +266,12 @@ class ConnectorRegistry:
         self.tools = tools
         self._entries: dict[str, _ConnectorEntry] = {}
 
-    def register(self, client: ConnectorClient, *, enabled: bool = True) -> None:
+    def register(self, client: ConnectorClient, *, enabled: bool = True,
+                 require_isolated: bool = False) -> None:
+        if require_isolated:
+            from ai_agent.tools.hosted_mcp import HostedMcpRequest
+            if type(client) is not McpClient or type(client._request) is not HostedMcpRequest:
+                raise ValueError("Server connectors require McpClient.for_https for cancellable execution.")
         descriptor = client.descriptor
         connector_id = _safe_name(descriptor.connector_id)
         if connector_id != descriptor.connector_id or connector_id in self._entries:

@@ -41,7 +41,7 @@ class HTTPHostLinux(unittest.TestCase):
         with patch.object(hosted_mcp, "_HTTPBroker", side_effect=fixture) as broker:
             client = McpClient.for_https(ConnectorDescriptor("demo", "Demo", "Fixture"),
                                          "https://example.com/mcp", timeout_seconds=1)
-            ConnectorRegistry(registry).register(client)
+            ConnectorRegistry(registry).register(client, require_isolated=True)
             self.assertTrue(registry.invoke("connector_demo_lookup", {"query": "ok"}).ok)
             before = broker.call_count
             started = time.monotonic()

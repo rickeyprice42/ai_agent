@@ -98,6 +98,8 @@ class _LockedEventStream:
 
 
 class AgentService:
+    require_isolated_connectors = True
+
     def __init__(self) -> None:
         self.root_dir = ROOT
         self.settings = Settings.load(self.root_dir)
@@ -124,7 +126,8 @@ class AgentService:
                 enabled = self.database.connector_enabled(
                     user_id, client.descriptor.connector_id, default=True
                 )
-                agent.connectors.register(client, enabled=enabled)
+                agent.connectors.register(client, enabled=enabled,
+                                          require_isolated=self.require_isolated_connectors)
             self._agents[key] = agent
         from ai_agent.worker_lifecycle import task_worker_stop
         self._agents[key].executor.shutdown_event = task_worker_stop(self)

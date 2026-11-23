@@ -87,6 +87,17 @@ def isolated_settings(root: Path) -> Settings:
 
 
 class ConnectorContractTests(unittest.TestCase):
+    def test_isolated_registry_rejects_callback_before_connecting(self):
+        calls = []
+        client = McpClient(ConnectorDescriptor("legacy", "Legacy", "Fixture"),
+                           lambda *args: calls.append(args))
+        registry = ToolRegistry()
+        connectors = ConnectorRegistry(registry)
+        with self.assertRaisesRegex(ValueError, "McpClient.for_https"):
+            connectors.register(client, require_isolated=True)
+        self.assertEqual(calls, [])
+        self.assertEqual(connectors.list(), [])
+
     def test_mcp_timeout_and_remote_error_are_unconfirmed_even_for_read_hint(self):
         for remote_error in (False, True):
             with self.subTest(remote_error=remote_error):
@@ -128,6 +139,7 @@ class ConnectorContractTests(unittest.TestCase):
             )
             service._agents = {}
             service._connector_factories = []
+            service.require_isolated_connectors = False
             service.register_connector_factory(
                 lambda _user_id: make_connector(
                     "catalog", "search", "read", lambda args, _: [args["query"]]

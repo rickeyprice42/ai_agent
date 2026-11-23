@@ -46,7 +46,9 @@ Typed failures: `disconnected`, `auth_required`, `permission_denied`,
 Отмена завершает локальное соединение. Действие, уже принятое удалённым сервером,
 остаётся с неизвестным исходом и требует проверки перед повтором.
 
-Собственный транспорт создаёт `McpClient` и передаёт callback с сигнатурой
+Серверный `AgentService` принимает только `McpClient.for_https`. Проверка
+выполняется до подключения транспорта и регистрации его инструментов.
+Для локальных тестов реестр допускает собственный callback с сигнатурой
 `(method, params, timeout_seconds, cancellation_event)`. Callback самостоятельно
 добавляет credentials на сетевой/stdio границе и никогда не возвращает их в
 результат. После `agent.connectors.register(client)` MCP tools становятся обычными
