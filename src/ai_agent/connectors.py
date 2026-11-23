@@ -80,6 +80,15 @@ MCP_HANDSHAKE_VERSION = "2025-11-25"
 class McpClient:
     """Transport-neutral MCP lifecycle; credentials stay inside the request transport."""
 
+    @classmethod
+    def for_https(cls, descriptor: ConnectorDescriptor, endpoint: str, *,
+                  bearer_token: str = "", timeout_seconds: float = 30.0) -> McpClient:
+        """Use a fixed process transport for an administrator-configured endpoint."""
+        from ai_agent.tools.hosted_mcp import HostedMcpRequest
+
+        return cls(descriptor, HostedMcpRequest(endpoint, bearer_token=bearer_token),
+                   timeout_seconds=timeout_seconds)
+
     def __init__(
         self,
         descriptor: ConnectorDescriptor,

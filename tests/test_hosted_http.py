@@ -28,6 +28,29 @@ class HTTPHostContracts(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform=='linux' and Path('/usr/bin/bwrap').exists(),'requires Linux bubblewrap')
 class HTTPHostLinux(unittest.TestCase):
+    def test_mcp_factory_reads_json_sse_and_terminates_hung_worker(self):
+        from dataclasses import replace
+        from ai_agent.connectors import ConnectorDescriptor, ConnectorRegistry, McpClient
+        from ai_agent.tools import hosted_mcp
+
+        def fixture(spec, *, timeout_seconds):
+            return _HTTPBroker(replace(spec, entrypoint="http_host_fixture:run", code_root=ROOT / "tests",
+                configuration={**spec.configuration, "operation": "mcp"}), timeout_seconds=timeout_seconds)
+
+        registry = ToolRegistry()
+        with patch.object(hosted_mcp, "_HTTPBroker", side_effect=fixture) as broker:
+            client = McpClient.for_https(ConnectorDescriptor("demo", "Demo", "Fixture"),
+                                         "https://example.com/mcp", timeout_seconds=1)
+            ConnectorRegistry(registry).register(client)
+            self.assertTrue(registry.invoke("connector_demo_lookup", {"query": "ok"}).ok)
+            before = broker.call_count
+            started = time.monotonic()
+            result = registry.invoke("connector_demo_lookup", {"query": "hang"})
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertEqual(broker.call_count - before, 1)
+            self.assertTrue(result.error.details["outcome_unknown"])
+            self.assertFalse(result.error.retryable)
+
     def test_vision_request_crosses_real_process_with_large_body(self):
         from dataclasses import replace
         from ai_agent.tools import hosted_vision

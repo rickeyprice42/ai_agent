@@ -38,7 +38,15 @@ Typed failures: `disconnected`, `auth_required`, `permission_denied`,
 
 ## Подключение transport
 
-Production transport создаёт `McpClient` и передаёт callback с сигнатурой
+Для настроенного администратором публичного HTTPS-сервера на Linux фабрика
+может создать клиент через `McpClient.for_https(descriptor, endpoint, bearer_token=token)`.
+Каждый POST выполняется в отдельном процессе. Поддерживаются JSON и получение
+ответа на текущий запрос из SSE, а также заголовки версии и сессии MCP.
+Возобновление SSE и автоматическое переподключение с повтором запроса не реализованы.
+Отмена завершает локальное соединение. Действие, уже принятое удалённым сервером,
+остаётся с неизвестным исходом и требует проверки перед повтором.
+
+Собственный транспорт создаёт `McpClient` и передаёт callback с сигнатурой
 `(method, params, timeout_seconds, cancellation_event)`. Callback самостоятельно
 добавляет credentials на сетевой/stdio границе и никогда не возвращает их в
 результат. После `agent.connectors.register(client)` MCP tools становятся обычными
