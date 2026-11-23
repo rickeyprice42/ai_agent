@@ -80,6 +80,7 @@ class BrowserResearchReader:
         # Linux installs a fixed process profile for the HTTP/parse phase.
         # Cache ownership and browser fallback stay in this reader.
         self.http_stage = None
+        self.browser_result_stage = None
 
     def availability(self) -> tuple[bool, str | None]:
         return True, None
@@ -124,6 +125,11 @@ class BrowserResearchReader:
                 adapter=adapter,
                 force_browser=force_browser,
             )
+            result["cache_hit"] = False
+            cached_result = _deepcopy(result)
+            context = CURRENT_EXECUTION.get()
+            if context is not None and context.cancelled:
+                raise ResearchFailure('cancelled', 'Выполнение reader отменено.')
         except ResearchFailure as exc:
             self._trace.append(
                 {
@@ -135,8 +141,7 @@ class BrowserResearchReader:
                 }
             )
             raise
-        result["cache_hit"] = False
-        self._cache[cache_key] = (monotonic(), _deepcopy(result))
+        self._cache[cache_key] = (monotonic(), cached_result)
         self._record_trace(result, result["extraction_method"], started)
         return result
 
@@ -245,6 +250,18 @@ class BrowserResearchReader:
                 "private_network_blocked", "host_not_allowed", "timeout", "blocked_navigation"
             } else "unsupported_dynamic_page"
             raise ResearchFailure(mapped, exc.message, exc.retryable, exc.details) from exc
+        context = CURRENT_EXECUTION.get()
+        if context is not None and context.cancelled:
+            raise ResearchFailure('cancelled', 'Выполнение reader отменено.')
+        finish = self.browser_result_stage or self._finish_browser_snapshot
+        return finish(snapshot, url=url, locale=locale, region=region, catalog=catalog,
+                      adapter=adapter, offer_failure=state['offer_failure'],
+                      transport_failure_code=transport_failure.code if transport_failure else None)
+
+    def _finish_browser_snapshot(self, snapshot: dict, *, url: str, locale: str,
+                                 region: str, catalog: str, adapter: str,
+                                 offer_failure: dict | None = None,
+                                 transport_failure_code: str | None = None) -> dict:
         browser_fields = {
             "title": snapshot.get("title", ""),
             "main_text": snapshot.get("main_text", ""),
@@ -256,14 +273,14 @@ class BrowserResearchReader:
             "images": snapshot.get("images", []),
             "script_count": snapshot.get("script_count", 0),
             **({"catalog_item": snapshot["catalog_item"]} if snapshot.get("catalog_item") else {}),
-            **({"http_fallback_reason": transport_failure.code} if transport_failure else {}),
+            **({"http_fallback_reason": transport_failure_code} if transport_failure_code else {}),
         }
         refusal = _classify_refusal(snapshot.get("status") or 200, browser_fields, snapshot.get("url", url))
         if refusal:
             raise refusal
         if not str(browser_fields.get("main_text", "")).strip() and not browser_fields["json_ld"]:
-            if http_offer_failure:
-                raise http_offer_failure
+            if offer_failure:
+                raise ResearchFailure(**offer_failure)
             raise ResearchFailure("unsupported_dynamic_page", "Страница не предоставила извлекаемых публичных данных.")
         return _research_result(
             url=snapshot.get("url", url),

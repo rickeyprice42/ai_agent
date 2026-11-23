@@ -1,4 +1,4 @@
-"""Fixed public HTTP and parsing phase; browser and cache stay parent-owned."""
+"""Fixed HTTP extraction and offline browser-evidence processing profiles."""
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from ai_agent.tools.base import ToolResult
 from ai_agent.tools.hosted_http import _HTTPBroker
 from ai_agent.tools.http import HttpSandbox
-from ai_agent.tools.process_host import ProcessHandlerSpec
+from ai_agent.tools.process_host import HostedHandler, ProcessHandlerSpec
 from ai_agent.tools.research import BrowserResearchReader, ResearchFailure
 
 
@@ -51,6 +51,40 @@ class _DeferredBrowser:
         return True, None
 
 
+class HostedResearchBrowserResult:
+    """Pure evidence processing, with no network, live browser or user workspace."""
+    def __init__(self, reader, *, timeout_seconds):
+        self.reader, self.timeout_seconds = reader, timeout_seconds
+
+    def __call__(self, snapshot, **metadata):
+        with TemporaryDirectory(prefix='avelin-evidence-') as folder:
+            spec = ProcessHandlerSpec('ai_agent.tools.hosted_research:call_research_browser_result',
+                Path(folder), configuration={'max_fragments': self.reader.max_fragments})
+            frame = HostedHandler(spec, timeout_seconds=self.timeout_seconds)(
+                {'snapshot': snapshot, 'metadata': metadata})
+        if isinstance(frame, ToolResult):
+            error = frame.error
+            raise ResearchFailure(error.code if error else 'host_failed', frame.text(), False,
+                                  error.details if error else {})
+        if not isinstance(frame, dict):
+            raise ResearchFailure('host_protocol', 'Обработчик evidence вернул некорректный результат.')
+        if 'failure' in frame:
+            raise ResearchFailure(**frame['failure'])
+        if not isinstance(frame.get('result'), dict):
+            raise ResearchFailure('host_protocol', 'Обработчик evidence не вернул результат.')
+        return frame['result']
+
+
+def call_research_browser_result(arguments, configuration):
+    reader = BrowserResearchReader(HttpSandbox(), _DeferredBrowser(),
+                                  max_fragments=configuration['max_fragments'])
+    try:
+        return {'result': reader._finish_browser_snapshot(arguments['snapshot'], **arguments['metadata'])}
+    except ResearchFailure as exc:
+        return {'failure': {'code': exc.code, 'message': exc.message,
+                            'retryable': exc.retryable, 'details': exc.details}}
+
+
 def call_research_http(arguments, configuration):
     reader = BrowserResearchReader(
         HttpSandbox(timeout_seconds=configuration['socket_timeout'],
@@ -70,3 +104,4 @@ def enable_research_http_process_host(registry, reader):
         return
     tool = registry.get('research_read')
     reader.http_stage = HostedResearchHTTPStage(reader, timeout_seconds=tool.timeout_seconds)
+    reader.browser_result_stage = HostedResearchBrowserResult(reader, timeout_seconds=tool.timeout_seconds)

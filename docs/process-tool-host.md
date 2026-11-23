@@ -175,3 +175,26 @@ resident-memory/cgroup quota for Chromium; generic workers keep their old limit.
 Windows remains cooperative. The reader's final post-browser evidence processing,
 stateful and connector callbacks still need scoped migration; AVE-75 stays open.
 See `reports/qa/ave75-browser-host-2026-11-21.md` for verification and limits.
+
+## Offline browser evidence processing (23 November)
+
+Linux `research_read` now also reconstructs its final browser-result processing
+in a fixed, network-disabled Python worker: page refusals, catalog/offer checks,
+structured fields, safety markers and evidence fragments. Only the bounded JSON
+snapshot, normalized metadata and max-fragment scalar cross IPC. The worker has
+an empty read-only workspace; no browser object, live provider, credentials,
+database, user files or proxy bridge is passed. Generic memory/CPU/deadline/IPC
+limits apply to this pure-data stage.
+
+The parent retains cache/trace ownership. Cancellation is checked between browser
+completion and evidence startup, and again after preparing a detached cache copy,
+before publication. Host failures, excessive input/output and cancellation cannot
+cache partial results or silently fall back to processing in the service thread.
+The browser is not automatically rerun after evidence-processing failure. Windows
+keeps the direct implementation. Cache keys/TTL, result schema, verified prices,
+refusals and untrusted-source flags remain unchanged.
+
+This completes the process profiles for the expensive research extraction phases,
+not every callback in AVE-75. Bounded orchestration/IPC/cache bookkeeping remains
+in the parent. Stateful callbacks and provider/connector clients need separate
+profiles and outcome handling. See `reports/qa/ave75-evidence-host-2026-11-23.md`.
