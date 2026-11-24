@@ -103,7 +103,8 @@ class BudgetProvider:
                     self.pending_calls=[{'name':call.name,'arguments':call.arguments} for call in chunk.response.tool_calls]
                     if not output:output+=self.estimator.count_text(chunk.response.text)
                     output+=self.estimator.count_text(json.dumps([{'name':c.name,'arguments':c.arguments} for c in chunk.response.tool_calls],ensure_ascii=False))
-                if limit and run['usage'].get('tokens',0)+cost+output>limit:
+                charge = cost + output if actual is None else actual["input_tokens"] + actual["output_tokens"]
+                if limit and run['usage'].get('tokens',0)+charge>limit:
                     raise ProviderError('Исчерпан токенный бюджет автоматизации.','automation_budget')
                 yield chunk
         finally:
@@ -115,7 +116,10 @@ class BudgetProvider:
                 metrics["responses_with_usage"] = int(actual is not None)
                 metrics["responses_with_cache_usage"] = int(actual is not None and "cached_input_tokens" in actual)
                 metrics.update(actual or {})
-                self.database.update_task_run_usage(self.user_id,self.run_id,tokens=output,
+                # Input is reserved before dispatch. Reconcile that reservation
+                # when the provider confirms usage; otherwise retain the estimate.
+                reconciled = output if actual is None else actual["input_tokens"] + actual["output_tokens"] - cost
+                self.database.update_task_run_usage(self.user_id,self.run_id,tokens=reconciled,
                                                     stage_metrics=(self.stage, metrics))
 
 

@@ -105,6 +105,26 @@ class LLMAutomationTests(unittest.TestCase):
             self.assertEqual(ledger[stage]["responses_with_usage"], 1)
         self.assertEqual(ledger["1"]["repeated_input_estimate"], 0)
         self.assertGreater(ledger["2"]["stage_boundary_repeated_input_estimate"], 0)
+        self.assertEqual(database.get_task_run(self.user, run_id)["usage"]["tokens"], 76)
+
+    def test_provider_usage_over_budget_is_recorded_before_stopping(self):
+        from ai_agent.automation_runner import BudgetProvider
+        from ai_agent.llm.base import ProviderError
+        from ai_agent.types import Message, ModelStreamChunk
+        from types import SimpleNamespace
+
+        _, occurrence = self.occurrence({"max_tokens": 1000})
+        run_id = occurrence["task_run_id"]
+        database = self.service.database
+        base = SimpleNamespace(stream=lambda **_: iter([ModelStreamChunk(
+            response=ModelResponse(text="Fixture"),
+            usage={"input_tokens": 950, "output_tokens": 60},
+        )]))
+        provider = BudgetProvider(base, database, self.user, run_id, "gpt-6-luna")
+        with self.assertRaises(ProviderError) as raised:
+            next(provider.stream("Instructions", [Message("user", "History")], []))
+        self.assertEqual(raised.exception.code, "automation_budget")
+        self.assertEqual(database.get_task_run(self.user, run_id)["usage"]["tokens"], 1010)
 
     def test_parallel_usage_updates_preserve_all_increments(self):
         from concurrent.futures import ThreadPoolExecutor
