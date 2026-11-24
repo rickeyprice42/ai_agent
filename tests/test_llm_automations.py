@@ -83,6 +83,37 @@ class LLMAutomationTests(unittest.TestCase):
         self.assertEqual(self.service.process_automation_queue(),[])
         self.service._agents.clear();self.assertEqual(self.result(automation,occurrence)['result'],result['result'])
 
+    def test_openai_budget_changes_only_the_trailing_message(self):
+        from ai_agent.automation_runner import BudgetProvider
+        from ai_agent.llm.openai_provider import OpenAIProvider
+        from ai_agent.types import Message
+        from types import SimpleNamespace
+
+        database = self.service.database
+        _, occurrence = self.occurrence()
+        run_id = occurrence["task_run_id"]
+        adapter = OpenAIProvider(api_key="fixture")
+        requests = []
+
+        def stream(system_prompt, messages, tools):
+            requests.append(adapter._payload(system_prompt, messages, tools))
+            return iter(())
+
+        provider = BudgetProvider(SimpleNamespace(descriptor=adapter.descriptor, stream=stream),
+                                  database, self.user, run_id, "gpt-6-luna")
+        history = [Message("user", "Fixture")]
+        tools = [{"name": "z_tool"}, {"name": "a_tool"}]
+        list(provider.stream("Persistent rules", history, tools))
+        database.update_task_run_usage(self.user, run_id, steps=1)
+        list(provider.stream("Persistent rules", history, list(reversed(tools))))
+        first, second = requests
+        self.assertEqual(first["instructions"], second["instructions"])
+        self.assertEqual(first["tools"], second["tools"])
+        self.assertEqual(first["input"][:-1], second["input"][:-1])
+        self.assertEqual(second["input"][-1]["role"], "developer")
+        self.assertNotEqual(first["input"][-1], second["input"][-1])
+        self.assertEqual(len(history), 1)
+
     def test_provider_usage_and_repeated_context_are_saved_per_stage(self):
         from ai_agent.automation_runner import BudgetProvider
         from ai_agent.types import Message, ModelStreamChunk

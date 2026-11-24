@@ -24,6 +24,7 @@ from ai_agent.security import arguments_digest, redact_for_audit, tool_risk
 from ai_agent.tasks import TaskManager
 from ai_agent.task_reports import TaskReportService
 from ai_agent.tools.base import ToolRegistry
+from ai_agent.types import Message
 from ai_agent.run_cancellation import RunCancellation
 from ai_agent.worker_lifecycle import task_worker_stop
 
@@ -77,13 +78,20 @@ class BudgetProvider:
     def stream(self,system_prompt,messages,tools):
         run=self.database.get_task_run(self.user_id,self.run_id)
         remaining=max(0,run['budget'].get('max_steps',20)-run['usage'].get('steps',0))
-        system_prompt += (f'\nТекущий автоматический запуск: осталось {remaining} вызовов инструментов. '
+        system_prompt += ('\nПравила автоматического запуска. '
             'Не создавай незапрошенные файлы и не перечитывай собственный результат без конкретной причины. '
             'При остатке 3 и меньше завершай проверку и готовь итог по имеющимся подтверждённым данным. '
             'Если источников недостаточно, явно укажи пробелы. Не подменяй их догадками.')
+        budget_status = f'Текущий автоматический запуск: осталось {remaining} вызовов инструментов.'
         if remaining==0:
             tools=[]
-            system_prompt += '\nБюджет действий исчерпан. Сейчас верни итоговый ответ без инструментов с проверенными фактами, ссылками и ограничениями.'
+            budget_status += '\nБюджет действий исчерпан. Сейчас верни итоговый ответ без инструментов с проверенными фактами, ссылками и ограничениями.'
+        descriptor = getattr(self.base, "descriptor", None)
+        if getattr(descriptor, "name", None) == "openai":
+            messages = [*messages, Message(role="developer", content=budget_status)]
+            tools = sorted(tools, key=lambda tool: tool["name"])
+        else:
+            system_prompt += "\n" + budget_status
         cost=self.estimator.count_text(system_prompt)+sum(self.estimator.count_message(m) for m in messages)+self.estimator.count_text(json.dumps(tools,ensure_ascii=False))
         limit=run['budget'].get('max_tokens',100000)
         if limit and run['usage'].get('tokens',0)+cost>=limit:
@@ -176,7 +184,7 @@ class LLMAutomationRunner:
         agent.files.max_write_chars = max(agent.files.max_write_chars, 100000)
         if not getattr(agent,'_automation_tools_scoped',False):
             registry=ToolRegistry()
-            for name in self.allowed_tools:
+            for name in sorted(self.allowed_tools):
                 if agent.tools.has(name):
                     tool=agent.tools.get(name)
                     if name=='write_file':

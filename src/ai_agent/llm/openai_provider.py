@@ -103,7 +103,7 @@ class OpenAIProvider:
             if message.role == "tool" and message.tool_call_id:
                 input_items.append({"type": "function_call_output", "call_id": message.tool_call_id, "output": message.content})
                 continue
-            role = message.role if message.role in {"user", "assistant"} else "user"
+            role = message.role if message.role in {"user", "assistant", "developer"} else "user"
             content = message.content
             if message.role == "tool":
                 content = f"Tool output ({message.name or 'unknown'}):\n{content}"
