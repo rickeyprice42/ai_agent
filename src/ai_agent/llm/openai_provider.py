@@ -69,9 +69,13 @@ class OpenAIProvider:
                             yield ModelStreamChunk(delta=delta)
                     elif event_type == "response.completed":
                         completed = True
-                        yield ModelStreamChunk(response=self._model_response(event.get("response"), tools))
+                        data = event.get("response")
+                        yield ModelStreamChunk(response=self._model_response(data, tools), usage=_response_usage(data))
                         break
                     elif event_type in {"error", "response.failed", "response.incomplete"}:
+                        usage = _response_usage(event.get("response"))
+                        if usage is not None:
+                            yield ModelStreamChunk(usage=usage)
                         raise ProviderError("OpenAI прервала генерацию ответа.", "incomplete_stream")
         except ProviderError:
             raise
@@ -195,6 +199,21 @@ class OpenAIProvider:
         if isinstance(exc, (error.URLError, OSError)):
             return ProviderError("Не удалось подключиться к OpenAI.", "unavailable")
         return ProviderError("Не удалось получить ответ OpenAI.", "provider_error")
+
+
+def _response_usage(data: object) -> dict[str, int] | None:
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    input_tokens, output_tokens = usage.get("input_tokens"), usage.get("output_tokens")
+    if any(type(value) is not int or value < 0 for value in (input_tokens, output_tokens)):
+        return None
+    result = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    details = usage.get("input_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    if type(cached) is int and 0 <= cached <= input_tokens:
+        result["cached_input_tokens"] = cached
+    return result
 
 
 def _has_open_objects(schema: object) -> bool:

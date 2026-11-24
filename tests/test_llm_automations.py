@@ -83,6 +83,29 @@ class LLMAutomationTests(unittest.TestCase):
         self.assertEqual(self.service.process_automation_queue(),[])
         self.service._agents.clear();self.assertEqual(self.result(automation,occurrence)['result'],result['result'])
 
+    def test_provider_usage_and_repeated_context_are_saved_per_stage(self):
+        from ai_agent.automation_runner import BudgetProvider
+        from ai_agent.types import Message, ModelStreamChunk
+        from types import SimpleNamespace
+
+        database = self.service.database
+        _, occurrence = self.occurrence()
+        run_id = occurrence["task_run_id"]
+        usage = {"input_tokens": 31, "output_tokens": 7, "cached_input_tokens": 12}
+        base = SimpleNamespace(stream=lambda **_: iter([ModelStreamChunk(
+            response=ModelResponse(text="Fixture"), usage=usage,
+        )]))
+        for stage in (1, 2):
+            provider = BudgetProvider(base, database, self.user, run_id, "gpt-6-luna")
+            provider.stage = stage
+            list(provider.stream("Same instructions", [Message("user", "Same history")], []))
+        ledger = database.get_task_run(self.user, run_id)["usage"]["model_usage_by_stage"]
+        for stage in ("1", "2"):
+            self.assertEqual({key: ledger[stage][key] for key in usage}, usage)
+            self.assertEqual(ledger[stage]["responses_with_usage"], 1)
+        self.assertEqual(ledger["1"]["repeated_input_estimate"], 0)
+        self.assertGreater(ledger["2"]["stage_boundary_repeated_input_estimate"], 0)
+
     def test_parallel_usage_updates_preserve_all_increments(self):
         from concurrent.futures import ThreadPoolExecutor
 

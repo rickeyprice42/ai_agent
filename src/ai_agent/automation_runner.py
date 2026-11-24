@@ -5,6 +5,7 @@ replays an unknown turn: the run fails explicitly and a manual retry gets a
 fresh occurrence. Waiting chat approvals continue the same persisted thread.
 """
 from dataclasses import replace
+from collections import Counter
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -45,6 +46,33 @@ class BudgetProvider:
         self.base=base;self.database=database;self.user_id=user_id;self.run_id=run_id
         self.estimator=ModelTokenEstimator(model)
         self.pending_calls=[]
+        self.stage = 0
+
+    def _context_metrics(self, system_prompt, messages, tools):
+        def fingerprint(value):
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True).encode()
+            return sha256(encoded).hexdigest()
+
+        parts = [(fingerprint(["system", system_prompt]), self.estimator.count_text(system_prompt))]
+        parts.extend((fingerprint(["message", m.role, m.content, m.tool_call_id,
+                      [(c.name, c.arguments, c.call_id) for c in m.tool_calls], m.provider_items]),
+                      self.estimator.count_message(m)) for m in messages)
+        parts.extend((fingerprint(["tool", tool]), self.estimator.count_text(json.dumps(tool, ensure_ascii=False)))
+                     for tool in tools)
+        key = "task-request-context:" + self.run_id
+        previous = json.loads(self.database.get_metadata(key) or "{}")
+        available = Counter(previous.get("parts", []))
+        repeated = 0
+        for digest, tokens in parts:
+            if available[digest]:
+                available[digest] -= 1
+                repeated += tokens
+        self.database.set_metadata(key, json.dumps({"stage": self.stage, "parts": [digest for digest, _ in parts]}))
+        return {
+            "requests": 1,
+            "repeated_input_estimate": repeated,
+            "stage_boundary_repeated_input_estimate": repeated if previous.get("stage") != self.stage else 0,
+        }
 
     def stream(self,system_prompt,messages,tools):
         run=self.database.get_task_run(self.user_id,self.run_id)
@@ -61,9 +89,15 @@ class BudgetProvider:
         if limit and run['usage'].get('tokens',0)+cost>=limit:
             raise ProviderError('Исчерпан токенный бюджет автоматизации.','automation_budget')
         self.database.update_task_run_usage(self.user_id,self.run_id,tokens=cost)
+        metrics = self._context_metrics(system_prompt, messages, tools)
+        metrics["estimated_input_tokens"] = cost
+        actual = None
         output=0
+        stream = iter(self.base.stream(system_prompt=system_prompt,messages=messages,tools=tools))
         try:
-            for chunk in self.base.stream(system_prompt=system_prompt,messages=messages,tools=tools):
+            for chunk in stream:
+                if chunk.usage is not None:
+                    actual = chunk.usage
                 if chunk.delta:output+=self.estimator.count_text(chunk.delta)
                 if chunk.response is not None:
                     self.pending_calls=[{'name':call.name,'arguments':call.arguments} for call in chunk.response.tool_calls]
@@ -73,7 +107,16 @@ class BudgetProvider:
                     raise ProviderError('Исчерпан токенный бюджет автоматизации.','automation_budget')
                 yield chunk
         finally:
-            self.database.update_task_run_usage(self.user_id,self.run_id,tokens=output)
+            try:
+                close = getattr(stream, "close", None)
+                if close is not None:
+                    close()
+            finally:
+                metrics["responses_with_usage"] = int(actual is not None)
+                metrics["responses_with_cache_usage"] = int(actual is not None and "cached_input_tokens" in actual)
+                metrics.update(actual or {})
+                self.database.update_task_run_usage(self.user_id,self.run_id,tokens=output,
+                                                    stage_metrics=(self.stage, metrics))
 
 
 class LLMAutomationRunner:
@@ -189,6 +232,7 @@ class LLMAutomationRunner:
                 return
             try:
                 agent=self._agent(user_id,link,run)
+                agent.provider.stage = step.position if step else 0
                 prompt=self.step_prompt(task,step)
                 if type(self) is LLMAutomationRunner:
                     prompt += ('\n\nЭто текущий запуск уже настроенной автоматизации. Расписание сохранено сервером, повторно создавать его не нужно. Выполни материал для одного текущего запуска. '

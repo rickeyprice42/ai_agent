@@ -33,6 +33,7 @@ class ModelResponse:
 class ModelStreamChunk:
     delta: str = ""
     response: ModelResponse | None = None
+    usage: dict[str, int] | None = None
 
 
 @dataclass(slots=True)

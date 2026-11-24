@@ -3099,6 +3099,7 @@ class AvelinDatabase:
         failures: int = 0,
         tokens: int = 0,
         cost_micros: int = 0,
+        stage_metrics: tuple[int, dict[str, int]] | None = None,
     ) -> dict | None:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -3113,6 +3114,11 @@ class AvelinDatabase:
                 "steps": steps, "failures": failures, "tokens": tokens, "cost_micros": cost_micros,
             }.items():
                 usage[key] = max(0, int(usage.get(key, 0)) + int(delta))
+            if stage_metrics is not None:
+                stage, counters = stage_metrics
+                stage_usage = usage.setdefault("model_usage_by_stage", {}).setdefault(str(stage), {})
+                for key, value in counters.items():
+                    stage_usage[key] = stage_usage.get(key, 0) + value
             connection.execute(
                 "UPDATE task_runs SET usage_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?",
                 (json.dumps(usage, sort_keys=True), run_id, user_id),
