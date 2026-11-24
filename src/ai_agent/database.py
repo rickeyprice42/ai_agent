@@ -2873,6 +2873,10 @@ class AvelinDatabase:
                 JOIN tasks ON tasks.id = task_runs.task_id
                 WHERE task_runs.user_id = ? AND task_runs.state = 'queued'
                   AND (? IS NULL OR task_runs.id = ?)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM task_checkpoints c
+                      WHERE c.run_id = task_runs.id AND c.status = 'interrupted'
+                  )
                   {managed_filter}
                 ORDER BY tasks.priority ASC, task_runs.created_at ASC
                 LIMIT 1
@@ -2938,8 +2942,14 @@ class AvelinDatabase:
             current=connection.execute('SELECT * FROM task_runs WHERE id=? AND user_id=?',(run_id,user_id)).fetchone()
             if current is None:return None
             if worker_id is not None and current['worker_id']!=worker_id:return None
-            if state=='queued' and current['state']=='paused':
-                unknown=connection.execute("SELECT 1 FROM task_checkpoints WHERE run_id=? AND status IN ('started','cancelled','interrupted') LIMIT 1",(run_id,)).fetchone()
+            if state == 'queued':
+                unknown = connection.execute(
+                    """SELECT 1 FROM task_checkpoints
+                       WHERE run_id = ? AND (status = 'interrupted'
+                           OR (? = 'paused' AND status IN ('started', 'cancelled')))
+                       LIMIT 1""",
+                    (run_id, current['state']),
+                ).fetchone()
                 if unknown:
                     raise ValueError('Результат прерванного действия неизвестен. Требуется проверка перед продолжением.')
             if current['control_requested']:

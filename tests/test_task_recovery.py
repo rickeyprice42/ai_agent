@@ -20,6 +20,51 @@ class TaskRecoveryTests(unittest.TestCase):
     setUp = fixtures.LLMAutomationTests.setUp
     tearDown = fixtures.LLMAutomationTests.tearDown
 
+    def test_mcp_accepted_without_reply_cannot_be_replayed_after_restart(self):
+        from types import SimpleNamespace
+        from ai_agent.connectors import ConnectorDescriptor, McpClient
+        from ai_agent.executor import ExecutionDecision
+
+        accepted = []
+
+        def request(method, params, timeout, cancellation):
+            if method == "tools/list":
+                return {"tools": [{"name": "lookup", "inputSchema": {"type": "object"},
+                                   "annotations": {"readOnlyHint": True}}]}
+            if method == "tools/call":
+                accepted.append(params["name"])
+                raise TimeoutError("simulated lost response after acceptance")
+            return {}
+
+        def register(agent):
+            agent.connectors.register(McpClient(ConnectorDescriptor("fixture", "Fixture", "Test"), request))
+            agent.executor.action_planner = SimpleNamespace(
+                decide=lambda *args: ExecutionDecision("connector_fixture_lookup", {}),
+            )
+
+        agent = self.service.agent_for_user(self.user)
+        register(agent)
+        manager = TaskManager(self.service.database, self.user)
+        task = manager.create_task("Accepted request fixture", steps=["Call connector"])
+        run = manager.task_run(task.id)
+        agent.executor.execute_next_step(run_id=run["id"])
+        checkpoint, = manager.checkpoints(run["id"])
+        self.assertEqual(checkpoint["status"], "interrupted")
+        self.assertTrue(checkpoint["evidence"]["outcome_unknown"])
+        self.assertFalse(checkpoint["evidence"]["verified"])
+        self.assertEqual(accepted, ["lookup"])
+
+        self.service._drop_user_agents(self.user)
+        restarted = self.service.agent_for_user(self.user)
+        register(restarted)
+        with self.assertRaises(ValueError):
+            manager.set_run_state(run["id"], "queued")
+        # A row already queued by an older release must also be ineligible.
+        with self.service.database.connect() as connection:
+            connection.execute("UPDATE task_runs SET state='queued' WHERE id=?", (run["id"],))
+        restarted.executor.execute_next_step(run_id=run["id"])
+        self.assertEqual(accepted, ["lookup"])
+
     def test_cancelled_start_rolls_back_task_and_first_step(self):
         manager = TaskManager(self.service.database, self.user)
         task = manager.create_task("Start fixture", steps=["First", "Second"])
