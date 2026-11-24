@@ -3100,15 +3100,19 @@ class AvelinDatabase:
         tokens: int = 0,
         cost_micros: int = 0,
     ) -> dict | None:
-        current = self.get_task_run(user_id, run_id)
-        if current is None:
-            return None
-        usage = dict(current["usage"])
-        for key, delta in {
-            "steps": steps, "failures": failures, "tokens": tokens, "cost_micros": cost_micros,
-        }.items():
-            usage[key] = max(0, int(usage.get(key, 0)) + int(delta))
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT usage_json FROM task_runs WHERE id = ? AND user_id = ?",
+                (run_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            usage = {**_default_task_usage(), **_load_json_dict(row["usage_json"])}
+            for key, delta in {
+                "steps": steps, "failures": failures, "tokens": tokens, "cost_micros": cost_micros,
+            }.items():
+                usage[key] = max(0, int(usage.get(key, 0)) + int(delta))
             connection.execute(
                 "UPDATE task_runs SET usage_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?",
                 (json.dumps(usage, sort_keys=True), run_id, user_id),

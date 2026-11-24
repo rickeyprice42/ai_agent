@@ -83,6 +83,23 @@ class LLMAutomationTests(unittest.TestCase):
         self.assertEqual(self.service.process_automation_queue(),[])
         self.service._agents.clear();self.assertEqual(self.result(automation,occurrence)['result'],result['result'])
 
+    def test_parallel_usage_updates_preserve_all_increments(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        database = self.service.database
+        _, occurrence = self.occurrence()
+        run_id = occurrence["task_run_id"]
+        before = database.get_task_run(self.user, run_id)["usage"]
+
+        def record(_):
+            database.update_task_run_usage(self.user, run_id, tokens=3, steps=1)
+
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            list(workers.map(record, range(32)))
+        usage = database.get_task_run(self.user, run_id)["usage"]
+        self.assertEqual(usage["tokens"], before["tokens"] + 96)
+        self.assertEqual(usage["steps"], before["steps"] + 32)
+
     def test_token_budget_rejects_before_provider_call(self):
         automation,occurrence=self.occurrence({'max_tokens':1})
         self.service.process_automation_queue()
