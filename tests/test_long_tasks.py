@@ -23,8 +23,10 @@ class LongTaskTests(unittest.TestCase):
     setUp = fixtures.LLMAutomationTests.setUp
     tearDown = fixtures.LLMAutomationTests.tearDown
 
-    def draft(self, **changes):
+    def draft(self, *, original_request=None, **changes):
         thread = self.service.database.create_chat_thread(self.user,title='Game project')
+        if original_request is not None:
+            self.service.database.add_message('user', original_request, thread_id=thread['id'])
         data = dict(title='Мини-игра: первая бета',goal='Создай маленькую игру от концепта до проверенной браузерной бета-версии.',
             steps=['Сохрани концепт игры в concept.md и проверь файл.', 'Создай самостоятельную браузерную игру index.html и проверь файл.', 'Проверь готовые файлы и подготовь beta-notes.md.'],
             acceptance_checks=['Игра запускается без сети и имеет понятные правила.','Файлы существуют и проверены инструментами.'])
@@ -122,7 +124,8 @@ class LongTaskTests(unittest.TestCase):
             self.assertEqual(result.json()['run_id'],client.post(endpoint,headers=headers,json=decision).json()['run_id'])
 
     def test_three_phase_file_work_survives_restart_and_reuses_verified_context(self):
-        plan = self.approve(self.draft())
+        goal = 'Создай маленькую игру от концепта до проверенной браузерной бета-версии.'
+        plan = self.approve(self.draft(goal=goal, original_request=goal))
         contents = [('concept.md','# Concept\nAvoid the moving blocks.'),('index.html','<!doctype html><title>Beta</title><button>Play</button>'),('beta-notes.md','# Beta\nThree verified files.')]
         for index,(name,content) in enumerate(contents):
             self.provider = Provider([ModelResponse(tool_calls=[ToolCall('write_file',{'path':name,'content':content})]),completed_report(),ModelResponse(text=f'Этап {index+1} выполнен; файл сохранён.')])
@@ -133,15 +136,18 @@ class LongTaskTests(unittest.TestCase):
             self.assertEqual(current['run']['state'],'completed' if index==2 else 'queued')
             self.assertEqual(sum(s['status']=='completed' for s in current['task']['steps']),index+1)
             self.assertTrue(self.service.workspace_file_path(self.user,f"outputs/tasks/{plan['id']}/{name}").is_file())
+            text = self.provider.inputs[0]['messages'][-1].content
+            self.assertEqual(text.count(plan['goal']), 1)
+            self.assertIn(plan['acceptance_checks'][0], text)
             if index:
-                text = self.provider.inputs[0]['messages'][-1].content
                 self.assertIn('Завершённые этапы',text)
                 self.assertIn('concept.md',text)
                 self.assertFalse(any('Avoid the moving blocks.' in message.content for message in self.provider.inputs[0]['messages'] if message.role=='tool'))
         self.assertEqual(self.service.process_long_task_queue(),[])
 
     def test_next_phase_uses_verified_handoff_without_replaying_large_old_tool_outputs(self):
-        plan = self.approve(self.draft())
+        original_request = 'Сделай офлайн-игру с управлением стрелками и сохрани исходники.'
+        plan = self.approve(self.draft(original_request=original_request))
         large = 'OLD_PHASE_CONTENT_' * 1000
         self.provider = Provider([ModelResponse(tool_calls=[ToolCall('write_file',{'path':'concept.md','content':large})]),completed_report(),ModelResponse(text='Концепт сохранён в concept.md.')])
         self.service.process_long_task_queue()
@@ -152,6 +158,8 @@ class LongTaskTests(unittest.TestCase):
         request = self.provider.inputs[0]
         self.assertNotIn('OLD_PHASE_CONTENT_', '\n'.join(m.content for m in request['messages']))
         self.assertIn('concept.md',request['messages'][-1].content)
+        self.assertIn(original_request, request['messages'][-1].content)
+        self.assertIn(plan['goal'], request['messages'][-1].content)
         current_rows = self.service.database.list_messages(plan['work_thread_id'])
         self.assertTrue(all(any(new['id']==old['id'] and new['content']==old['content'] for new in current_rows) for old in old_rows))
 

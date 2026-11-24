@@ -303,8 +303,11 @@ class LongTaskRunner(LLMAutomationRunner):
         with self.database.connect() as connection:
             row = connection.execute('SELECT id,checks_json,request_text FROM long_task_plans WHERE task_id=?',(task.id,)).fetchone()
         checks = json.loads(row['checks_json'])
+        request = row['request_text']
+        goal = f"Общая утверждённая цель: {task.description}\n" if task.description != request else ""
+        original = f"Исходная просьба пользователя (дословно):\n{request}\n" if request else ""
         completed = '\n'.join(f"{s.position}. {s.description}: {(s.result or 'завершён')[:600]}" for s in task.steps if s.status=='completed')
-        return (f"Общая утверждённая цель: {task.description}\nИсходная просьба пользователя (дословно):\n{row['request_text'] or task.description}\n"
+        return (goal + original
             + "Пользователь уже утвердил этот план кнопкой. Условие дождаться утверждения выполнено; доступны только инструменты утверждённой области.\nПроверки результата: " + '; '.join(checks)
             + f"\nЗавершённые этапы (выдержки; полные результаты сохранены в истории):\n{completed or 'Пока нет'}\nТекущий этап {step.position}: {step.description}\n\n"
             + (f"Сохранённый прогресс текущего этапа, который ещё НЕ завершён:\n{step.result}\nПродолжи с этого места, не повторяя уже подтверждённые действия.\n" if step.result else '')
