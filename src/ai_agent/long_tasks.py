@@ -195,6 +195,7 @@ class LongTaskRunner(LLMAutomationRunner):
 
     def _agent(self,user_id,link,run):
         agent = super()._agent(user_id,link,run)
+        agent.provider.can_retry_incomplete_stream = lambda: not agent.tool_cancellation.is_set()
         agent.context.history_after_message_id = self.database.get_metadata('long-task-context-floor:'+run['id']) or None
         agent.context.turn_reserve_tokens = min(8192,max(2048,agent.context.context_window_tokens//4))
         agent.long_task_step_report = None

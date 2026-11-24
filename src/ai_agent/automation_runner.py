@@ -48,6 +48,8 @@ class BudgetProvider:
         self.estimator=ModelTokenEstimator(model)
         self.pending_calls=[]
         self.stage = 0
+        self.can_retry_incomplete_stream = None
+        self._retried_incomplete_stream = False
 
     def _context_metrics(self, system_prompt, messages, tools):
         def fingerprint(value):
@@ -76,6 +78,27 @@ class BudgetProvider:
         }
 
     def stream(self,system_prompt,messages,tools):
+        if self.can_retry_incomplete_stream is None or self._retried_incomplete_stream:
+            yield from self._stream_attempt(system_prompt,messages,tools)
+            return
+        # A long task may retry generation before exposing any part of this
+        # response to the agent. Earlier tool results stay in the same request.
+        for attempt in range(2):
+            chunks = []
+            try:
+                chunks.extend(self._stream_attempt(system_prompt,messages,tools))
+            except ProviderError as exc:
+                if (attempt == 0 and exc.code == 'incomplete_stream'
+                        and not any(chunk.response is not None for chunk in chunks)
+                        and self.can_retry_incomplete_stream()):
+                    self._retried_incomplete_stream = True
+                    continue
+                yield from chunks
+                raise
+            yield from chunks
+            return
+
+    def _stream_attempt(self,system_prompt,messages,tools):
         run=self.database.get_task_run(self.user_id,self.run_id)
         remaining=max(0,run['budget'].get('max_steps',20)-run['usage'].get('steps',0))
         system_prompt += ('\nПравила автоматического запуска. '

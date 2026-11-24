@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'src'))
 from ai_agent.long_tasks import LongTaskPlans, LongTaskRunner, PlanConflict, daily_long_task_reports
 from ai_agent.llm.base import ProviderError
-from ai_agent.types import ModelResponse, ToolCall
+from ai_agent.types import ModelResponse, ModelStreamChunk, ToolCall
 from tests import test_llm_automations as fixtures
 from backend.auth import issue_session_token
 from backend.main import app
@@ -35,6 +35,44 @@ class LongTaskTests(unittest.TestCase):
 
     def approve(self,plan):
         return LongTaskPlans(self.service.database,self.user).decide(plan['id'],'approved',plan['revision'],plan['digest'],'Asia/Irkutsk')
+
+    def test_interrupted_model_round_retries_without_replaying_completed_write(self):
+        class InterruptedProvider(Provider):
+            def stream(self, **kwargs):
+                if len(self.inputs) == 1:
+                    self.inputs.append(kwargs)
+                    yield ModelStreamChunk(delta='Незавершённый фрагмент.')
+                    raise ProviderError('Поток оборвался.', 'incomplete_stream')
+                yield from super().stream(**kwargs)
+
+        plan = self.approve(self.draft())
+        self.provider = InterruptedProvider([
+            ModelResponse(tool_calls=[ToolCall('write_file', {'path':'concept.md','content':'# Concept'})]),
+            completed_report(),
+            ModelResponse(text='Этап завершён.'),
+        ])
+        self.service.process_long_task_queue()
+        current = LongTaskPlans(self.service.database,self.user).get(plan['id'])
+        self.assertEqual(current['run']['state'], 'queued')
+        self.assertEqual(current['task']['steps'][0]['status'], 'completed')
+        self.assertEqual(self.provider.inputs[1], self.provider.inputs[2])
+        self.assertEqual(current['run']['usage']['model_usage_by_stage']['1']['requests'], 4)
+        checkpoints = self.service.database.list_task_checkpoints(self.user,plan['run_id'])
+        self.assertEqual(sum(cp['tool_name']=='write_file' for cp in checkpoints), 1)
+        rows = self.service.database.list_messages(plan['work_thread_id'])
+        self.assertFalse(any('Незавершённый фрагмент.' in row['content'] for row in rows))
+
+    def test_second_stream_interruption_stops_the_run(self):
+        plan = self.approve(self.draft())
+        self.provider = Provider([
+            ProviderError('Первый обрыв.', 'incomplete_stream'),
+            ProviderError('Повторный обрыв.', 'incomplete_stream'),
+        ])
+        self.service.process_long_task_queue()
+        current = LongTaskPlans(self.service.database,self.user).get(plan['id'])
+        self.assertEqual(current['run']['state'], 'failed')
+        self.assertEqual(current['run']['failure_reason'], 'Повторный обрыв.')
+        self.assertEqual(current['run']['usage']['model_usage_by_stage']['1']['requests'], 2)
 
     def test_draft_does_not_create_task_or_execute_model_and_approval_is_idempotent(self):
         plan = self.draft()

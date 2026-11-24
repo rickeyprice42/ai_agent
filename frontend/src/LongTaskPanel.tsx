@@ -2,12 +2,43 @@ import { useEffect, useState } from "react";
 import "./LongTaskPanel.css";
 import { TaskRecoveryPanel } from "./TaskRecoveryPanel";
 
+type StageUsage = {
+  requests?: number;
+  responses_with_usage?: number;
+  responses_with_cache_usage?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cached_input_tokens?: number;
+};
+
 type Plan = { id: string; title: string; goal: string; steps: string[]; acceptance_checks: string[]; status: string;
   revision: number; digest: string; budget: Record<string, number>; work_thread_id?: string;
-  run?: { id: string; state: string; control_requested?: string | null; failure_reason?: string; usage: Record<string, number> }; task?: { steps: { id: string; description: string; status: string }[] };
+  run?: { id: string; state: string; control_requested?: string | null; failure_reason?: string; usage?: { model_usage_by_stage?: Record<string, StageUsage> } }; task?: { steps: { id: string; description: string; status: string }[] };
   artifacts?: { name: string; path: string }[]; result?: string };
 type Props = { token: string; threadId: string; onOpenChat: (id: string) => void; disabled?: boolean };
 const labels: Record<string, string> = { draft: "План на согласование", approved: "План утверждён", queued: "В очереди", running: "В работе", waiting_approval: "Нужно разрешение", paused: "Приостановлено", completed: "Этапы выполнены", failed: "Нужна проверка", cancelled: "Отменено", rejected: "План отклонён" };
+
+function TaskTokenUsage({ stages }: { stages?: Record<string, StageUsage> }) {
+  const entries = Object.entries(stages ?? {});
+  const sum = (key: keyof StageUsage) => entries.reduce((total, [, usage]) => total + (usage[key] ?? 0), 0);
+  const requests = sum("requests");
+  const measured = sum("responses_with_usage");
+  const cacheMeasured = sum("responses_with_cache_usage");
+  const format = (value: number) => value.toLocaleString("ru-RU");
+  const counts = (usage: StageUsage) => `Входные ${format(usage.input_tokens ?? 0)} · выходные ${format(usage.output_tokens ?? 0)}`
+    + ((usage.responses_with_cache_usage ?? 0) > 0 ? ` · из входных в кеше ${format(usage.cached_input_tokens ?? 0)}` : "");
+  if (!measured) return <p className="muted">Провайдер пока не передал данные о расходе токенов.</p>;
+  return <details>
+    <summary>Расход токенов · {format(sum("input_tokens") + sum("output_tokens"))}{measured < requests ? " (частичный)" : ""}</summary>
+    <p>{counts({ input_tokens: sum("input_tokens"), output_tokens: sum("output_tokens"),
+      cached_input_tokens: sum("cached_input_tokens"), responses_with_cache_usage: cacheMeasured })}</p>
+    <p className="muted">Данные провайдера за {measured} из {requests} запросов модели в этом запуске.
+      {cacheMeasured > 0 && cacheMeasured < measured ? ` Данные о кеше получены для ${cacheMeasured} из ${measured} ответов.` : ""}</p>
+    {entries.length > 1 ? <ul>{entries.map(([stage, usage]) => <li key={stage}>
+      Этап {stage} · {usage.responses_with_usage ? counts(usage) : "данные о токенах отсутствуют"}
+    </li>)}</ul> : null}
+  </details>;
+}
 
 export function LongTaskPanel({ token, threadId, onOpenChat, disabled }: Props) {
   const [plans, setPlans] = useState<Plan[]>([]);
@@ -58,6 +89,7 @@ export function LongTaskPanel({ token, threadId, onOpenChat, disabled }: Props) 
           <p className="muted">До {plan.budget.max_steps} действий · до {Math.round(plan.budget.max_seconds / 60)} минут активной работы · до {plan.budget.max_tokens.toLocaleString("ru-RU")} оценочных токенов. Внешние действия требуют отдельных разрешений. Работа продолжается, пока сервер включён.</p>
         </details>
         {plan.run?.failure_reason ? <p className="long-task-notice">{plan.run.failure_reason}</p> : null}
+        {plan.run ? <TaskTokenUsage stages={plan.run.usage?.model_usage_by_stage} /> : null}
         {plan.run?.state === "running" ? <TaskRecoveryPanel token={token} runId={plan.run.id} onRecovered={() => void load()} /> : null}
         {state === "completed" ? <p className="long-task-notice">Этапы завершены по журналу работы. Проверьте итоговые файлы и критерии приёмки в диалоге.</p> : null}
         <div className="long-task-actions">
